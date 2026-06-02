@@ -1,0 +1,71 @@
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+
+const CONFIG_DIR = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), ".gateway-plugin");
+export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
+
+const DEFAULT_CONFIG = { profiles: {}, defaultProfile: null, reviewProfile: null, taskProfile: null };
+
+export function loadConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+  } catch {
+    return { ...DEFAULT_CONFIG };
+  }
+}
+
+export function saveConfig(config) {
+  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+}
+
+export function resolveProfile(name, config) {
+  const cfg = config || loadConfig();
+  const key = name || cfg.defaultProfile;
+  if (!key || !cfg.profiles[key]) {
+    throw new Error(`Profile "${key || "(none)"}" not found. Run /gateway:setup to configure.`);
+  }
+  return { name: key, ...cfg.profiles[key] };
+}
+
+export function resolveReviewProfile(config) {
+  const cfg = config || loadConfig();
+  return resolveProfile(cfg.reviewProfile || cfg.defaultProfile, cfg);
+}
+
+export function resolveTaskProfile(config) {
+  const cfg = config || loadConfig();
+  const profile = resolveProfile(cfg.taskProfile || cfg.defaultProfile, cfg);
+  if (profile.kind !== "claude-gateway") {
+    throw new Error(`Profile "${profile.name}" is kind "${profile.kind}" — task delegation requires "claude-gateway".`);
+  }
+  return profile;
+}
+
+export function addProfile(config, name, profile) {
+  return { ...config, profiles: { ...config.profiles, [name]: profile } };
+}
+
+export function removeProfile(config, name) {
+  const { [name]: _, ...rest } = config.profiles;
+  const updated = { ...config, profiles: rest };
+  if (updated.defaultProfile === name) updated.defaultProfile = null;
+  if (updated.reviewProfile === name) updated.reviewProfile = null;
+  if (updated.taskProfile === name) updated.taskProfile = null;
+  return updated;
+}
+
+export function listProfiles(config) {
+  return Object.entries(config.profiles).map(([name, p]) => ({ name, ...p }));
+}
+
+export function validateProfile(profile) {
+  const errors = [];
+  if (!["claude-gateway", "openai-chat"].includes(profile.kind)) {
+    errors.push(`Invalid kind "${profile.kind}". Must be "claude-gateway" or "openai-chat".`);
+  }
+  if (!profile.baseUrl) errors.push("baseUrl is required.");
+  if (!profile.defaultModel) errors.push("defaultModel is required.");
+  return { valid: errors.length === 0, errors };
+}

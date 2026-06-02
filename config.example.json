@@ -1,0 +1,25 @@
+{
+  "profiles": {
+    "ollama-local": {
+      "kind": "claude-gateway",
+      "baseUrl": "http://YOUR_OLLAMA_HOST:11434",
+      "defaultModel": "minimax-m3:cloud",
+      "authToken": "ollama"
+    },
+    "my-gateway": {
+      "kind": "claude-gateway",
+      "baseUrl": "http://YOUR_GATEWAY_HOST:PORT",
+      "defaultModel": "deepseek-v4-pro:cloud",
+      "apiKey": "sk-YOUR_API_KEY"
+    },
+    "my-gateway-fast": {
+      "kind": "openai-chat",
+      "baseUrl": "http://YOUR_GATEWAY_HOST:PORT",
+      "defaultModel": "deepseek-v4-flash:cloud",
+      "apiKey": "sk-YOUR_API_KEY"
+    }
+  },
+  "defaultProfile": "ollama-local",
+  "reviewProfile": null,
+  "taskProfile": null
+}

@@ -29,6 +29,15 @@ Reiniciar Claude Code para que aparezcan los comandos.
 
 ## Configuración inicial
 
+Hay un `config.example.json` en la raíz del repo con la estructura completa. Para usarlo:
+
+```bash
+cp config.example.json ~/.gateway-plugin/config.json
+# editar con tus URLs, modelos y keys
+```
+
+O configurar vía comandos (ver abajo).
+
 ### Agregar un perfil Ollama
 
 ```

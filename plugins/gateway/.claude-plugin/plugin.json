@@ -1,0 +1,8 @@
+{
+  "name": "gateway",
+  "version": "0.1.0",
+  "description": "Route reviews and tasks to Ollama, DeepSeek, MiniMax and other OpenAI-compatible endpoints",
+  "author": {
+    "name": "elmaxi"
+  }
+}

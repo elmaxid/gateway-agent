@@ -1,0 +1,21 @@
+{
+  "name": "agent-gateway",
+  "owner": {
+    "name": "elmaxi"
+  },
+  "metadata": {
+    "description": "Delegate code reviews and tasks to alternative LLM endpoints (Ollama, custom gateways) via OpenAI-compatible API",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "gateway",
+      "description": "Route reviews and tasks to Ollama, DeepSeek, MiniMax and other OpenAI-compatible endpoints",
+      "version": "0.1.0",
+      "author": {
+        "name": "elmaxi"
+      },
+      "source": "./plugins/gateway"
+    }
+  ]
+}

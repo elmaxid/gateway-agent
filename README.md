@@ -35,30 +35,62 @@ La diferencia clave con otros plugins: no hay broker ni servidor. Reviews van po
 
 Si codex no está instalado, fallback automático a claude.
 
+## Requisitos
+
+- **Node.js** ≥ 18.18.0
+- **Claude Code CLI** (cualquier versión con soporte de plugins)
+- Al menos un endpoint compatible con OpenAI (Ollama, gateway custom, etc.)
+- **Opcional:** [Codex CLI](https://github.com/openai/codex) para el harness codex (si no está, usa claude subprocess como fallback)
+
 ## Instalación
 
+### 1. Clonar el repositorio
+
 ```bash
-claude plugin marketplace add /opt/agent-plugin-cc/
+# Desde Gitea (red interna)
+git clone ssh://git@internal-git.example.com/redacted/gateway-agent.git
+
+# O la ruta que corresponda a tu remote
+cd gateway-agent
+```
+
+### 2. Registrar el plugin en Claude Code
+
+```bash
+# Usar la ruta absoluta donde clonaste el repo
+claude plugin marketplace add /ruta/a/gateway-agent/
 claude plugin install gateway@agent-gateway
 ```
 
-Reiniciar Claude Code para que aparezcan los comandos.
+### 3. Reiniciar Claude Code
 
-**Prerequisitos:**
-- Node.js ≥ 18.18.0
-- Claude Code CLI
-- Al menos un endpoint compatible con OpenAI (Ollama, gateway custom, etc.)
+Cerrar y abrir Claude Code para que cargue los comandos `/gateway:*`.
+
+### 4. Verificar instalación
+
+Dentro de Claude Code:
+```
+/gateway:setup list
+```
+
+Debe responder (vacío si es primera vez, o con perfiles si ya configuraste).
 
 ## Configuración inicial
 
-Hay un `config.example.json` en la raíz del repo con la estructura completa. Para usarlo:
+Hay un `config.example.json` en la raíz del repo con la estructura completa. Dos formas de configurar:
+
+### Opción A: copiar config de ejemplo
 
 ```bash
+mkdir -p ~/.gateway-plugin
 cp config.example.json ~/.gateway-plugin/config.json
+chmod 600 ~/.gateway-plugin/config.json
 # editar con tus URLs, modelos y keys
 ```
 
-O configurar vía comandos (ver abajo).
+### Opción B: configurar vía comandos (recomendado)
+
+Desde Claude Code, usar `/gateway:setup add` para cada endpoint (ver ejemplos abajo).
 
 ### Agregar un perfil Ollama
 
@@ -419,7 +451,8 @@ Formato: una línea por entrada con timestamp ISO.
 ### Los comandos `/gateway:*` no aparecen
 
 ```bash
-claude plugin marketplace add /opt/agent-plugin-cc/
+# Usar la ruta donde clonaste el repo
+claude plugin marketplace add /ruta/a/gateway-agent/
 claude plugin install gateway@agent-gateway
 # Reiniciar Claude Code
 ```

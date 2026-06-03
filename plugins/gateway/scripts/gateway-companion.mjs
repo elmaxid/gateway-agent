@@ -858,23 +858,25 @@ async function handleDebate(argv) {
     throw new Error("Debate requires at least 2 profiles. Use --models profile1,profile2 or configure multiple profiles.");
   }
 
-  const profiles = profileNames.map(name => resolveProfile(name, config));
-  const synthesizerProfile = options.synthesizer
-    ? resolveProfile(options.synthesizer, config)
-    : profiles[0];
+  for (const name of profileNames) {
+    resolveProfile(name, config);
+  }
 
   const rounds = options.rounds ? Number(options.rounds) : 3;
 
   const result = await runDebate({
     question,
-    profiles,
+    profileNames,
     rounds,
-    synthesizerProfile,
-    onProgress: (msg) => console.error(msg)
+    synthesizerProfile: options.synthesizer || profileNames[0],
+    onProgress: (msg) => console.error(msg),
+    json: options.json
   });
 
   if (options.json) {
     outputResult(result, true);
+  } else if (typeof result === "string") {
+    console.log(result);
   } else {
     console.log(renderDebateOutput(result));
   }

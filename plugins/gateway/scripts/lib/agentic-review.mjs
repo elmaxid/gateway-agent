@@ -144,11 +144,17 @@ async function dispatchTool(name, args, cwd, repoRoot) {
     switch (name) {
       case "read_file": {
         const { path: filePath, start_line, end_line } = args;
-        const resolved = path.resolve(repoRoot, filePath);
-        if (!resolved.startsWith(repoRoot + path.sep) && resolved !== repoRoot) {
+        const realRoot = await fs.realpath(repoRoot);
+        let realPath;
+        try {
+          realPath = await fs.realpath(path.resolve(realRoot, filePath));
+        } catch {
+          return "Error: path not found";
+        }
+        if (realPath !== realRoot && !realPath.startsWith(realRoot + path.sep)) {
           return "Error: path outside repository";
         }
-        const buf = await fs.readFile(resolved);
+        const buf = await fs.readFile(realPath);
         for (let i = 0; i < Math.min(buf.length, 512); i++) {
           if (buf[i] === 0) return "Error: binary file, cannot review";
         }

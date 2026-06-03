@@ -26,6 +26,10 @@ Task invocation:
 - Options:
   - `--profile NAME` -- use a named gateway profile (must be configured via /gateway:setup)
   - `--model MODEL` -- override the model for this task (e.g. deepseek-r1, minimax-01)
+  - `--harness claude|codex` -- select execution harness (default: claude)
+    - `claude` -- stateless subprocess via `claude -p --bare` (fast, zero overhead)
+    - `codex` -- stateful subprocess via `codex exec --json` (thread persistence, reasoning traces, real sandbox)
+    - If codex is not installed, falls back to claude automatically
   - `--background` -- run the task in the background, return immediately with a job id
   - `--wait` -- run in foreground, block until completion (default)
   - `--write` -- allow the task to make file edits (default)

@@ -4,14 +4,36 @@ Claude Code plugin que delega code reviews y tareas a endpoints LLM alternativos
 
 ## Qué hace
 
-Agrega 7 comandos `/gateway:*` a Claude Code. Dos operaciones principales:
+Agrega 9 comandos `/gateway:*` a Claude Code. Cuatro operaciones principales:
 
 | Operación | Backend | Cuándo usar |
 |-----------|---------|-------------|
 | **Review** | HTTP directo a `/v1/chat/completions` | Revisar código rápido, sin overhead |
-| **Task** | Subprocess `claude -p --bare` con `ANTHROPIC_BASE_URL` personalizado | Delegación completa con herramientas (lectura/escritura de archivos, bash) |
+| **Task** | Subprocess `claude -p` o `codex exec` (dual-harness) | Delegación completa con herramientas |
+| **Work** | Auto-routing → persona especializada | Detecta tipo de tarea por keywords |
+| **Debate** | HTTP paralelo multi-modelo | Posiciones independientes + crítica cruzada + síntesis |
 
-La diferencia clave con otros plugins: no hay broker ni servidor. Reviews van por HTTP directo. Tasks spawnan un proceso Claude aislado apuntando al endpoint configurado.
+La diferencia clave con otros plugins: no hay broker ni servidor. Reviews van por HTTP directo. Tasks spawnan un proceso aislado apuntando al endpoint configurado.
+
+### Personas especializadas
+
+4 subagentes con prompt-shaping por dominio y harness óptimo:
+
+| Persona | Dominio | Harness | Modo |
+|---------|---------|---------|------|
+| `gateway-coder` | Implementación, refactoring | codex (stateful) | write |
+| `gateway-debugger` | Bugs, test failures | codex (stateful) | write |
+| `gateway-reviewer` | Code review, audit | claude (stateless) | read-only |
+| `gateway-researcher` | Research, exploración | claude (stateless) | read-only |
+
+### Dual-harness
+
+| Harness | Comando | Ventaja |
+|---------|---------|---------|
+| **claude** | `claude -p --bare` | Stateless, rápido, 0 overhead |
+| **codex** | `codex exec --json` | Threads persistentes, reasoning traces, sandbox real |
+
+Si codex no está instalado, fallback automático a claude.
 
 ## Instalación
 
@@ -75,6 +97,13 @@ O configurar vía comandos (ver abajo).
 /gateway:setup set-task-profile --profile ollama-minimax
 ```
 
+### Cambiar modelo de un perfil (sin remove+add)
+
+```
+/gateway:setup set-model --profile ollama-minimax --model minimax-m3:cloud-v2
+/gateway:setup set-model --profile gateway-deepseek --model deepseek-v4-pro:latest
+```
+
 ## Perfiles: `claude-gateway` vs `openai-chat`
 
 | Kind | Reviews | Tasks | Cuándo usar |
@@ -136,13 +165,14 @@ Mismos flags que `/gateway:review`. Más lento pero más preciso — útil antes
 
 ### `/gateway:task`
 
-Delega una tarea al LLM via subprocess Claude. El modelo puede leer y escribir archivos, ejecutar bash, etc.
+Delega una tarea al LLM via subprocess. Soporta dual-harness (claude o codex).
 
 ```
 /gateway:task "explica qué hace este proyecto"
 /gateway:task --background "encuentra todos los TODOs en el código"
 /gateway:task --profile gateway-deepseek "implementa tests para api-client.mjs"
 /gateway:task --no-write "analiza la arquitectura sin hacer cambios"
+/gateway:task --harness codex "debug este test que falla"
 ```
 
 **Flags:**
@@ -150,12 +180,49 @@ Delega una tarea al LLM via subprocess Claude. El modelo puede leer y escribir a
 - `--wait` — foreground bloqueante (default)
 - `--profile NAME` — perfil a usar (debe ser `claude-gateway`)
 - `--model MODEL` — override del modelo
+- `--harness claude|codex` — harness de ejecución (default: claude). Codex ofrece threads persistentes y sandbox real
 - `--write` — permite escritura de archivos (default)
 - `--no-write` — modo lectura, sin edits
 
 **Foreground:** Stream del output del subprocess en tiempo real.
 
 **Background:** Retorna `task-XXXXX-YYYYYY`. Usar `/gateway:status` y `/gateway:result` para seguimiento.
+
+---
+
+### `/gateway:work`
+
+Auto-routing inteligente. Detecta el tipo de tarea por keywords y delega a la persona especializada correcta.
+
+```
+/gateway:work "encontrá el bug en api-client.mjs"           → gateway-debugger
+/gateway:work "implementá tests para config.mjs"             → gateway-coder
+/gateway:work "analizá la arquitectura de este proyecto"     → gateway-researcher
+/gateway:work "revisá el PR diff"                             → gateway-reviewer
+```
+
+El routing es determinístico por keywords, no por LLM. Pasa `--profile`, `--model`, `--harness` al agente seleccionado.
+
+---
+
+### `/gateway:debate`
+
+Debate multi-modelo entre endpoints configurados. HTTP puro, sin subprocesses.
+
+```
+/gateway:debate "¿usar sqlite o postgres para este proyecto?"
+/gateway:debate --models gateway-deepseek,ollama-minimax "arquitectura propuesta"
+/gateway:debate --rounds 2 --synthesizer gateway-deepseek "REST vs GraphQL"
+/gateway:debate --json "mejor approach para caching"
+```
+
+**Flags:**
+- `--models profile1,profile2` — perfiles a usar (default: primeros 2 configurados)
+- `--rounds N` — número de rondas (default: 3)
+- `--synthesizer PROFILE` — perfil para síntesis final (default: primer perfil)
+- `--json` — output estructurado
+
+**Flujo:** Round 1 (posiciones paralelas) → Round 2 (crítica cruzada) → Round 3 (síntesis).
 
 ---
 
@@ -261,16 +328,22 @@ curl http://TU_GATEWAY/v1/models -H "Authorization: Bearer TU_TOKEN"
 ├── package.json
 ├── plugins/gateway/
 │   ├── .claude-plugin/plugin.json       # Manifiesto del plugin
-│   ├── commands/                        # 7 comandos slash
+│   ├── commands/                        # 9 comandos slash
 │   │   ├── review.md
 │   │   ├── adversarial-review.md
 │   │   ├── task.md
+│   │   ├── work.md                     # Auto-routing por keywords → persona correcta
+│   │   ├── debate.md                   # Debate multi-modelo HTTP puro
 │   │   ├── setup.md
 │   │   ├── status.md
 │   │   ├── result.md
 │   │   └── cancel.md
 │   ├── agents/
-│   │   └── gateway-rescue.md            # Subagente forwarding para /gateway:task
+│   │   ├── gateway-rescue.md            # Subagente forwarding genérico (fallback)
+│   │   ├── gateway-coder.md             # Implementación/refactoring (codex harness)
+│   │   ├── gateway-debugger.md          # Debug/test failures (codex harness)
+│   │   ├── gateway-reviewer.md          # Code review/audit (claude harness, read-only)
+│   │   └── gateway-researcher.md        # Research/exploración (claude harness, read-only)
 │   ├── hooks/hooks.json                 # SessionStart / SessionEnd / Stop
 │   ├── prompts/
 │   │   ├── adversarial-review.md        # Template prompt segunda pasada
@@ -278,7 +351,8 @@ curl http://TU_GATEWAY/v1/models -H "Authorization: Bearer TU_TOKEN"
 │   ├── schemas/
 │   │   └── review-output.schema.json    # JSON Schema del output de review
 │   ├── skills/
-│   │   └── gateway-cli-runtime/SKILL.md # Skill interno (subagente only)
+│   │   ├── gateway-cli-runtime/SKILL.md # Skill interno (contrato de runtime)
+│   │   └── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio
 │   └── scripts/
 │       ├── gateway-companion.mjs        # CLI principal (~530 líneas)
 │       ├── session-lifecycle-hook.mjs   # Limpieza de jobs al cerrar sesión
@@ -286,6 +360,8 @@ curl http://TU_GATEWAY/v1/models -H "Authorization: Bearer TU_TOKEN"
 │       └── lib/
 │           ├── api-client.mjs           # HTTP + SSE streaming (OpenAI-compat)
 │           ├── claude-subprocess.mjs    # Spawn claude -p con env custom
+│           ├── codex-harness.mjs       # Spawn codex exec (harness alternativo)
+│           ├── debate.mjs              # Motor de debate multi-modelo HTTP
 │           ├── config.mjs               # Sistema de perfiles multi-endpoint
 │           ├── args.mjs                 # Parser de flags CLI
 │           ├── fs.mjs                   # Helpers de filesystem

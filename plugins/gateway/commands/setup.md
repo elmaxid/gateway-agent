@@ -1,6 +1,6 @@
 ---
-description: Configure gateway endpoint profiles (add, remove, list, test connections)
-argument-hint: "<add|remove|list|test|set-default|set-review-profile|set-task-profile> [--profile <name>] [--url <url>] [--model <model>] [--kind <claude-gateway|openai-chat>] [--auth-token <token>]"
+description: Configure gateway endpoint profiles (add, remove, list, test, set-default, set-model)
+argument-hint: "<add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model> [--profile <name>] [--url <url>] [--model <model>] [--kind <claude-gateway|openai-chat>] [--auth-token <token>]"
 allowed-tools: Bash(node:*)
 ---
 

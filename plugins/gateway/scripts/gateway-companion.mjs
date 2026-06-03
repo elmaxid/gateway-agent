@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { chatCompletion, runDirectReview, testConnectivity, listModels } from "./lib/api-client.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
+import { runTask } from "./lib/codex-harness.mjs";
+import { runDebate, renderDebateOutput } from "./lib/debate.mjs";
 import {
   loadConfig,
   saveConfig,
@@ -308,8 +310,21 @@ async function handleSetup(argv) {
       break;
     }
 
+    case "set-model": {
+      const { options } = parseArgs(rest, { valueOptions: ["profile", "model"] });
+      if (!options.profile || !options.model) throw new Error("Required: --profile NAME --model MODEL");
+      const config = loadConfig();
+      if (!config.profiles[options.profile]) {
+        throw new Error(`Profile "${options.profile}" not found.`);
+      }
+      config.profiles[options.profile].defaultModel = options.model;
+      saveConfig(config);
+      console.log(`Model for "${options.profile}" set to "${options.model}".`);
+      break;
+    }
+
     default:
-      throw new Error(`Unknown setup action: ${action}. Use add, remove, list, test, set-default, set-review-profile, or set-task-profile.`);
+      throw new Error(`Unknown setup action: ${action}. Use add, remove, list, test, set-default, set-review-profile, set-task-profile, or set-model.`);
   }
 }
 
@@ -527,9 +542,13 @@ async function executeTaskRun(request) {
 
   request.onProgress?.({ message: `Delegating task to ${profile.name} (${model})...`, phase: "starting" });
 
-  const result = await runClaudeTask(profile, request.prompt, {
+  const harness = request.harness || "claude";
+  const taskRunner = harness === "codex" ? runTask : runClaudeTask;
+
+  const result = await taskRunner(profile, request.prompt, {
     model,
     write,
+    harness,
     cwd: request.cwd,
     onStdout: (line) => {
       request.onProgress?.({ message: line, phase: "running" });
@@ -565,7 +584,7 @@ async function executeTaskRun(request) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["profile", "model", "cwd", "prompt-file"],
+    valueOptions: ["profile", "model", "cwd", "prompt-file", "harness"],
     booleanOptions: ["json", "write", "no-write", "background"],
     aliasMap: { m: "model", p: "profile" }
   });
@@ -588,6 +607,7 @@ async function handleTask(argv) {
   }
 
   const write = options["no-write"] ? false : (options.write !== undefined ? Boolean(options.write) : true);
+  const harness = options.harness || "claude";
   const taskTitle = "Gateway Task";
   const taskSummary = shorten(prompt);
 
@@ -663,6 +683,7 @@ async function handleTask(argv) {
         model: options.model,
         prompt,
         write,
+        harness,
         jobId: job.id,
         jobTitle: taskTitle,
         onProgress: progress
@@ -814,6 +835,61 @@ async function handleCancel(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// Debate subcommand
+// ---------------------------------------------------------------------------
+
+async function handleDebate(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["models", "rounds", "synthesizer"],
+    booleanOptions: ["json"]
+  });
+
+  const question = positionals.join(" ").trim();
+  if (!question) {
+    throw new Error("Provide a question or topic to debate.");
+  }
+
+  const config = loadConfig();
+  const profileNames = options.models
+    ? options.models.split(",").map(s => s.trim())
+    : getDefaultDebateProfiles(config);
+
+  if (profileNames.length < 2) {
+    throw new Error("Debate requires at least 2 profiles. Use --models profile1,profile2 or configure multiple profiles.");
+  }
+
+  const profiles = profileNames.map(name => resolveProfile(name, config));
+  const synthesizerProfile = options.synthesizer
+    ? resolveProfile(options.synthesizer, config)
+    : profiles[0];
+
+  const rounds = options.rounds ? Number(options.rounds) : 3;
+
+  const result = await runDebate({
+    question,
+    profiles,
+    rounds,
+    synthesizerProfile,
+    onProgress: (msg) => console.error(msg)
+  });
+
+  if (options.json) {
+    outputResult(result, true);
+  } else {
+    console.log(renderDebateOutput(result));
+  }
+}
+
+function getDefaultDebateProfiles(config) {
+  const names = Object.keys(config.profiles || {});
+  if (config.defaultProfile && names.includes(config.defaultProfile)) {
+    const rest = names.filter(n => n !== config.defaultProfile);
+    return [config.defaultProfile, ...rest].slice(0, 2);
+  }
+  return names.slice(0, 2);
+}
+
+// ---------------------------------------------------------------------------
 // Job infrastructure helpers
 // ---------------------------------------------------------------------------
 
@@ -891,6 +967,7 @@ const SUBCOMMANDS = {
   "adversarial-review": handleAdversarialReview,
   task: handleTask,
   "task-worker": handleTaskWorker,
+  debate: handleDebate,
   status: handleStatus,
   result: handleResult,
   cancel: handleCancel

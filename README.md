@@ -174,6 +174,7 @@ Review del diff actual usando el LLM configurado.
 - `--base REF` — ref base para el diff
 - `--head REF` — ref head para el diff
 - `--scope auto|working-tree|branch` — qué diff revisar
+- `--include-diff` — fuerza inclusión del diff completo en el prompt aunque el repo sea grande (bypassa el límite de 2 archivos por defecto)
 - `--json` — output estructurado JSON
 
 **Output:** Structured review con `verdict` (`approve|request-changes|comment`), findings con severity (`critical|warning|suggestion|nitpick`), recomendaciones.
@@ -188,9 +189,10 @@ Review de dos pasadas: primera encuentra issues, segunda filtra falsos positivos
 /gateway:adversarial-review
 /gateway:adversarial-review --profile ollama-minimax "focus en seguridad"
 /gateway:adversarial-review --base main
+/gateway:adversarial-review --include-diff "verificar cambios de seguridad"
 ```
 
-Mismos flags que `/gateway:review`. Más lento pero más preciso — útil antes de merge a main.
+Mismos flags que `/gateway:review` (incluyendo `--include-diff`). Más lento pero más preciso — útil antes de merge a main.
 
 ---
 
@@ -245,12 +247,17 @@ Debate multi-modelo entre endpoints configurados. HTTP puro, sin subprocesses.
 /gateway:debate --models gateway-deepseek,ollama-minimax "arquitectura propuesta"
 /gateway:debate --rounds 2 --synthesizer gateway-deepseek "REST vs GraphQL"
 /gateway:debate --json "mejor approach para caching"
+/gateway:debate --include-diff "revisar estos cambios entre los modelos"
+/gateway:debate --include-diff --base main "¿estos cambios tienen problemas de seguridad?"
 ```
 
 **Flags:**
 - `--models profile1,profile2` — perfiles a usar (default: primeros 2 configurados)
 - `--rounds N` — número de rondas (default: 3)
 - `--synthesizer PROFILE` — perfil para síntesis final (default: primer perfil)
+- `--include-diff` — inyecta el diff del working tree en la pregunta (requiere repo git)
+- `--base REF` — ref base para el diff (implica inclusión de contexto git)
+- `--scope auto|working-tree|branch` — qué diff incluir
 - `--json` — output estructurado
 
 **Flujo:** Round 1 (posiciones paralelas) → Round 2 (crítica cruzada) → Round 3 (síntesis).
@@ -385,7 +392,7 @@ curl http://TU_GATEWAY/v1/models -H "Authorization: Bearer TU_TOKEN"
 │   │   ├── gateway-cli-runtime/SKILL.md # Skill interno (contrato de runtime)
 │   │   └── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio
 │   └── scripts/
-│       ├── gateway-companion.mjs        # CLI principal (~530 líneas)
+│       ├── gateway-companion.mjs        # CLI principal (~1000 líneas)
 │       ├── session-lifecycle-hook.mjs   # Limpieza de jobs al cerrar sesión
 │       ├── stop-review-gate-hook.mjs    # Espera jobs activos en Stop
 │       └── lib/
@@ -423,7 +430,7 @@ node --test tests/*.test.mjs
 
 | Hook | Archivo | Qué hace |
 |------|---------|----------|
-| `SessionStart` | `session-lifecycle-hook.mjs` | Registra session ID, limpia jobs de sesiones anteriores |
+| `SessionStart` | `session-lifecycle-hook.mjs` | Registra session ID; inyecta routing rules de gateway en el contexto vía `additionalContext` |
 | `SessionEnd` | `session-lifecycle-hook.mjs` | Termina jobs activos, actualiza estado a `cancelled` |
 | `Stop` | `stop-review-gate-hook.mjs` | Espera hasta 120s que terminen jobs activos antes de cerrar |
 

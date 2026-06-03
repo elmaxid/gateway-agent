@@ -43,6 +43,8 @@ export async function chatCompletion(profile, messages, opts = {}) {
     ...(opts.top_p !== undefined && { top_p: opts.top_p }),
     ...(opts.stop !== undefined && { stop: opts.stop }),
     ...(opts.response_format !== undefined && { response_format: opts.response_format }),
+    ...(opts.tools !== undefined && { tools: opts.tools }),
+    ...(opts.tool_choice !== undefined && { tool_choice: opts.tool_choice }),
     stream: false,
   };
 

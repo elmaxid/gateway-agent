@@ -302,7 +302,7 @@ Rules:
  */
 export async function runAgenticReview(profile, cwd, target, opts = {}) {
   const repoRoot = (await runCommand("git", ["rev-parse", "--show-toplevel"], cwd)).trim();
-  if (!repoRoot) throw new Error("Not a git repository: " + cwd);
+  if (!repoRoot || repoRoot.startsWith("Error:")) throw new Error("Not a git repository: " + cwd);
 
   const baseInstruction = target.baseRef
     ? `For all git_diff and list_changed_files calls use base="${target.baseRef}".`

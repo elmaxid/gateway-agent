@@ -1,11 +1,26 @@
 {
   "name": "gateway-plugin-cc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Claude Code plugin for delegating to alternative LLM endpoints via OpenAI-compatible API",
+  "description": "Claude Code plugin that routes reviews, tasks, and multi-model debates to Ollama, DeepSeek, MiniMax, and other OpenAI-compatible endpoints. Includes 4 specialized personas, dual-harness execution (claude/codex), prompt shaping, and auto-routing.",
   "author": "elmaxi",
   "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "plugin",
+    "ollama",
+    "deepseek",
+    "minimax",
+    "llm-gateway",
+    "code-review",
+    "multi-model",
+    "debate"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "ssh://git@internal-git.example.com/redacted/gateway-agent.git"
+  },
   "engines": {
     "node": ">=18.18.0"
   }

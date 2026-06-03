@@ -1,3 +1,5 @@
+// Multi-model debate engine — HTTP-pure, no subprocesses.
+// Flow: parallel positions → cross-critique → synthesis.
 import { chatCompletion } from "./api-client.mjs";
 import { loadConfig, resolveProfile } from "./config.mjs";
 

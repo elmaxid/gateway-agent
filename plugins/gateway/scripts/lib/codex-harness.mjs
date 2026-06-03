@@ -1,3 +1,6 @@
+// Codex harness — alternative to claude subprocess for stateful tasks.
+// Uses OPENAI_BASE_URL/OPENAI_API_KEY (not ANTHROPIC_*).
+// Falls back to claude subprocess if codex CLI not installed.
 import { spawn, execSync } from "node:child_process";
 import process from "node:process";
 

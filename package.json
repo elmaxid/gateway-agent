@@ -19,7 +19,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "ssh://git@internal-git.example.com/redacted/gateway-agent.git"
+    "url": "https://github.com/elmaxid/gateway-agent.git"
   },
   "engines": {
     "node": ">=18.18.0"

@@ -47,10 +47,7 @@ Si codex no está instalado, fallback automático a claude.
 ### 1. Clonar el repositorio
 
 ```bash
-# Desde Gitea (red interna)
-git clone ssh://git@internal-git.example.com/redacted/gateway-agent.git
-
-# O la ruta que corresponda a tu remote
+git clone https://github.com/elmaxid/gateway-agent.git
 cd gateway-agent
 ```
 

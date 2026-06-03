@@ -44,26 +44,27 @@ Si codex no está instalado, fallback automático a claude.
 
 ## Instalación
 
-### 1. Clonar el repositorio
+### Opción 1: Directo desde GitHub (recomendado)
+
+```bash
+claude plugin marketplace add https://github.com/elmaxid/gateway-agent.git
+claude plugin install gateway@agent-gateway
+```
+
+Reiniciar Claude Code para que cargue los comandos `/gateway:*`.
+
+### Opción 2: Desde clon local
 
 ```bash
 git clone https://github.com/elmaxid/gateway-agent.git
 cd gateway-agent
-```
-
-### 2. Registrar el plugin en Claude Code
-
-```bash
-# Usar la ruta absoluta donde clonaste el repo
-claude plugin marketplace add /ruta/a/gateway-agent/
+claude plugin marketplace add "$(pwd)"
 claude plugin install gateway@agent-gateway
 ```
 
-### 3. Reiniciar Claude Code
+Reiniciar Claude Code.
 
-Cerrar y abrir Claude Code para que cargue los comandos `/gateway:*`.
-
-### 4. Verificar instalación
+### Verificar instalación
 
 Dentro de Claude Code:
 ```
@@ -448,8 +449,7 @@ Formato: una línea por entrada con timestamp ISO.
 ### Los comandos `/gateway:*` no aparecen
 
 ```bash
-# Usar la ruta donde clonaste el repo
-claude plugin marketplace add /ruta/a/gateway-agent/
+claude plugin marketplace add https://github.com/elmaxid/gateway-agent.git
 claude plugin install gateway@agent-gateway
 # Reiniciar Claude Code
 ```

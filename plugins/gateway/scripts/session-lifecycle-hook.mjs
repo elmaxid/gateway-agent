@@ -71,9 +71,26 @@ function cleanupSessionJobs(cwd, sessionId) {
   });
 }
 
+const GATEWAY_ROUTING_CONTEXT = `<gateway-routing-rules>
+Gateway plugin active. Prefer these tools for delegation to alternative LLMs:
+- Code review before commit → /gateway:review --include-diff
+- Multi-model debate / architecture decision → /gateway:debate --include-diff
+- Adversarial 2-pass review → /gateway:adversarial-review --include-diff
+- Feature implementation → gateway:gateway-coder
+- Bug investigation → gateway:gateway-debugger
+- Codebase exploration → gateway:gateway-researcher
+Run /gateway:setup to see configured profiles and endpoints.
+</gateway-routing-rules>`;
+
 function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "SessionStart",
+      additionalContext: GATEWAY_ROUTING_CONTEXT
+    }
+  }) + "\n");
 }
 
 function handleSessionEnd(input) {

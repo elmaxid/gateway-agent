@@ -11,7 +11,7 @@ import { chatCompletion } from "./api-client.mjs";
 
 const MAX_OUTPUT_BYTES = 32 * 1024;
 const TOOL_TIMEOUT_MS = 10_000;
-const VALID_REF = /^[A-Za-z0-9._\-/~^:]+$/;
+const VALID_REF = /^[A-Za-z0-9][A-Za-z0-9._\-/~^:]*$/;
 const VALID_PATH_COMPONENT = /^[A-Za-z0-9._\-/]+$/;
 
 export const GIT_TOOLS = [
@@ -113,11 +113,17 @@ function runCommand(cmd, args, cwd) {
       }
     });
 
-    proc.on("close", () => {
+    proc.on("close", (code) => {
       if (done) return;
       clearTimeout(timer);
       const raw = Buffer.concat(chunks).toString("utf8");
-      const out = totalBytes >= MAX_OUTPUT_BYTES ? raw + "\n[truncated]" : raw;
+      if (code !== 0 && raw.trim() === "") {
+        resolve(`Error: git exited ${code} (check ref/path validity)`);
+        return;
+      }
+      const out = totalBytes >= MAX_OUTPUT_BYTES
+        ? raw.slice(0, MAX_OUTPUT_BYTES) + "\n[truncated]"
+        : raw;
       resolve(out);
     });
 
@@ -138,7 +144,7 @@ async function dispatchTool(name, args, cwd, repoRoot) {
         if (!resolved.startsWith(repoRoot + path.sep) && resolved !== repoRoot) {
           return "Error: path outside repository";
         }
-        const buf = await fs.readFile(resolved).catch((e) => { throw e; });
+        const buf = await fs.readFile(resolved);
         for (let i = 0; i < Math.min(buf.length, 512); i++) {
           if (buf[i] === 0) return "Error: binary file, cannot review";
         }
@@ -187,6 +193,7 @@ async function dispatchTool(name, args, cwd, repoRoot) {
 
       case "git_show": {
         const { ref } = args;
+        if (!ref) return "Error: ref is required";
         if (!VALID_REF.test(ref)) return "Error: invalid ref";
         return runCommand("git", ["show", ref], cwd);
       }
@@ -209,7 +216,8 @@ async function forceFinish(profile, messages, opts) {
     content: "You must now produce your final review as valid JSON only. No tool calls.",
   }];
   const response = await chatCompletion(profile, forced, { model: opts.model });
-  return { content: response.choices[0].message.content ?? "", messages: forced };
+  const msg = response.choices[0].message;
+  return { content: msg.content ?? "", messages: [...forced, msg] };
 }
 
 export async function runToolLoop(profile, messages, tools, opts = {}) {
@@ -294,6 +302,7 @@ Rules:
  */
 export async function runAgenticReview(profile, cwd, target, opts = {}) {
   const repoRoot = (await runCommand("git", ["rev-parse", "--show-toplevel"], cwd)).trim();
+  if (!repoRoot) throw new Error("Not a git repository: " + cwd);
 
   const baseInstruction = target.baseRef
     ? `For all git_diff and list_changed_files calls use base="${target.baseRef}".`

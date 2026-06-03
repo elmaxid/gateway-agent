@@ -97,6 +97,7 @@ function runCommand(cmd, args, cwd) {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args, { cwd, shell: false });
     const chunks = [];
+    const errChunks = [];
     let totalBytes = 0;
     let done = false;
 
@@ -113,17 +114,20 @@ function runCommand(cmd, args, cwd) {
       }
     });
 
+    proc.stderr.on("data", (chunk) => {
+      errChunks.push(chunk);
+    });
+
     proc.on("close", (code) => {
       if (done) return;
       clearTimeout(timer);
       const raw = Buffer.concat(chunks).toString("utf8");
       if (code !== 0 && raw.trim() === "") {
-        resolve(`Error: git exited ${code} (check ref/path validity)`);
+        const errMsg = Buffer.concat(errChunks).toString("utf8").trim();
+        resolve(errMsg ? `Error: ${errMsg}` : `Error: git exited ${code} (check ref/path validity)`);
         return;
       }
-      const out = totalBytes >= MAX_OUTPUT_BYTES
-        ? raw.slice(0, MAX_OUTPUT_BYTES) + "\n[truncated]"
-        : raw;
+      const out = totalBytes >= MAX_OUTPUT_BYTES ? raw + "\n[truncated]" : raw;
       resolve(out);
     });
 

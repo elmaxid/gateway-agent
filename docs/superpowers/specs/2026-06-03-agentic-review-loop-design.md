@@ -1,7 +1,7 @@
 # Agentic Review Loop — Design Spec
 
 **Date:** 2026-06-03  
-**Status:** Approved  
+**Status:** Approved (rev 2 — post model review)  
 **Scope:** gateway plugin (`/opt/agent-plugin-cc`)
 
 ---
@@ -18,14 +18,31 @@ Goal: make `/gateway:review` behave like codex — model self-collects repo cont
 
 ```
 gateway-companion.mjs :: executeReviewRun
-  └─ runAgenticReview(profile, cwd, target, opts)   ← agentic-review.mjs
-       └─ runToolLoop(profile, messages, GIT_TOOLS)  ← agentic-review.mjs
+  └─ runAgenticReview(profile, cwd, target, opts)     ← agentic-review.mjs
+       └─ runToolLoop(profile, messages, GIT_TOOLS, opts)
             ├─ POST /v1/chat/completions (with tools[])
             ├─ finish_reason == "tool_calls" → dispatch → append results → repeat
-            └─ finish_reason == "stop" → return content
+            ├─ finish_reason == "stop" | "length" → return content
+            └─ maxIterations reached → force final answer (no throw)
+  returns { content, messages }
 ```
 
 `api-client.mjs` stays pure HTTP transport — only adds `tools`/`tool_choice` passthrough to the body.
+
+---
+
+## `target` Object Structure
+
+```javascript
+{
+  label: string,      // human-readable label ("branch foo vs main", "working-tree")
+  mode: "branch" | "working-tree",
+  baseRef: string,    // e.g. "main", "HEAD~3"
+  targetRef?: string, // e.g. "feature/x" (omit for working-tree)
+}
+```
+
+Initial user message tells the model: `"Review ${target.label}. For all diff/log tools use base=${target.baseRef}."` This ensures the model uses the correct base on every tool call without guessing.
 
 ---
 
@@ -33,70 +50,132 @@ gateway-companion.mjs :: executeReviewRun
 
 Responsibilities:
 1. Define tool JSON schemas (`GIT_TOOLS`)
-2. Implement `dispatch(toolName, args, cwd)` — executes tool, returns string result
+2. Implement `dispatch(toolName, args, cwd, repoRoot)` — executes tool safely, returns string
 3. Implement `runToolLoop(profile, messages, tools, opts)` — multi-turn driver
 4. Implement `runAgenticReview(profile, cwd, target, opts)` — public entrypoint
 
 ### Tool Set
 
-All tools are read-only. All execute with `cwd = repo root`. Timeout: 10s per call.
+All tools are read-only. All execute via `child_process.spawn` with **array args, no shell**. Timeout: 10s per call. Output capped at 32KB + `"[truncated]"`.
 
 | Tool | Parameters | Executes |
 |------|-----------|---------|
-| `read_file` | `path: string` | `fs.readFile(resolved, "utf8")` — path must resolve within repoRoot |
-| `git_diff` | `base?: string, staged?: boolean` | `git diff [--cached] [base..HEAD]` |
+| `read_file` | `path: string, start_line?: number, end_line?: number` | `fs.readFile` — path validated within repoRoot; binary files rejected; output line-numbered |
+| `git_diff` | `base?: string, staged?: boolean, paths?: string[]` | `git diff [--cached] [base..HEAD] [-- paths]` |
 | `list_changed_files` | `base?: string` | `git diff --name-status [base..HEAD]` |
-| `git_log` | `n?: number (default 10)` | `git log --oneline -N` |
-| `git_show` | `ref: string` | `git show --stat ref` |
+| `git_log` | `n?: number (default 10), branch?: string` | `git log --oneline -N [branch]` |
+| `git_show` | `ref: string` | `git show ref` (full patch, no `--stat`) |
 
-### `runToolLoop(profile, messages, tools, opts)`
+### Command Injection Mitigation
 
-```
-maxIterations = opts.maxIterations ?? 10
-iteration = 0
-loop:
-  response = await chatCompletion(profile, messages, { tools, tool_choice: "auto" })
-  choice = response.choices[0]
-  messages.push(choice.message)             // always append assistant message
+All git args come from model JSON. Rules in `dispatch`:
+- Use `spawn(cmd, [arg1, arg2, ...], { shell: false })` — never string concatenation
+- `base`, `ref`, `branch`: validate against `/^[A-Za-z0-9._\-/~^:]+$/` — reject on mismatch, return `"Error: invalid ref"`
+- `paths`: each entry validated against `/^[A-Za-z0-9._\-/]+$/`
+- `read_file` path: resolved against `repoRoot`, must stay within it (see below)
 
-  if choice.finish_reason == "stop":
-    return choice.message.content
-
-  if choice.finish_reason == "tool_calls":
-    for each tool_call in choice.message.tool_calls:
-      result = await dispatch(tool_call.function.name, JSON.parse(tool_call.function.arguments), cwd)
-      messages.push({ role: "tool", tool_call_id: tool_call.id, content: result })
-
-  else:
-    throw Error("Unexpected finish_reason: " + choice.finish_reason)
-
-  iteration++
-  if iteration >= maxIterations:
-    throw Error("Tool loop exceeded maxIterations=" + maxIterations)
-```
-
-Tool dispatch errors are caught per-call. On error: `content = "Error: <sanitized message>"`, loop continues — model decides next step.
-
-### `runAgenticReview(profile, cwd, target, opts)`
-
-1. Resolve `repoRoot` via `git rev-parse --show-toplevel`
-2. Build system prompt: instructs model to review the target using tools, produce structured findings
-3. Build initial user message: describes the review target (`target.label`, scope, base ref)
-4. Call `runToolLoop(profile, messages, GIT_TOOLS, { cwd: repoRoot, ...opts })`
-5. Return raw content string (caller parses findings)
-
-System prompt instructs the model to:
-- Start by calling `list_changed_files` to understand scope
-- Use `git_diff` and `read_file` to gather evidence
-- Produce a structured JSON review with `verdict` and `findings[]`
-
-### Security: `read_file` path validation
+### `read_file` Path Validation & Binary Detection
 
 ```javascript
 const resolved = path.resolve(repoRoot, userPath);
 if (!resolved.startsWith(repoRoot + path.sep) && resolved !== repoRoot) {
   return "Error: path outside repository";
 }
+const buf = await fs.readFile(resolved);
+if (buf.includes(0)) return "Error: binary file, cannot review";
+const text = buf.toString("utf8");
+const lines = text.split("\n");
+const slice = (start_line && end_line)
+  ? lines.slice(start_line - 1, end_line)
+  : lines;
+return slice.map((l, i) => `${(start_line ?? 1) + i}: ${l}`).join("\n")
+  .slice(0, 32 * 1024);
+```
+
+### `runToolLoop(profile, messages, tools, opts)`
+
+```
+maxIterations = opts.maxIterations ?? 10
+maxTime = opts.maxTime ?? 120_000  // overall wall-clock limit
+deadline = Date.now() + maxTime
+iteration = 0
+
+loop:
+  if Date.now() > deadline → force final answer (see below)
+
+  response = await chatCompletion(profile, messages, { tools, tool_choice: "auto" })
+  choice = response.choices[0]
+  messages.push(choice.message)
+
+  if finish_reason == "stop" | "length" | "content_filter":
+    return { content: choice.message.content ?? "", messages }
+
+  if finish_reason == "tool_calls":
+    for each tool_call in choice.message.tool_calls:
+      let args
+      try { args = JSON.parse(tool_call.function.arguments) }
+      catch { args = null }
+
+      const result = args === null
+        ? "Error: malformed JSON arguments"
+        : await dispatchWithTimeout(tool_call.function.name, args, cwd, repoRoot)
+      messages.push({ role: "tool", tool_call_id: tool_call.id, content: result })
+
+  else:
+    // unknown finish_reason — treat as stop
+    return { content: choice.message.content ?? "", messages }
+
+  iteration++
+  if iteration >= maxIterations:
+    → force final answer
+
+force final answer:
+  messages.push({ role: "user", content: "You must now produce your final review JSON." })
+  const final = await chatCompletion(profile, messages, { tool_choice: "none" })
+  return { content: final.choices[0].message.content ?? "", messages }
+```
+
+Unknown tool name in dispatch → `return "Error: unknown tool '${name}'"` — loop continues.
+
+### `runAgenticReview(profile, cwd, target, opts)`
+
+1. Resolve `repoRoot` via `git rev-parse --show-toplevel`
+2. Build system prompt (see below)
+3. Build initial user message with `target` info and explicit `base` instruction
+4. Call `runToolLoop(profile, messages, GIT_TOOLS, { cwd: repoRoot, ...opts })`
+5. Return `{ content, messages }`
+
+### System Prompt
+
+```
+You are a code reviewer with read-only access to a git repository.
+Use the provided tools to gather evidence, then produce a structured JSON review.
+
+Workflow:
+1. Call list_changed_files to understand scope.
+2. For each significant change, call git_diff (filtered by path) or read_file for context.
+3. Call git_log or git_show to understand intent when commit history is relevant.
+4. When you have sufficient evidence, respond with only valid JSON:
+
+{
+  "verdict": "approve" | "request_changes" | "comment",
+  "summary": "<one paragraph>",
+  "findings": [
+    {
+      "file": "<path>",
+      "line": <number or null>,
+      "severity": "critical" | "major" | "minor" | "nit",
+      "title": "<short title>",
+      "detail": "<explanation>"
+    }
+  ]
+}
+
+Rules:
+- Never request more than 32KB of file content at once; use start_line/end_line.
+- For large diffs, use paths[] to filter to relevant files.
+- Always use base=<provided base ref> for git_diff and list_changed_files.
+- Your final response must be valid JSON only — no markdown fences, no prose.
 ```
 
 ---
@@ -116,19 +195,21 @@ No other changes.
 
 ### `scripts/gateway-companion.mjs`
 
-`executeReviewRun` (`:335`) — replace `runDirectReview` call with:
+`executeReviewRun` (`:335`) — replace `runDirectReview` call:
 
 ```javascript
 import { runAgenticReview } from "./lib/agentic-review.mjs";
 
 // inside executeReviewRun:
-const content = await runAgenticReview(profile, cwd, target, {
+const { content, messages } = await runAgenticReview(profile, cwd, target, {
   model: opts.model,
   maxIterations: 10,
+  maxTime: 120_000,
 });
+// pass messages to render if --json requested
 ```
 
-Fallback: if `--no-tools` flag passed or profile kind is `openai-chat`, use existing `runDirectReview`.
+Fallback: `--no-tools` flag or profile kind `openai-chat` → existing `runDirectReview` (diff still collected via `collectReviewContext` on that path).
 
 ---
 
@@ -136,21 +217,27 @@ Fallback: if `--no-tools` flag passed or profile kind is `openai-chat`, use exis
 
 | Case | Handling |
 |------|---------|
-| Loop exceeds 10 iterations | Throw with iteration count; surface to user |
-| Tool execution timeout (>10s) | Catch, return `"Error: timeout"`, loop continues |
-| `read_file` path traversal | Validate against repoRoot before reading |
-| Tool returns large output | Cap at 32KB, append `"[truncated]"` |
-| Model stops with no findings | Return content as-is; companion parses best-effort |
-| Profile doesn't support tools | `--no-tools` flag → `runDirectReview` fallback |
+| Loop hits `maxIterations` | Force final answer call with `tool_choice:"none"` — no throw |
+| Overall `maxTime` exceeded | Force final answer immediately |
+| `finish_reason == "length"` | Treat as stop, return partial content |
+| Unknown `finish_reason` | Treat as stop, return content |
+| `JSON.parse` fails on args | Return `"Error: malformed JSON arguments"` as tool result, continue |
+| Unknown tool name | Return `"Error: unknown tool 'name'"`, continue |
+| Tool execution timeout >10s | Return `"Error: timeout"`, continue |
+| Tool output >32KB | Truncate + `"[truncated]"` |
+| `read_file` path traversal | Validate, return `"Error: path outside repository"` |
+| Binary file | Detect NUL bytes, return `"Error: binary file"` |
+| Invalid ref/branch arg | Regex validate, return `"Error: invalid ref"` |
+| Profile doesn't support tools | `--no-tools` → `runDirectReview` fallback |
 
 ---
 
 ## What This Does NOT Change
 
 - `runDirectReview` stays as-is (fallback path)
-- `adversarial-review` path unchanged (still two-pass inject)
+- `adversarial-review` path unchanged
 - `debate`, `task`, `setup` subcommands unchanged
-- `git.mjs` unchanged — tools in `agentic-review.mjs` call `git` directly via `child_process`, not via `git.mjs` helpers (simpler dispatch, avoids coupling)
+- `git.mjs` unchanged
 
 ---
 
@@ -158,16 +245,18 @@ Fallback: if `--no-tools` flag passed or profile kind is `openai-chat`, use exis
 
 | File | Change |
 |------|--------|
-| `lib/agentic-review.mjs` | **New** (~160 lines): tool schemas, dispatcher, loop driver, entrypoint |
-| `lib/api-client.mjs` | +2 lines: `tools`/`tool_choice` passthrough in `chatCompletion` body |
-| `scripts/gateway-companion.mjs` | ~10 lines changed: `executeReviewRun` calls `runAgenticReview` |
+| `lib/agentic-review.mjs` | **New** (~250 lines): tool schemas, dispatcher, loop driver, entrypoint |
+| `lib/api-client.mjs` | +2 lines: `tools`/`tool_choice` passthrough |
+| `scripts/gateway-companion.mjs` | ~12 lines changed: `executeReviewRun` calls `runAgenticReview` |
 
 ---
 
 ## Success Criteria
 
-1. `node gateway-companion.mjs review` against a branch with changes → model calls tools, produces findings without diff pre-injected
-2. Tool calls visible in `--json` output (tool_calls in message history)
-3. Works against all 3 configured profiles (minimax, deepseek-pro, deepseek-flash)
-4. `--no-tools` flag → falls back to `runDirectReview`, no regression
-5. Path traversal attempt → rejected, review continues
+1. `node gateway-companion.mjs review` against a branch → model calls tools, produces JSON findings without pre-injected diff
+2. `--json` flag → output includes `messages` array with tool_calls history
+3. Works against all 3 profiles (minimax, deepseek-pro, deepseek-flash)
+4. `--no-tools` flag → fallback to `runDirectReview`, no regression
+5. Path traversal attempt in `read_file` → rejected, review continues
+6. Invalid ref in `git_diff` → rejected, review continues
+7. Review completes within 120s wall-clock

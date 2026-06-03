@@ -343,7 +343,9 @@ async function executeReviewRun(request) {
     scope: request.scope
   });
 
-  const context = collectReviewContext(request.cwd, target);
+  const context = collectReviewContext(request.cwd, target, {
+    includeDiff: request.includeDiff
+  });
   const userPrompt = `Review target: ${target.label}\n\n${context.content}`;
 
   request.onProgress?.({ message: `Sending review to ${profile.name} (${model})...`, phase: "reviewing" });
@@ -381,7 +383,7 @@ async function executeReviewRun(request) {
 async function handleReview(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["profile", "model", "base", "scope", "cwd"],
-    booleanOptions: ["json", "background"],
+    booleanOptions: ["json", "background", "include-diff"],
     aliasMap: { m: "model", p: "profile" }
   });
 
@@ -409,6 +411,7 @@ async function handleReview(argv) {
         model: options.model,
         base: options.base,
         scope: options.scope,
+        includeDiff: options["include-diff"] || undefined,
         onProgress: progress
       }),
     { json: options.json }
@@ -430,7 +433,9 @@ async function executeAdversarialReviewRun(request) {
     scope: request.scope
   });
 
-  const context = collectReviewContext(request.cwd, target);
+  const context = collectReviewContext(request.cwd, target, {
+    includeDiff: request.includeDiff
+  });
   const focusText = request.focusText?.trim() ?? "";
   const userPrompt = `Review target: ${target.label}\n${focusText ? `Focus: ${focusText}\n` : ""}\n${context.content}`;
 
@@ -495,7 +500,7 @@ async function executeAdversarialReviewRun(request) {
 async function handleAdversarialReview(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["profile", "model", "base", "scope", "cwd"],
-    booleanOptions: ["json"],
+    booleanOptions: ["json", "include-diff"],
     aliasMap: { m: "model", p: "profile" }
   });
 
@@ -525,6 +530,7 @@ async function handleAdversarialReview(argv) {
         base: options.base,
         scope: options.scope,
         focusText,
+        includeDiff: options["include-diff"] || undefined,
         onProgress: progress
       }),
     { json: options.json }
@@ -840,8 +846,8 @@ async function handleCancel(argv) {
 
 async function handleDebate(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["models", "rounds", "synthesizer"],
-    booleanOptions: ["json"]
+    valueOptions: ["models", "rounds", "synthesizer", "base", "scope", "cwd"],
+    booleanOptions: ["json", "include-diff"]
   });
 
   const question = positionals.join(" ").trim();
@@ -864,8 +870,18 @@ async function handleDebate(argv) {
 
   const rounds = options.rounds ? Number(options.rounds) : 3;
 
+  let fullQuestion = question;
+  if (options["include-diff"] || options.base || options.scope) {
+    const cwd = resolveCommandCwd(options);
+    ensureGitRepository(cwd);
+    const target = resolveReviewTarget(cwd, { base: options.base, scope: options.scope });
+    if (!options.json) console.error(`[debate] Collecting diff context (${target.label})...`);
+    const context = collectReviewContext(cwd, target, { includeDiff: options["include-diff"] || undefined });
+    fullQuestion = `${question}\n\n${context.content}`;
+  }
+
   const result = await runDebate({
-    question,
+    question: fullQuestion,
     profileNames,
     rounds,
     synthesizerProfile: options.synthesizer || profileNames[0],

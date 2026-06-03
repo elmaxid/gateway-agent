@@ -41,6 +41,7 @@ Si codex no está instalado, fallback automático a claude.
 - **Claude Code CLI** (cualquier versión con soporte de plugins)
 - Al menos un endpoint compatible con OpenAI (Ollama, gateway custom, etc.)
 - **Opcional:** [Codex CLI](https://github.com/openai/codex) para el harness codex (si no está, usa claude subprocess como fallback)
+  > ⚠️ **Nota:** Codex requiere que el directorio de trabajo sea un repositorio git. Si no lo es, ejecutar `git init` antes de usar harness codex.
 
 ## Instalación
 

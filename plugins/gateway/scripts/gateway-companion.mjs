@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { chatCompletion, runDirectReview, testConnectivity, listModels } from "./lib/api-client.mjs";
+import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
 import { runTask } from "./lib/codex-harness.mjs";
 import { runDebate, renderDebateOutput } from "./lib/debate.mjs";
@@ -343,24 +344,50 @@ async function executeReviewRun(request) {
     scope: request.scope
   });
 
-  const context = collectReviewContext(request.cwd, target, {
-    includeDiff: request.includeDiff
-  });
-  const userPrompt = `Review target: ${target.label}\n\n${context.content}`;
+  // Fallback to pre-injected diff if --no-tools requested
+  if (request.noTools) {
+    const context = collectReviewContext(request.cwd, target, {
+      includeDiff: request.includeDiff
+    });
+    const userPrompt = `Review target: ${target.label}\n\n${context.content}`;
+    request.onProgress?.({ message: `Sending review to ${profile.name} (${model})...`, phase: "reviewing" });
+    const result = await runDirectReview(profile, REVIEW_SYSTEM_PROMPT, userPrompt, {
+      model,
+      response_format: { type: "json_object" }
+    });
+    const rendered = renderReviewOutput(result, {
+      reviewLabel: "Review",
+      targetLabel: target.label,
+      profileName: profile.name,
+      model: result.model
+    });
+    return {
+      exitStatus: 0,
+      payload: { review: "Review", target, profile: profile.name, model: result.model, usage: result.usage, result: result.content },
+      rendered,
+      summary: (result.parsed && result.content?.summary) || firstMeaningfulLine(String(result.content), "Review completed."),
+      jobTitle: "Gateway Review",
+      jobClass: "review",
+      targetLabel: target.label
+    };
+  }
 
-  request.onProgress?.({ message: `Sending review to ${profile.name} (${model})...`, phase: "reviewing" });
+  // Agentic path — model self-collects via tools
+  request.onProgress?.({ message: `Starting agentic review via ${profile.name} (${model})...`, phase: "reviewing" });
 
-  const result = await runDirectReview(profile, REVIEW_SYSTEM_PROMPT, userPrompt, {
+  const { content, messages: msgHistory } = await runAgenticReview(profile, request.cwd, target, {
     model,
-    response_format: { type: "json_object" }
+    maxIterations: 10,
+    maxTime: 120_000,
   });
 
-  const rendered = renderReviewOutput(result, {
-    reviewLabel: "Review",
-    targetLabel: target.label,
-    profileName: profile.name,
-    model: result.model
-  });
+  let parsed;
+  try { parsed = JSON.parse(content); } catch { parsed = null; }
+
+  const rendered = renderReviewOutput(
+    { content: parsed ?? content, model, usage: null, parsed },
+    { reviewLabel: "Review", targetLabel: target.label, profileName: profile.name, model }
+  );
 
   return {
     exitStatus: 0,
@@ -368,12 +395,13 @@ async function executeReviewRun(request) {
       review: "Review",
       target,
       profile: profile.name,
-      model: result.model,
-      usage: result.usage,
-      result: result.content
+      model,
+      usage: null,
+      result: parsed ?? content,
+      messages: msgHistory,
     },
     rendered,
-    summary: (result.parsed && result.content?.summary) || firstMeaningfulLine(String(result.content), "Review completed."),
+    summary: parsed?.summary ?? firstMeaningfulLine(content, "Review completed."),
     jobTitle: "Gateway Review",
     jobClass: "review",
     targetLabel: target.label
@@ -383,7 +411,7 @@ async function executeReviewRun(request) {
 async function handleReview(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["profile", "model", "base", "scope", "cwd"],
-    booleanOptions: ["json", "background", "include-diff"],
+    booleanOptions: ["json", "background", "include-diff", "no-tools"],
     aliasMap: { m: "model", p: "profile" }
   });
 
@@ -412,6 +440,7 @@ async function handleReview(argv) {
         base: options.base,
         scope: options.scope,
         includeDiff: options["include-diff"] || undefined,
+        noTools: options["no-tools"] || undefined,
         onProgress: progress
       }),
     { json: options.json }

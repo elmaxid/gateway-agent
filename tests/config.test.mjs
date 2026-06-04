@@ -6,7 +6,7 @@ import os from "node:os";
 
 // Point config at a temp directory so we never touch real config
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-cfg-test-"));
-process.env.CLAUDE_PLUGIN_DATA = tmpDir;
+process.env.GATEWAY_PLUGIN_CONFIG_DIR = tmpDir;
 
 // Import after env is set so CONFIG_PATH picks up the override
 const {

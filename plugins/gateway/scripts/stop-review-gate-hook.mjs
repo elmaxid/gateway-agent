@@ -12,11 +12,17 @@ const POLL_INTERVAL_MS = 2000;
 const MAX_WAIT_MS = 2 * 60 * 1000;
 
 function readHookInput() {
-  const raw = fs.readFileSync(0, "utf8").trim();
-  if (!raw) {
+  try {
+    if (process.stdin.isTTY) {
+      return {};
+    }
+    const raw = fs.readFileSync(0, "utf8").trim();
+    if (!raw) return {};
+    return JSON.parse(raw);
+  } catch (e) {
+    process.stderr.write(`[gateway] stop-review-gate: stdin read failed: ${e.message}\n`);
     return {};
   }
-  return JSON.parse(raw);
 }
 
 function logNote(message) {

@@ -76,31 +76,42 @@ Debe responder (vacío si es primera vez, o con perfiles si ya configuraste).
 
 ## Configuración inicial
 
-Hay un `config.example.json` en la raíz del repo con la estructura completa. Dos formas de configurar:
-
-### Opción A: copiar config de ejemplo
+### Opción A: bootstrap script (recomendado para máquina nueva)
 
 ```bash
-mkdir -p ~/.gateway-plugin
-cp config.example.json ~/.gateway-plugin/config.json
-chmod 600 ~/.gateway-plugin/config.json
-# editar con tus URLs, modelos y keys
+cd /your/checkout/of/agent-plugin-cc
+node plugins/gateway/scripts/bootstrap-profiles.mjs \
+  --url http://TU_GATEWAY:4000 \
+  --api-key sk-...
 ```
 
-### Opción B: configurar vía comandos (recomendado)
+Crea los 9 perfiles estándar con roles correctos de una vez:
 
-Desde Claude Code, usar `/gateway:setup add` para cada endpoint (ver ejemplos abajo).
+| Perfil | Modelo | Uso |
+|--------|--------|-----|
+| `minimax` | `minimax-m3` | default + task — análisis, síntesis |
+| `deepseek-pro` | `deepseek-v4-pro` | review — razonamiento profundo |
+| `deepseek-flash` | `deepseek-v4-flash` | iteración rápida |
+| `glm` | `glm-5.1` | coding, research |
+| `nemotron` | `nemotron-3-ultra` | seguridad, razonamiento |
+| `kimi-think` | `kimi-k2-thinking` | debug, análisis profundo |
+| `kimi-code` | `kimi-k2.6` | coding |
+| `devstral` | `devstral-2:123b` | coding especializado |
+| `cogito` | `cogito-2.1:671b` | debate, seguridad, adversarial |
 
-### Agregar un perfil Ollama
+También acepta variables de entorno: `GATEWAY_URL` y `GATEWAY_API_KEY`.
+
+### Opción B: configurar vía comandos
+
+Desde Claude Code, usar `/gateway:setup add` para cada endpoint:
 
 ```
-/gateway:setup add --profile ollama-minimax --url http://192.0.2.20:11434 --model minimax-m3:cloud --kind claude-gateway
-```
-
-### Agregar un perfil con autenticación
-
-```
-/gateway:setup add --profile mi-gateway --url http://192.0.2.10:20128 --model ollamacloud/deepseek-v4-pro --kind claude-gateway --auth-token sk-...
+/gateway:setup add --profile minimax --url http://GATEWAY:4000 --model minimax-m3:cloud --kind claude-gateway --api-key sk-...
+/gateway:setup add --profile deepseek-pro --url http://GATEWAY:4000 --model deepseek-v4-pro:cloud --kind claude-gateway --api-key sk-...
+/gateway:setup add --profile deepseek-flash --url http://GATEWAY:4000 --model deepseek-v4-flash:cloud --kind claude-gateway --api-key sk-...
+/gateway:setup set-default --profile minimax
+/gateway:setup set-review-profile --profile deepseek-pro
+/gateway:setup set-task-profile --profile minimax
 ```
 
 ### Listar perfiles configurados
@@ -112,27 +123,27 @@ Desde Claude Code, usar `/gateway:setup add` para cada endpoint (ver ejemplos ab
 ### Probar conectividad
 
 ```
-/gateway:setup test --profile ollama-minimax
+/gateway:setup test --profile minimax
 ```
 
 ### Establecer perfil por defecto
 
 ```
-/gateway:setup set-default --profile ollama-minimax
+/gateway:setup set-default --profile minimax
 ```
 
 ### Configurar perfiles separados para review y task
 
 ```
-/gateway:setup set-review-profile --profile gateway-flash
-/gateway:setup set-task-profile --profile ollama-minimax
+/gateway:setup set-review-profile --profile deepseek-flash
+/gateway:setup set-task-profile --profile minimax
 ```
 
 ### Cambiar modelo de un perfil (sin remove+add)
 
 ```
-/gateway:setup set-model --profile ollama-minimax --model minimax-m3:cloud-v2
-/gateway:setup set-model --profile gateway-deepseek --model deepseek-v4-pro:latest
+/gateway:setup set-model --profile minimax --model minimax-m3:cloud-v2
+/gateway:setup set-model --profile deepseek-pro --model deepseek-v4-pro:latest
 ```
 
 ## Perfiles: `claude-gateway` vs `openai-chat`
@@ -161,8 +172,8 @@ Review del diff actual usando el LLM configurado.
 
 ```
 /gateway:review
-/gateway:review --profile gateway-flash
-/gateway:review --profile ollama-minimax --model minimax-m3:cloud
+/gateway:review --profile deepseek-flash
+/gateway:review --profile minimax --model minimax-m3:cloud
 /gateway:review --base main --head HEAD
 /gateway:review --scope branch
 /gateway:review --json
@@ -187,7 +198,7 @@ Review de dos pasadas: primera encuentra issues, segunda filtra falsos positivos
 
 ```
 /gateway:adversarial-review
-/gateway:adversarial-review --profile ollama-minimax "focus en seguridad"
+/gateway:adversarial-review --profile minimax "focus en seguridad"
 /gateway:adversarial-review --base main
 /gateway:adversarial-review --include-diff "verificar cambios de seguridad"
 ```
@@ -203,7 +214,7 @@ Delega una tarea al LLM via subprocess. Soporta dual-harness (claude o codex).
 ```
 /gateway:task "explica qué hace este proyecto"
 /gateway:task --background "encuentra todos los TODOs en el código"
-/gateway:task --profile gateway-deepseek "implementa tests para api-client.mjs"
+/gateway:task --profile deepseek-pro "implementa tests para api-client.mjs"
 /gateway:task --no-write "analiza la arquitectura sin hacer cambios"
 /gateway:task --harness codex "debug este test que falla"
 ```
@@ -244,8 +255,8 @@ Debate multi-modelo entre endpoints configurados. HTTP puro, sin subprocesses.
 
 ```
 /gateway:debate "¿usar sqlite o postgres para este proyecto?"
-/gateway:debate --models gateway-deepseek,ollama-minimax "arquitectura propuesta"
-/gateway:debate --rounds 2 --synthesizer gateway-deepseek "REST vs GraphQL"
+/gateway:debate --models deepseek-pro,minimax "arquitectura propuesta"
+/gateway:debate --rounds 2 --synthesizer deepseek-pro "REST vs GraphQL"
 /gateway:debate --json "mejor approach para caching"
 /gateway:debate --include-diff "revisar estos cambios entre los modelos"
 /gateway:debate --include-diff --base main "¿estos cambios tienen problemas de seguridad?"
@@ -315,48 +326,60 @@ Guardado en `~/.gateway-plugin/config.json` (o `$GATEWAY_PLUGIN_CONFIG_DIR/confi
 ```json
 {
   "profiles": {
-    "ollama-minimax": {
+    "minimax": {
       "kind": "claude-gateway",
-      "baseUrl": "http://192.0.2.20:11434",
+      "baseUrl": "http://GATEWAY:4000",
       "defaultModel": "minimax-m3:cloud",
-      "authToken": "ollama"
+      "authToken": "YOUR_API_KEY_HERE"
     },
-    "gateway-deepseek": {
+    "deepseek-pro": {
       "kind": "claude-gateway",
-      "baseUrl": "http://192.0.2.10:20128",
-      "defaultModel": "ollamacloud/deepseek-v4-pro",
-      "apiKey": "sk-..."
+      "baseUrl": "http://GATEWAY:4000",
+      "defaultModel": "deepseek-v4-pro:cloud",
+      "authToken": "YOUR_API_KEY_HERE"
     },
-    "gateway-flash": {
-      "kind": "openai-chat",
-      "baseUrl": "http://192.0.2.10:20128",
-      "defaultModel": "ollamacloud/deepseek-v4-flash",
-      "apiKey": "sk-..."
+    "deepseek-flash": {
+      "kind": "claude-gateway",
+      "baseUrl": "http://GATEWAY:4000",
+      "defaultModel": "deepseek-v4-flash:cloud",
+      "authToken": "YOUR_API_KEY_HERE"
     }
   },
-  "defaultProfile": "ollama-minimax",
-  "reviewProfile": null,
-  "taskProfile": null
+  "defaultProfile": "minimax",
+  "reviewProfile": "deepseek-pro",
+  "taskProfile": "minimax"
 }
 ```
 
 El archivo tiene permisos `0o600` (solo lectura para el owner).
 
-## Prefijos de modelos en gateways
+> **Importante:** `taskProfile` requiere `kind: claude-gateway`. No uses `openai-chat` para tasks.
 
-Algunos gateways requieren prefijos especiales en el nombre del modelo:
+## Modelos disponibles
 
-```
-ollamacloud/deepseek-v4-pro      # gateway custom con OllamaCloud
-minimax-m3:cloud                  # Ollama directo
-chat                              # modelo base del gateway
-```
+El gateway expone modelos vía `GET /v1/models`. Modelos confirmados en producción:
 
-Para descubrir modelos disponibles en un endpoint:
+| Modelo | Uso recomendado |
+|--------|----------------|
+| `minimax-m3` | Análisis estructurado, reviews, síntesis |
+| `deepseek-v4-pro` | Razonamiento profundo, review, segunda opinión |
+| `deepseek-v4-flash` | Tareas rápidas, iteración |
+| `glm-5.1` | Coding, research |
+| `nemotron-3-ultra` | Seguridad, razonamiento, análisis adversarial |
+| `kimi-k2-thinking` | Debug, razonamiento paso a paso |
+| `kimi-k2.6` | Coding general |
+| `devstral-2:123b` | Coding especializado (Mistral, 123B) |
+| `cogito-2.1:671b` | Debate, seguridad, crítica (671B) |
+| `codex-gpt5` | Tasks complejos de implementación |
+| `gemini-pro` / `gemini-flash` | Alternativas multi-modal |
+
+Para listar modelos disponibles en tu gateway:
 
 ```bash
 curl http://TU_GATEWAY/v1/models -H "Authorization: Bearer TU_TOKEN"
 ```
+
+Los nombres son exactos — sin prefijos adicionales.
 
 ## Estructura del proyecto
 
@@ -391,8 +414,9 @@ curl http://TU_GATEWAY/v1/models -H "Authorization: Bearer TU_TOKEN"
 │   │   └── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio
 │   └── scripts/
 │       ├── gateway-companion.mjs        # CLI principal (~1000 líneas)
+│       ├── bootstrap-profiles.mjs       # Setup de perfiles en máquina nueva (--url --api-key)
 │       ├── session-lifecycle-hook.mjs   # Limpieza de jobs al cerrar sesión
-│       ├── stop-review-gate-hook.mjs    # Espera jobs activos en Stop
+│       ├── stop-review-gate-hook.mjs    # Espera jobs activos en Stop (TTY-safe)
 │       └── lib/
 │           ├── api-client.mjs           # HTTP + SSE streaming (OpenAI-compat)
 │           ├── claude-subprocess.mjs    # Spawn claude -p con env custom
@@ -444,7 +468,7 @@ Formato: una línea por entrada con timestamp ISO.
 
 ```
 [2026-06-02T21:23:49.708Z] Starting Gateway Task.
-[2026-06-02T21:23:49.881Z] Delegating task to ollama-minimax (minimax-m3:cloud)...
+[2026-06-02T21:23:49.881Z] Delegating task to minimax (minimax-m3:cloud)...
 [2026-06-02T21:23:58.528Z] ## Archivos .mjs del proyecto
 ...
 [2026-06-02T21:23:59.106Z] Final output
@@ -481,6 +505,23 @@ Verificar que el perfil tiene `kind: claude-gateway`. Los perfiles `openai-chat`
 ```
 
 Si el proceso no responde a SIGTERM, el plugin escala a SIGKILL automáticamente después de 2s.
+
+### Hook `stop-review-gate` bloquea la sesión al cerrar
+
+El hook lee stdin con `fs.readFileSync(0)`. Si Claude Code no cierra el pipe (sesión abrupta, contexto distinto), el proceso queda bloqueado esperando EOF indefinidamente.
+
+Fix ya aplicado en `stop-review-gate-hook.mjs`: chequea `process.stdin.isTTY` antes de leer. Si es TTY, retorna `{}` sin leer. Si el hook bloquea en tu máquina, verificar que el archivo tiene el guard:
+
+```javascript
+function readHookInput() {
+  try {
+    if (process.stdin.isTTY) return {};
+    const raw = fs.readFileSync(0, "utf8").trim();
+    if (!raw) return {};
+    return JSON.parse(raw);
+  } catch { return {}; }
+}
+```
 
 ### Resetear configuración
 

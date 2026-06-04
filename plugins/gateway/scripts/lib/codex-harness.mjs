@@ -32,7 +32,16 @@ export function runCodexTask(profile, prompt, opts = {}) {
     args = ["exec", "resume", "--last"];
   } else {
     const sandbox = opts.write === false ? "read-only" : "workspace-write";
-    args = ["exec", "--json", "--ephemeral", "-m", model, "-s", sandbox];
+    args = [
+      "exec", "--json", "--ephemeral", "-m", model, "-s", sandbox,
+      // Route to the gateway instead of the ChatGPT OAuth provider.
+      // wire_api="responses" is required since codex 0.136.x dropped "chat".
+      "-c", 'model_provider="gateway"',
+      "-c", 'model_providers.gateway.name="Gateway"',
+      "-c", `model_providers.gateway.base_url="${profile.baseUrl}"`,
+      "-c", 'model_providers.gateway.env_key="OPENAI_API_KEY"',
+      "-c", 'model_providers.gateway.wire_api="responses"',
+    ];
     if (opts.cwd) args.push("-C", opts.cwd);
     if (opts.outputSchema) args.push("--output-schema", opts.outputSchema);
   }
@@ -86,9 +95,17 @@ export function runCodexTask(profile, prompt, opts = {}) {
   });
 }
 
+// Codex rejects non-OpenAI models when authenticated via ChatGPT account.
+function isCodexAuthError(result) {
+  const text = result.stdout + result.stderr;
+  return result.exitCode !== 0 && text.includes("ChatGPT account");
+}
+
 export async function runTask(profile, prompt, opts = {}) {
   if (opts.harness === "codex" && await isCodexAvailable()) {
-    return runCodexTask(profile, prompt, opts);
+    const result = await runCodexTask(profile, prompt, opts);
+    if (!isCodexAuthError(result)) return result;
+    // Fall through to claude subprocess on ChatGPT-account auth failure
   }
   const { runClaudeTask } = await import("./claude-subprocess.mjs");
   return runClaudeTask(profile, prompt, opts);

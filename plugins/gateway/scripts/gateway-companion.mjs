@@ -157,7 +157,7 @@ function filterJobsForCurrentClaudeSession(jobs) {
 
 const REVIEW_SYSTEM_PROMPT = `You are a senior code reviewer. Review the following diff. Provide structured feedback with severity (critical/warning/suggestion), file, line, and description for each finding. Return a JSON object with this shape:
 {
-  "verdict": "approve|request-changes|comment",
+  "verdict": "approve|request_changes|comment",
   "summary": "one-paragraph summary",
   "findings": [
     { "severity": "critical|warning|suggestion", "file": "path", "line_start": N, "line_end": N, "title": "short title", "body": "details", "recommendation": "fix suggestion" }

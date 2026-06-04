@@ -55,7 +55,7 @@ function normalizeReviewFinding(finding, index) {
 
 function normalizeReviewResultData(data) {
   return {
-    verdict: (data.verdict ?? "").trim(),
+    verdict: (data.verdict ?? "").trim().replace("-", "_"),
     summary: (data.summary ?? "").trim(),
     findings: Array.isArray(data.findings) ? data.findings.map((f, i) => normalizeReviewFinding(f, i)) : [],
     next_steps: Array.isArray(data.next_steps)

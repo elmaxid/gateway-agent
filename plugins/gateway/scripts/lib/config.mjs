@@ -10,7 +10,10 @@ const DEFAULT_CONFIG = { profiles: {}, defaultProfile: null, reviewProfile: null
 export function loadConfig() {
   try {
     return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-  } catch {
+  } catch (err) {
+    if (err.code === "ENOENT") return { ...DEFAULT_CONFIG };
+    console.error(`[gateway] Warning: config file is corrupt or unreadable (${CONFIG_PATH}): ${err.message}`);
+    console.error(`[gateway] Delete it and run setup again: rm "${CONFIG_PATH}"`);
     return { ...DEFAULT_CONFIG };
   }
 }
@@ -38,7 +41,10 @@ export function resolveTaskProfile(config) {
   const cfg = config || loadConfig();
   const profile = resolveProfile(cfg.taskProfile || cfg.defaultProfile, cfg);
   if (profile.kind !== "claude-gateway") {
-    throw new Error(`Profile "${profile.name}" is kind "${profile.kind}" — task delegation requires "claude-gateway".`);
+    throw new Error(
+      `Profile "${profile.name}" has kind "${profile.kind}" — task subcommand requires kind "claude-gateway". ` +
+      `Use a different profile or re-add this profile with --kind claude-gateway.`
+    );
   }
   return profile;
 }

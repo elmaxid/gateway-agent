@@ -386,8 +386,6 @@ curl http://TU_GATEWAY/v1/models -H "Authorization: Bearer TU_TOKEN"
 │   ├── prompts/
 │   │   ├── adversarial-review.md        # Template prompt segunda pasada
 │   │   └── stop-review-gate.md
-│   ├── schemas/
-│   │   └── review-output.schema.json    # JSON Schema del output de review
 │   ├── skills/
 │   │   ├── gateway-cli-runtime/SKILL.md # Skill interno (contrato de runtime)
 │   │   └── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio

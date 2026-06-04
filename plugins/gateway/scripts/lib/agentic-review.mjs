@@ -299,12 +299,15 @@ Output schema (respond with ONLY this JSON — no markdown fences, no prose):
   "findings": [
     {
       "file": "<relative file path>",
-      "line": <line number or null>,
-      "severity": "critical" | "major" | "minor" | "nit",
+      "line_start": <line number or null>,
+      "line_end": <line number or null>,
+      "severity": "critical" | "warning" | "suggestion",
       "title": "<short finding title>",
-      "detail": "<detailed explanation and recommendation>"
+      "body": "<detailed explanation>",
+      "recommendation": "<specific fix recommendation>"
     }
-  ]
+  ],
+  "next_steps": ["<optional follow-up action>"]
 }
 
 Rules:

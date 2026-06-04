@@ -23,7 +23,7 @@ function buildHeaders(profile) {
   };
 }
 
-function sanitizeError(error) {
+export function sanitizeError(error) {
   // Strip anything that could leak auth tokens from error messages
   const msg = error instanceof Error ? error.message : String(error);
   return msg.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");

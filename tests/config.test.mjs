@@ -147,7 +147,7 @@ describe("resolveTaskProfile", () => {
     };
     assert.throws(
       () => resolveTaskProfile(cfg),
-      /requires "claude-gateway"/
+      /requires kind "claude-gateway"/
     );
   });
 });

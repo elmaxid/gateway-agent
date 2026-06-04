@@ -86,4 +86,39 @@ describe("buildCodexEnv", () => {
 
     assert.strictEqual(env.OPENAI_API_KEY, "test-auth-token");
   });
+
+  it("passes XDG_ prefixed env vars", () => {
+    const savedXdg = process.env.XDG_CONFIG_HOME;
+    const savedXdgData = process.env.XDG_DATA_HOME;
+    try {
+      process.env.XDG_CONFIG_HOME = "/custom/config";
+      process.env.XDG_DATA_HOME = "/custom/data";
+
+      const env = buildCodexEnv(CODEX_PROFILE);
+
+      assert.strictEqual(env.XDG_CONFIG_HOME, "/custom/config");
+      assert.strictEqual(env.XDG_DATA_HOME, "/custom/data");
+    } finally {
+      if (savedXdg !== undefined) process.env.XDG_CONFIG_HOME = savedXdg;
+      else delete process.env.XDG_CONFIG_HOME;
+      if (savedXdgData !== undefined) process.env.XDG_DATA_HOME = savedXdgData;
+      else delete process.env.XDG_DATA_HOME;
+    }
+  });
+
+  it("spreads non-auth subprocessEnv from profile", () => {
+    const profile = {
+      ...CODEX_PROFILE,
+      subprocessEnv: {
+        CUSTOM_VAR: "custom-value",
+        MY_SETTING: "abc",
+      },
+    };
+    const env = buildCodexEnv(profile);
+
+    assert.strictEqual(env.CUSTOM_VAR, "custom-value");
+    assert.strictEqual(env.MY_SETTING, "abc");
+    // But auth keys still win
+    assert.strictEqual(env.OPENAI_API_KEY, "test-api-key");
+  });
 });

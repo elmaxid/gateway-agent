@@ -310,7 +310,7 @@ Envía SIGTERM al proceso, escala a SIGKILL si no termina en 2s.
 
 ## Archivo de configuración
 
-Guardado en `~/.gateway-plugin/config.json` (o `$CLAUDE_PLUGIN_DATA/config.json`).
+Guardado en `~/.gateway-plugin/config.json` (o `$GATEWAY_PLUGIN_CONFIG_DIR/config.json`).
 
 ```json
 {
@@ -492,6 +492,6 @@ rm ~/.gateway-plugin/config.json
 
 | Variable | Descripción |
 |----------|-------------|
-| `CLAUDE_PLUGIN_DATA` | Override del directorio de config (default: `~/.gateway-plugin`) |
+| `GATEWAY_PLUGIN_CONFIG_DIR` | Override del directorio de config (default: `~/.gateway-plugin`) |
 | `CLAUDE_PLUGIN_ROOT` | Seteado automáticamente por Claude Code al cargar el plugin |
 | `GATEWAY_COMPANION_SESSION_ID` | Seteado por el hook SessionStart, identifica la sesión actual |

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-const CONFIG_DIR = process.env.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), ".gateway-plugin");
+const CONFIG_DIR = process.env.GATEWAY_PLUGIN_CONFIG_DIR || path.join(os.homedir(), ".gateway-plugin");
 export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
 const DEFAULT_CONFIG = { profiles: {}, defaultProfile: null, reviewProfile: null, taskProfile: null };

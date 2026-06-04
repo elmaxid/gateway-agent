@@ -12,12 +12,14 @@ function sanitizeError(err) {
   return msg.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
 }
 
-async function safeCompletion(profile, messages, label) {
+async function safeCompletion(profile, messages, label, onProgress) {
   try {
     return extractResponseText(await chatCompletion(profile, messages));
   } catch (err) {
-    console.error(`[debate] ${label} failed: ${sanitizeError(err)}`);
-    return `[Error: ${sanitizeError(err)}]`;
+    const msg = sanitizeError(err);
+    console.error(`[debate] ${label} failed: ${msg}`);
+    if (onProgress) onProgress({ type: "error", label, message: msg });
+    return null;
   }
 }
 
@@ -49,13 +51,17 @@ export async function runDebate(options) {
       response: await safeCompletion(
         p,
         [{ role: "user", content: question }],
-        `position from ${p.name}`
+        `position from ${p.name}`,
+        onProgress
       )
     }))
   );
 
+  const validPositions = positions.filter((p) => p.response !== null);
+  if (validPositions.length === 0) throw new Error("All debate participants failed to respond");
+
   if (rounds < 2) {
-    const result = { question, positions, critiques: [], synthesis: null, synthProfile: null };
+    const result = { question, positions: validPositions, critiques: [], synthesis: null, synthProfile: null };
     return json ? result : renderDebateOutput(result);
   }
 
@@ -63,7 +69,7 @@ export async function runDebate(options) {
   progress("Round 2: cross-critiques");
   const critiqueJobs = [];
   for (const reviewer of profiles) {
-    for (const target of positions) {
+    for (const target of validPositions) {
       if (target.profile === reviewer.name) continue;
       critiqueJobs.push({ reviewer, target });
     }
@@ -79,13 +85,16 @@ export async function runDebate(options) {
           role: "user",
           content: `You previously answered a question. Now critique this alternative answer. Be specific about flaws, gaps, and strengths.\n\nOriginal question: ${question}\n\nAnswer to critique:\n${target.response}`
         }],
-        `${reviewer.name} critiques ${target.profile}`
+        `${reviewer.name} critiques ${target.profile}`,
+        onProgress
       )
     }))
   );
 
+  const validCritiques = critiques.filter((c) => c.critique !== null);
+
   if (rounds < 3) {
-    const result = { question, positions, critiques, synthesis: null, synthProfile: null };
+    const result = { question, positions: validPositions, critiques: validCritiques, synthesis: null, synthProfile: null };
     return json ? result : renderDebateOutput(result);
   }
 
@@ -97,10 +106,10 @@ export async function runDebate(options) {
     `Original question: ${question}`,
     "",
     "Positions:",
-    ...positions.map((p) => `[${p.profile}]: ${p.response}`),
+    ...validPositions.map((p) => `[${p.profile}]: ${p.response}`),
     "",
     "Critiques:",
-    ...critiques.map((c) => `[${c.from} critiques ${c.about}]: ${c.critique}`),
+    ...validCritiques.map((c) => `[${c.from} critiques ${c.about}]: ${c.critique}`),
     "",
     "Synthesize: What is the best answer? What did each model get right and wrong? Give a clear final recommendation."
   ].join("\n");
@@ -108,13 +117,14 @@ export async function runDebate(options) {
   const synthesis = await safeCompletion(
     synthProfile,
     [{ role: "user", content: synthPrompt }],
-    "synthesis"
+    "synthesis",
+    onProgress
   );
 
   const result = {
     question,
-    positions,
-    critiques,
+    positions: validPositions,
+    critiques: validCritiques,
     synthesis,
     synthProfile: { name: synthProfile.name, model: synthProfile.defaultModel }
   };

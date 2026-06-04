@@ -59,7 +59,7 @@ export function runClaudeTask(profile, prompt, opts = {}) {
   proc.stdin.end();
 
   if (opts.signal) {
-    const onAbort = () => terminateProcessTree(proc.pid);
+    const onAbort = () => terminateProcessTree(proc.pid); // blocks ~2s for graceful shutdown before SIGKILL
     opts.signal.addEventListener("abort", onAbort, { once: true });
     proc.on("exit", () => opts.signal.removeEventListener("abort", onAbort));
   }

@@ -161,6 +161,8 @@ export async function* chatCompletionStream(profile, messages, opts = {}) {
       }
     }
 
+    buffer += decoder.decode(); // flush remaining bytes
+
     // Process any remaining buffer
     if (buffer.trim()) {
       const trimmed = buffer.trim();

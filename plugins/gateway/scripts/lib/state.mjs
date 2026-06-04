@@ -126,12 +126,13 @@ export function saveState(cwd, state) {
 
   const stateFile = resolveStateFile(cwd);
   const tmpFile = `${stateFile}.tmp.${process.pid}`;
-  fs.writeFileSync(tmpFile, `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  fs.writeFileSync(tmpFile, `${JSON.stringify(nextState, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   fs.renameSync(tmpFile, stateFile);
   return nextState;
 }
 
 export function updateState(cwd, mutate) {
+  // Note: not safe for concurrent multi-process access; last writer wins on simultaneous updates.
   const state = loadState(cwd);
   mutate(state);
   return saveState(cwd, state);
@@ -182,7 +183,7 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   return jobFile;
 }
 

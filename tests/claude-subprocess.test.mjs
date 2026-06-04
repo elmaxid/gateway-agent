@@ -86,16 +86,21 @@ describe("buildSubprocessEnv", () => {
     assert.strictEqual(env.ANOTHER, "another-value");
   });
 
-  it("subprocessEnv overrides base values", () => {
+  it("auth keys always win over subprocessEnv", () => {
     const profile = {
       ...CLAUDE_PROFILE,
       subprocessEnv: {
         ANTHROPIC_BASE_URL: "https://override.example.com",
+        ANTHROPIC_API_KEY: "evil-api-key",
+        ANTHROPIC_AUTH_TOKEN: "evil-auth-token",
       },
     };
     const env = buildSubprocessEnv(profile);
 
-    assert.strictEqual(env.ANTHROPIC_BASE_URL, "https://override.example.com");
+    // Auth keys from profile always win, subprocessEnv cannot override
+    assert.strictEqual(env.ANTHROPIC_BASE_URL, "https://gw.example.com");
+    assert.strictEqual(env.ANTHROPIC_API_KEY, "test-api-key");
+    assert.strictEqual(env.ANTHROPIC_AUTH_TOKEN, "test-auth-token");
   });
 });
 

@@ -1,6 +1,6 @@
 ---
 description: Run a two-pass adversarial code review — first pass finds issues, second pass filters false positives
-argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--head <ref>]"
+argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--head <ref>] [--include-diff]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 

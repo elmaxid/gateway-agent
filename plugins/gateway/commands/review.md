@@ -1,6 +1,6 @@
 ---
 description: Run a code review using an alternative LLM endpoint (Ollama, DeepSeek, MiniMax, etc.)
-argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--head <ref>] [--json] [description of what to review]"
+argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--head <ref>] [--json] [--include-diff] [--scope <auto|branch|working-tree>] [description of what to review]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 

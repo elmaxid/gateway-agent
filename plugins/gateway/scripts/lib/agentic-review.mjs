@@ -12,7 +12,7 @@ import { chatCompletion } from "./api-client.mjs";
 const MAX_OUTPUT_BYTES = 32 * 1024;
 const TOOL_TIMEOUT_MS = 10_000;
 const VALID_REF = /^[A-Za-z0-9][A-Za-z0-9._\-/~^:]*$/;
-const VALID_PATH_COMPONENT = /^[A-Za-z0-9._\-/]+$/;
+const VALID_PATH_COMPONENT = /^[^\x00-\x1f]+$/;
 
 export const GIT_TOOLS = [
   {
@@ -99,6 +99,7 @@ function runCommand(cmd, args, cwd) {
     const chunks = [];
     const errChunks = [];
     let totalBytes = 0;
+    let errTotalBytes = 0;
     let done = false;
 
     const timer = setTimeout(() => {
@@ -115,7 +116,10 @@ function runCommand(cmd, args, cwd) {
     });
 
     proc.stderr.on("data", (chunk) => {
-      errChunks.push(chunk);
+      if (errTotalBytes < 4096) {
+        errChunks.push(chunk);
+        errTotalBytes += chunk.length;
+      }
     });
 
     proc.on("close", (code) => {
@@ -144,12 +148,16 @@ async function dispatchTool(name, args, cwd, repoRoot) {
     switch (name) {
       case "read_file": {
         const { path: filePath, start_line, end_line } = args;
+        if (start_line && end_line && start_line > end_line) return "Error: start_line must be <= end_line";
         const realRoot = await fs.realpath(repoRoot);
         let realPath;
         try {
           realPath = await fs.realpath(path.resolve(realRoot, filePath));
-        } catch {
-          return "Error: path not found";
+        } catch (err) {
+          if (err.code === "ENOENT") return "Error: path not found";
+          if (err.code === "EACCES") return "Error: permission denied";
+          if (err.code === "ELOOP") return "Error: symlink loop detected";
+          return `Error: ${err.code ?? err.message}`;
         }
         if (realPath !== realRoot && !realPath.startsWith(realRoot + path.sep)) {
           return "Error: path outside repository";

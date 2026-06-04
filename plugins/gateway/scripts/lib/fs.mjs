@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import path from "node:path";
 
 export function isProbablyText(buffer) {
   const sample = buffer.subarray(0, Math.min(buffer.length, 4096));

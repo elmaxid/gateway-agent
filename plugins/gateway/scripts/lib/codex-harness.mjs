@@ -72,7 +72,7 @@ export function runCodexTask(profile, prompt, opts = {}) {
   proc.stdin.end();
 
   if (opts.signal) {
-    const onAbort = () => terminateProcessTree(proc.pid); // blocks ~2s for graceful shutdown before SIGKILL
+    const onAbort = () => terminateProcessTree(proc.pid); // always blocks 2s (SIGTERM grace period) before SIGKILL if process survives
     opts.signal.addEventListener("abort", onAbort, { once: true });
     proc.on("exit", () => opts.signal.removeEventListener("abort", onAbort));
   }

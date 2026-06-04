@@ -1,33 +1,6 @@
 import { spawn } from "node:child_process";
 import process from "node:process";
-
-const ENV_WHITELIST = [
-  "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL",
-  "NODE_PATH", "TMPDIR", "TMP", "TEMP"
-];
-
-function pickEnv(source) {
-  const picked = {};
-  for (const key of ENV_WHITELIST) {
-    if (source[key] !== undefined) picked[key] = source[key];
-  }
-  for (const key of Object.keys(source)) {
-    if (key.startsWith("XDG_")) picked[key] = source[key];
-  }
-  return picked;
-}
-
-function terminateProcessTree(pid) {
-  try {
-    process.kill(-pid, "SIGTERM");
-  } catch {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      // already dead
-    }
-  }
-}
+import { pickEnv, terminateProcessTree } from "./subprocess-utils.mjs";
 
 export function buildSubprocessEnv(profile) {
   const env = pickEnv(process.env);

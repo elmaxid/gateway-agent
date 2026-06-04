@@ -1,15 +1,10 @@
 // Multi-model debate engine — HTTP-pure, no subprocesses.
 // Flow: parallel positions → cross-critique → synthesis.
-import { chatCompletion } from "./api-client.mjs";
+import { chatCompletion, sanitizeError } from "./api-client.mjs";
 import { loadConfig, resolveProfile } from "./config.mjs";
 
 function extractResponseText(completion) {
   return completion?.choices?.[0]?.message?.content ?? "";
-}
-
-function sanitizeError(err) {
-  const msg = err instanceof Error ? err.message : String(err);
-  return msg.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
 }
 
 async function safeCompletion(profile, messages, label, onProgress) {

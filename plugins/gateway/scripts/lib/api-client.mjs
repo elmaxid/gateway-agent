@@ -87,11 +87,12 @@ export async function* chatCompletionStream(profile, messages, opts = {}) {
   const controller = new AbortController();
   const externalSignal = opts.signal;
 
+  let onAbort = null;
   if (externalSignal) {
     if (externalSignal.aborted) {
       controller.abort(externalSignal.reason);
     } else {
-      const onAbort = () => controller.abort(externalSignal.reason);
+      onAbort = () => controller.abort(externalSignal.reason);
       externalSignal.addEventListener("abort", onAbort, { once: true });
     }
   }
@@ -183,6 +184,9 @@ export async function* chatCompletionStream(profile, messages, opts = {}) {
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
     reader.releaseLock();
+    if (onAbort && externalSignal) {
+      externalSignal.removeEventListener("abort", onAbort);
+    }
   }
 }
 

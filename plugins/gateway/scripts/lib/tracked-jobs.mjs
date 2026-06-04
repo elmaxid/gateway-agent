@@ -59,7 +59,7 @@ export function appendLogBlock(logFile, title, body) {
 export function createJobLogFile(workspaceRoot, jobId, title) {
   const logFile = resolveJobLogFile(workspaceRoot, jobId);
   try {
-    fs.writeFileSync(logFile, "", "utf8");
+    fs.writeFileSync(logFile, "", { encoding: "utf8", mode: 0o600 });
   } catch (err) {
     process.stderr.write(`[gateway] Warning: failed to create log file ${logFile}: ${err.message}\n`);
     return logFile;

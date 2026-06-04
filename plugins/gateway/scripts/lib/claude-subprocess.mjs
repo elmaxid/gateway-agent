@@ -31,12 +31,12 @@ function terminateProcessTree(pid) {
 
 export function buildSubprocessEnv(profile) {
   const env = pickEnv(process.env);
-  env.ANTHROPIC_BASE_URL = profile.baseUrl;
-  env.ANTHROPIC_API_KEY = profile.apiKey || "";
-  env.ANTHROPIC_AUTH_TOKEN = profile.authToken || "";
   if (profile.subprocessEnv) {
     Object.assign(env, profile.subprocessEnv);
   }
+  env.ANTHROPIC_BASE_URL = profile.baseUrl;
+  env.ANTHROPIC_API_KEY = profile.apiKey || "";
+  env.ANTHROPIC_AUTH_TOKEN = profile.authToken || "";
   return env;
 }
 

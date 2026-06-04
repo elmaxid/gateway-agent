@@ -34,11 +34,11 @@ function terminateProcessTree(pid) {
 
 export function buildCodexEnv(profile) {
   const env = pickEnv(process.env);
-  env.OPENAI_BASE_URL = profile.baseUrl;
-  env.OPENAI_API_KEY = profile.apiKey || profile.authToken || "";
   if (profile.subprocessEnv) {
     Object.assign(env, profile.subprocessEnv);
   }
+  env.OPENAI_BASE_URL = profile.baseUrl;
+  env.OPENAI_API_KEY = profile.apiKey || profile.authToken || "";
   return env;
 }
 

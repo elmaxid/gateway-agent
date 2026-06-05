@@ -52,6 +52,7 @@ import {
   SESSION_ID_ENV
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import { applyPersona, VALID_PERSONAS } from "./lib/personas.mjs";
 import {
   renderCancelReport,
   renderJobStatusReport,
@@ -76,7 +77,8 @@ function printUsage() {
       "  gateway-companion setup <add|remove|list|test|set-default|set-review-profile|set-task-profile> [args]",
       "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--json]",
       "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--json] [focus]",
-      "  gateway-companion task [--profile NAME] [--model MODEL] [--background] [--write|--no-write] [prompt]",
+      "  gateway-companion task [--profile NAME] [--model MODEL] [--as PERSONA] [--background] [--write|--no-write] [prompt]",
+  `                          PERSONA: ${VALID_PERSONAS.join("|")}`,
       "  gateway-companion task-worker --job-id ID [--profile NAME] [--model MODEL] [--write|--no-write] [prompt]",
       "  gateway-companion status [job-id] [--all] [--json]",
       "  gateway-companion result [job-id] [--json]",
@@ -579,8 +581,9 @@ async function executeTaskRun(request) {
 
   const harness = request.harness || "claude";
   const taskRunner = harness === "codex" ? runTask : runClaudeTask;
+  const prompt = applyPersona(request.prompt, request.persona);
 
-  const result = await taskRunner(profile, request.prompt, {
+  const result = await taskRunner(profile, prompt, {
     model,
     write,
     harness,
@@ -619,7 +622,7 @@ async function executeTaskRun(request) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["profile", "model", "cwd", "prompt-file", "harness"],
+    valueOptions: ["profile", "model", "cwd", "prompt-file", "harness", "as"],
     booleanOptions: ["json", "write", "no-write", "background"],
     aliasMap: { m: "model", p: "profile" }
   });
@@ -664,7 +667,8 @@ async function handleTask(argv) {
       profile: profileResolved.name,
       model: options.model,
       write,
-      prompt
+      prompt,
+      persona: options.as
     });
 
     const queuedRecord = {
@@ -678,7 +682,8 @@ async function handleTask(argv) {
         profile: profileResolved.name,
         model: options.model,
         write,
-        prompt
+        prompt,
+        persona: options.as
       }
     };
     writeJobFile(workspaceRoot, job.id, queuedRecord);
@@ -719,6 +724,7 @@ async function handleTask(argv) {
         prompt,
         write,
         harness,
+        persona: options.as,
         jobId: job.id,
         jobTitle: taskTitle,
         onProgress: progress
@@ -776,6 +782,7 @@ async function handleTaskWorker(argv) {
         model: request.model,
         prompt,
         write,
+        persona: request.persona,
         jobId: storedJob.id,
         jobTitle: storedJob.title || "Gateway Task",
         onProgress: progress
@@ -991,6 +998,9 @@ function spawnDetachedTaskWorker(cwd, jobId, request) {
     args.push("--no-write");
   } else {
     args.push("--write");
+  }
+  if (request.persona) {
+    args.push("--as", request.persona);
   }
 
   const child = spawn(process.execPath, args, {

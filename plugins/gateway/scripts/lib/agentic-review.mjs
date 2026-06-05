@@ -186,6 +186,7 @@ async function dispatchTool(name, args, cwd, repoRoot) {
         if (filePaths?.length) {
           for (const p of filePaths) {
             if (!VALID_PATH_COMPONENT.test(p)) return "Error: invalid path in paths[]";
+            if (p.includes('..') || path.isAbsolute(p)) return "Error: invalid path in paths[]";
           }
           gitArgs.push("--", ...filePaths);
         }

@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { terminateProcessTree } from "./lib/process.mjs";
+import { terminateProcessTreeAsync } from "./lib/process.mjs";
 import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
@@ -31,15 +31,19 @@ function appendEnvVar(name, value) {
 
 function cleanupSessionJobs(cwd, sessionId) {
   if (!cwd || !sessionId) {
-    return;
+    return Promise.resolve();
   }
 
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const stateFile = resolveStateFile(workspaceRoot);
   if (!fs.existsSync(stateFile)) {
-    return;
+    return Promise.resolve();
   }
 
+  return cleanupRunningJobs(cwd, workspaceRoot, stateFile, sessionId);
+}
+
+async function cleanupRunningJobs(cwd, workspaceRoot, stateFile, sessionId) {
   const state = loadState(workspaceRoot);
   const sessionJobs = state.jobs.filter((job) => job.sessionId === sessionId);
   if (sessionJobs.length === 0) {
@@ -53,7 +57,7 @@ function cleanupSessionJobs(cwd, sessionId) {
       continue;
     }
     try {
-      terminateProcessTree(job.pid ?? Number.NaN);
+      await terminateProcessTreeAsync(job.pid ?? Number.NaN);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[gateway] Warning: failed to terminate job ${job.id} (pid ${job.pid}): ${message}\n`);
@@ -95,10 +99,10 @@ function handleSessionStart(input) {
 
 function handleSessionEnd(input) {
   const cwd = input.cwd || process.cwd();
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  return cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
 }
 
-function main() {
+async function main() {
   const input = readHookInput();
   const eventName = process.argv[2] ?? input.hook_event_name ?? "";
 
@@ -108,8 +112,11 @@ function main() {
   }
 
   if (eventName === "SessionEnd") {
-    handleSessionEnd(input);
+    await handleSessionEnd(input);
   }
 }
 
-main();
+main().catch((err) => {
+  process.stderr.write(`[gateway] session-lifecycle-hook error: ${err.message}\n`);
+  process.exitCode = 1;
+});

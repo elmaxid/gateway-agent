@@ -22,6 +22,7 @@ export function runClaudeTask(profile, prompt, opts = {}) {
   const args = ["-p", "--bare", "--model", model];
   if (opts.write !== false) {
     args.push("--allowedTools", "Bash,Read,Write,Edit,Glob,Grep");
+    args.push("--append-system-prompt", "You are executing a coding task. Use Edit, Write, Bash, Read, Glob, and Grep to apply changes directly. Do not describe what you would do — perform the work immediately using tools.");
   }
 
   const env = buildSubprocessEnv(profile);

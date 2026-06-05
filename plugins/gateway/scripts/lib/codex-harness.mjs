@@ -105,7 +105,17 @@ export async function runTask(profile, prompt, opts = {}) {
   if (opts.harness === "codex" && await isCodexAvailable()) {
     const result = await runCodexTask(profile, prompt, opts);
     if (!isCodexAuthError(result)) return result;
-    // Fall through to claude subprocess on ChatGPT-account auth failure
+    // Fall through to claude subprocess only when the profile supports it
+    if (profile.kind !== "claude-gateway") {
+      return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode ?? 1 };
+    }
+  }
+  if (profile.kind !== "claude-gateway") {
+    return {
+      stdout: "",
+      stderr: `Profile "${profile.name}" has kind "${profile.kind}" — codex harness unavailable and claude fallback requires "claude-gateway". Install codex or use a claude-gateway profile.`,
+      exitCode: 1
+    };
   }
   const { runClaudeTask } = await import("./claude-subprocess.mjs");
   return runClaudeTask(profile, prompt, opts);

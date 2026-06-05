@@ -39,14 +39,7 @@ export function resolveReviewProfile(config) {
 
 export function resolveTaskProfile(config) {
   const cfg = config || loadConfig();
-  const profile = resolveProfile(cfg.taskProfile || cfg.defaultProfile, cfg);
-  if (profile.kind !== "claude-gateway") {
-    throw new Error(
-      `Profile "${profile.name}" has kind "${profile.kind}" — task subcommand requires kind "claude-gateway". ` +
-      `Use a different profile or re-add this profile with --kind claude-gateway.`
-    );
-  }
-  return profile;
+  return resolveProfile(cfg.taskProfile || cfg.defaultProfile, cfg);
 }
 
 export function addProfile(config, name, profile) {

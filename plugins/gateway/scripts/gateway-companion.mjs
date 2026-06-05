@@ -304,9 +304,6 @@ async function handleSetup(argv) {
       if (!config.profiles[options.profile]) {
         throw new Error(`Profile "${options.profile}" not found.`);
       }
-      if (config.profiles[options.profile].kind !== "claude-gateway") {
-        throw new Error(`Profile "${options.profile}" is kind "${config.profiles[options.profile].kind}" — task delegation requires "claude-gateway".`);
-      }
       config.taskProfile = options.profile;
       saveConfig(config);
       console.log(`Task profile set to "${options.profile}".`);
@@ -413,7 +410,7 @@ async function executeReviewRun(request) {
 async function handleReview(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["profile", "model", "base", "scope", "cwd"],
-    booleanOptions: ["json", "background", "include-diff", "no-tools"],
+    booleanOptions: ["json", "include-diff", "no-tools"],
     aliasMap: { m: "model", p: "profile" }
   });
 
@@ -531,7 +528,7 @@ async function executeAdversarialReviewRun(request) {
 async function handleAdversarialReview(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["profile", "model", "base", "scope", "cwd"],
-    booleanOptions: ["json", "include-diff"],
+    booleanOptions: ["json", "include-diff", "no-tools"],
     aliasMap: { m: "model", p: "profile" }
   });
 
@@ -580,6 +577,10 @@ async function executeTaskRun(request) {
   request.onProgress?.({ message: `Delegating task to ${profile.name} (${model})...`, phase: "starting" });
 
   const harness = request.harness || "claude";
+  const VALID_HARNESSES = new Set(["claude", "codex"]);
+  if (!VALID_HARNESSES.has(harness)) {
+    throw new Error(`Unknown --harness "${harness}". Valid: ${[...VALID_HARNESSES].join(", ")}`);
+  }
   const taskRunner = harness === "codex" ? runTask : runClaudeTask;
   const prompt = applyPersona(request.prompt, request.persona);
 
@@ -630,8 +631,9 @@ async function handleTask(argv) {
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   const config = loadConfig();
-  const profile = resolveTaskProfile(config);
-  const profileResolved = options.profile ? resolveProfile(options.profile, config) : profile;
+  const profileResolved = options.profile
+    ? resolveProfile(options.profile, config)
+    : resolveTaskProfile(config);
 
   let prompt;
   if (options["prompt-file"]) {
@@ -668,7 +670,8 @@ async function handleTask(argv) {
       model: options.model,
       write,
       prompt,
-      persona: options.as
+      persona: options.as,
+      harness
     });
 
     const queuedRecord = {
@@ -683,7 +686,8 @@ async function handleTask(argv) {
         model: options.model,
         write,
         prompt,
-        persona: options.as
+        persona: options.as,
+        harness
       }
     };
     writeJobFile(workspaceRoot, job.id, queuedRecord);
@@ -739,7 +743,7 @@ async function handleTask(argv) {
 
 async function handleTaskWorker(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["job-id", "profile", "model", "cwd"],
+    valueOptions: ["job-id", "profile", "model", "cwd", "harness"],
     booleanOptions: ["write", "no-write"]
   });
 
@@ -782,6 +786,7 @@ async function handleTaskWorker(argv) {
         model: request.model,
         prompt,
         write,
+        harness: request.harness,
         persona: request.persona,
         jobId: storedJob.id,
         jobTitle: storedJob.title || "Gateway Task",
@@ -1001,6 +1006,9 @@ function spawnDetachedTaskWorker(cwd, jobId, request) {
   }
   if (request.persona) {
     args.push("--as", request.persona);
+  }
+  if (request.harness) {
+    args.push("--harness", request.harness);
   }
 
   const child = spawn(process.execPath, args, {

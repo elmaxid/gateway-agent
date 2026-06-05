@@ -25,7 +25,7 @@ import {
 } from "./lib/config.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
-import { terminateProcessTree } from "./lib/process.mjs";
+import { terminateProcessTree, terminateProcessTreeAsync } from "./lib/process.mjs";
 import {
   generateJobId,
   getConfig,
@@ -421,7 +421,7 @@ async function handleReview(argv) {
   const workspaceRoot = resolveCommandWorkspace(options);
 
   const config = loadConfig();
-  const profile = resolveProfile(options.profile, config);
+  const profile = options.profile ? resolveProfile(options.profile, config) : resolveReviewProfile(config);
 
   const job = createCompanionJob({
     prefix: "review",
@@ -540,7 +540,7 @@ async function handleAdversarialReview(argv) {
   const focusText = positionals.join(" ").trim();
 
   const config = loadConfig();
-  const profile = resolveProfile(options.profile, config);
+  const profile = options.profile ? resolveProfile(options.profile, config) : resolveReviewProfile(config);
 
   const job = createCompanionJob({
     prefix: "review",
@@ -839,7 +839,7 @@ async function handleCancel(argv) {
   const reference = positionals[0] ?? "";
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
 
-  terminateProcessTree(job.pid ?? Number.NaN);
+  await terminateProcessTreeAsync(job.pid ?? Number.NaN);
   appendLogLine(job.logFile, "Cancelled by user.");
 
   const completedAt = nowIso();

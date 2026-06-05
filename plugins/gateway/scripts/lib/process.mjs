@@ -155,6 +155,12 @@ export function terminateProcessTree(pid, options = {}) {
   return { attempted: true, delivered, method };
 }
 
+export async function terminateProcessTreeAsync(pid, options = {}) {
+  const sleepMs = options.gracePeriodMs ?? 2000;
+  const asyncSleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  return terminateProcessTree(pid, { ...options, sleepImpl: asyncSleep });
+}
+
 export function formatCommandFailure(result) {
   const parts = [`${result.command} ${result.args.join(" ")}`.trim()];
   if (result.signal) {

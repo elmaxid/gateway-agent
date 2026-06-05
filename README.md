@@ -536,3 +536,11 @@ rm ~/.gateway-plugin/config.json
 | `GATEWAY_PLUGIN_CONFIG_DIR` | Override del directorio de config (default: `~/.gateway-plugin`) |
 | `CLAUDE_PLUGIN_ROOT` | Seteado automáticamente por Claude Code al cargar el plugin |
 | `GATEWAY_COMPANION_SESSION_ID` | Seteado por el hook SessionStart, identifica la sesión actual |
+
+## Créditos
+
+**Autor:** Maximiliano Dobladez — [elmaxi@gmail.com](mailto:elmaxi@gmail.com)
+
+**Organización:** [MKE Solutions](https://mkesolutions.net)
+
+Desarrollado como plugin de Claude Code para delegar tareas de código a modelos alternativos via gateways OpenAI-compatible (Ollama, LiteLLM, proxies custom).

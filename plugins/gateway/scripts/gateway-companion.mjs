@@ -52,7 +52,7 @@ import {
   SESSION_ID_ENV
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
-import { applyPersona, VALID_PERSONAS } from "./lib/personas.mjs";
+import { applyPersona, getValidPersonas } from "./lib/personas.mjs";
 import {
   renderCancelReport,
   renderJobStatusReport,
@@ -78,7 +78,7 @@ function printUsage() {
       "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--json]",
       "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--json] [focus]",
       "  gateway-companion task [--profile NAME] [--model MODEL] [--as PERSONA] [--background] [--write|--no-write] [prompt]",
-  `                          PERSONA: ${VALID_PERSONAS.join("|")}`,
+  `                          PERSONA: ${getValidPersonas().join("|")}`,
       "  gateway-companion task-worker --job-id ID [--profile NAME] [--model MODEL] [--write|--no-write] [prompt]",
       "  gateway-companion status [job-id] [--all] [--json]",
       "  gateway-companion result [job-id] [--json]",
@@ -476,7 +476,10 @@ async function executeAdversarialReviewRun(request) {
 
   request.onProgress?.({ message: "Pass 2: adversarial false-positive analysis...", phase: "reviewing" });
 
-  const adversarialUserPrompt = `Original review findings:\n${JSON.stringify(firstPass.content, null, 2)}\n\nDiff context:\n${context.content}`;
+  const changedFilesList = context.changedFiles.length > 0
+    ? context.changedFiles.join("\n")
+    : "(no files listed)";
+  const adversarialUserPrompt = `Original review findings:\n${JSON.stringify(firstPass.content, null, 2)}\n\nChanged files (${context.fileCount}):\n${changedFilesList}\n\nContext: ${context.summary}`;
 
   const secondPass = await chatCompletion(profile, [
     { role: "system", content: ADVERSARIAL_SYSTEM_PROMPT },

@@ -1,69 +1,94 @@
-const PERSONAS = {
-  reviewer: `You are an expert code reviewer. Your job is to analyze the codebase thoroughly and produce structured, actionable feedback.
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-Focus on:
-- Correctness bugs and edge cases
-- Security vulnerabilities (injection, auth, data exposure)
-- Architecture and design issues
-- Performance bottlenecks
-- Missing error handling at system boundaries
-- Naming, clarity, and maintainability concerns
+const PERSONAS_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../personas"
+);
 
-For each finding include: file, line range, severity (critical/warning/suggestion), what the problem is, and a concrete fix. Group findings by file. End with a verdict: approve, request_changes, or comment.`,
+const _cache = new Map();
+let _discovered = null;
 
-  debugger: `You are a systematic debugging specialist. Your job is to investigate the reported problem, identify the root cause, and propose a minimal fix.
+function parseFrontmatter(raw, filename) {
+  const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!match) throw new Error(`${filename}: missing or malformed frontmatter`);
+  const meta = {};
+  for (const line of match[1].split("\n")) {
+    const kv = line.match(/^(\w+):\s*(.+)$/);
+    if (!kv) continue;
+    const key = kv[1];
+    const val = kv[2].trim();
+    if (val.startsWith("[") && val.endsWith("]")) {
+      meta[key] = val
+        .slice(1, -1)
+        .split(",")
+        .map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
+        .filter(Boolean);
+    } else {
+      meta[key] = val.replace(/^['"]|['"]$/g, "");
+    }
+  }
+  if (!meta.name) throw new Error(`${filename}: frontmatter missing 'name'`);
+  if (!Array.isArray(meta.activation_keywords) || meta.activation_keywords.length === 0) {
+    throw new Error(`${filename}: frontmatter missing or empty 'activation_keywords'`);
+  }
+  return { meta, body: match[2].trim() };
+}
 
-Approach:
-1. Reproduce the failure path mentally — trace inputs to outputs
-2. Identify the exact line where the invariant breaks
-3. Check callers and data flow for upstream causes
-4. Propose the smallest change that fixes the root cause without side effects
-5. Name what category of bug this is so the pattern can be prevented
+const PRIORITY_ORDER = ["debugger", "reviewer", "security", "researcher", "coder"];
 
-Do not speculate. If you need to read a file to verify, read it. State your confidence level for each hypothesis.`,
+function loadAll() {
+  let files;
+  try {
+    files = fs.readdirSync(PERSONAS_DIR).filter((f) => f.endsWith(".md"));
+  } catch {
+    process.stderr.write(`[personas] warning: personas dir not found: ${PERSONAS_DIR}\n`);
+    _discovered = [];
+    return;
+  }
+  const discovered = [];
+  for (const filename of files.sort()) {
+    const fullPath = path.join(PERSONAS_DIR, filename);
+    try {
+      const raw = fs.readFileSync(fullPath, "utf8");
+      const { meta, body } = parseFrontmatter(raw, filename);
+      _cache.set(meta.name, { body, keywords: meta.activation_keywords });
+      discovered.push(meta.name);
+    } catch (err) {
+      process.stderr.write(`[personas] warning: skipping ${filename}: ${err.message}\n`);
+    }
+  }
+  _discovered = discovered.sort((a, b) => {
+    const ai = PRIORITY_ORDER.indexOf(a);
+    const bi = PRIORITY_ORDER.indexOf(b);
+    return (ai === -1 ? Infinity : ai) - (bi === -1 ? Infinity : bi);
+  });
+}
 
-  security: `You are a security auditor. Your job is to find vulnerabilities and attack vectors in the codebase.
-
-Check for:
-- Injection (command, SQL, path traversal, template)
-- Authentication and authorization flaws
-- Secrets in code or config
-- Insecure defaults or missing validation at boundaries
-- Dependency risks
-- Information disclosure (stack traces, verbose errors, log leakage)
-- OWASP Top 10 applicability
-
-Rate each finding by CVSS severity (critical/high/medium/low/info). Include proof-of-concept exploit path where possible. Distinguish confirmed vulnerabilities from theoretical risks.`,
-
-  researcher: `You are a codebase researcher. Your job is to explore and document the architecture, patterns, and design decisions in this codebase.
-
-Produce:
-- High-level architecture summary (components, data flow, entry points)
-- Key design patterns and conventions used
-- Non-obvious coupling or dependencies between modules
-- Gaps in test coverage or documentation
-- Anything that would surprise a new contributor
-
-Be descriptive and specific. Reference exact file paths and function names. Do not suggest changes unless explicitly asked.`,
-
-  coder: `You are an expert software engineer executing a coding task. Your job is to APPLY changes directly using the available tools — not describe what you would do.
-
-Rules:
-- Use Edit, Write, Bash, Read, Glob, and Grep tools to perform the work immediately
-- Make the actual file changes requested — do not output diffs or code blocks as text
-- Run tests or verification commands after changes when appropriate
-- If a plan is provided, implement it step by step using tools
-- If you encounter ambiguity, make a reasonable decision and proceed
-- Report only what you changed and any issues found`,
-};
-
-export const VALID_PERSONAS = Object.keys(PERSONAS);
+export function getValidPersonas() {
+  if (!_discovered) loadAll();
+  return _discovered;
+}
 
 export function applyPersona(prompt, persona) {
   if (!persona) return prompt;
-  const preamble = PERSONAS[persona];
-  if (!preamble) {
-    throw new Error(`Unknown persona "${persona}". Valid: ${VALID_PERSONAS.join(", ")}`);
+  if (!_discovered) loadAll();
+  const entry = _cache.get(persona);
+  if (!entry) {
+    throw new Error(`Unknown persona "${persona}". Valid: ${_discovered.join(", ")}`);
   }
-  return `${preamble}\n\n---\n\n${prompt}`;
+  return `${entry.body}\n\n---\n\n${prompt}`;
+}
+
+export function matchPersona(taskText) {
+  if (!_discovered) loadAll();
+  const lower = taskText.toLowerCase();
+  for (const name of _discovered) {
+    const entry = _cache.get(name);
+    if (entry.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
+      return name;
+    }
+  }
+  return null;
 }

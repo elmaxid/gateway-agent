@@ -21,13 +21,16 @@ Scan the task text (case-insensitive) for the first matching keyword group below
 2. **review** — keywords: `review`, `audit`, `check quality`, `inspect`, `PR`, `diff`, `code review`
    Agent: `gateway:gateway-reviewer`
 
-3. **research** — keywords: `research`, `find all`, `list`, `inventory`, `map`, `explain`, `describe`, `explore`, `analyze`, `architecture`
+3. **security** — keywords: `security`, `vulnerability`, `CVE`, `CVSS`, `exploit`, `injection`, `owasp`
+   Agent: `gateway:gateway-rescue` — prepend `--as security` to the forwarded task text
+
+4. **research** — keywords: `research`, `find all`, `list`, `inventory`, `map`, `explain`, `describe`, `explore`, `analyze`, `architecture`
    Agent: `gateway:gateway-researcher`
 
-4. **coder** — keywords: `implement`, `build`, `create`, `add`, `refactor`, `write`, `update`, `modify`, `change`, `migrate`, `test` (only when followed by `for` or `to`)
+5. **coder** — keywords: `implement`, `build`, `create`, `add`, `refactor`, `write`, `update`, `modify`, `change`, `migrate`
    Agent: `gateway:gateway-coder`
 
-5. **fallback** — no keyword matched
+6. **fallback** — no keyword matched
    Agent: `gateway:gateway-rescue`
 
 This routing must be deterministic keyword matching, not LLM judgment. Do not reclassify based on your own interpretation of the task.

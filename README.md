@@ -17,7 +17,7 @@ La diferencia clave con otros plugins: no hay broker ni servidor. Reviews van po
 
 ### Personas especializadas
 
-4 subagentes con prompt-shaping por dominio y harness óptimo:
+5 subagentes con prompt-shaping por dominio y harness óptimo:
 
 | Persona | Dominio | Harness | Modo |
 |---------|---------|---------|------|
@@ -25,6 +25,9 @@ La diferencia clave con otros plugins: no hay broker ni servidor. Reviews van po
 | `gateway-debugger` | Bugs, test failures | codex (stateful) | write |
 | `gateway-reviewer` | Code review, audit | claude (stateless) | read-only |
 | `gateway-researcher` | Research, exploración | claude (stateless) | read-only |
+| `security` | Vulnerabilidades, CVE, OWASP | gateway-rescue + `--as security` | read-only |
+
+Las personas están definidas en archivos `personas/*.md` con frontmatter YAML. Cada archivo declara `name`, `description`, `activation_keywords` y el cuerpo del system prompt. Para agregar una nueva persona basta con crear un archivo `.md` nuevo — no requiere cambios en código.
 
 ### Dual-harness
 
@@ -225,6 +228,7 @@ Delega una tarea al LLM via subprocess. Soporta dual-harness (claude o codex).
 - `--profile NAME` — perfil a usar (debe ser `claude-gateway`)
 - `--model MODEL` — override del modelo
 - `--harness claude|codex` — harness de ejecución (default: claude). Codex ofrece threads persistentes y sandbox real
+- `--as PERSONA` — inyecta system prompt de una persona antes de la tarea (`reviewer`, `debugger`, `security`, `researcher`, `coder`)
 - `--write` — permite escritura de archivos (default)
 - `--no-write` — modo lectura, sin edits
 
@@ -243,9 +247,10 @@ Auto-routing inteligente. Detecta el tipo de tarea por keywords y delega a la pe
 /gateway:work "implementá tests para config.mjs"             → gateway-coder
 /gateway:work "analizá la arquitectura de este proyecto"     → gateway-researcher
 /gateway:work "revisá el PR diff"                             → gateway-reviewer
+/gateway:work "auditá vulnerabilidades CVE en este módulo"   → gateway-rescue --as security
 ```
 
-El routing es determinístico por keywords, no por LLM. Pasa `--profile`, `--model`, `--harness` al agente seleccionado.
+El routing es determinístico por keywords (definidas en `personas/*.md`), no por LLM. Orden de prioridad: debug → review → security → research → coder → fallback. Pasa `--profile`, `--model`, `--harness` al agente seleccionado.
 
 ---
 
@@ -389,6 +394,12 @@ Los nombres son exactos — sin prefijos adicionales.
 ├── package.json
 ├── plugins/gateway/
 │   ├── .claude-plugin/plugin.json       # Manifiesto del plugin
+│   ├── personas/                        # System prompt personas (*.md con frontmatter YAML)
+│   │   ├── coder.md
+│   │   ├── debugger.md
+│   │   ├── researcher.md
+│   │   ├── reviewer.md
+│   │   └── security.md
 │   ├── commands/                        # 9 comandos slash
 │   │   ├── review.md
 │   │   ├── adversarial-review.md

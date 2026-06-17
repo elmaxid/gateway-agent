@@ -11,12 +11,14 @@
  *   minimax       → minimax-m3            (default + task — análisis, síntesis)
  *   deepseek-pro  → deepseek-v4-pro       (review — razonamiento profundo)
  *   deepseek-flash→ deepseek-v4-flash     (iteración rápida)
- *   glm           → glm-5.1              (coding, research)
+ *   glm           → glm-5.2              (coding, research — large context)
  *   nemotron      → nemotron-3-ultra      (seguridad, razonamiento)
  *   kimi-think    → kimi-k2-thinking      (debug, análisis profundo)
  *   kimi-code     → kimi-k2.6            (coding)
  *   devstral      → devstral-2:123b       (coding especializado)
  *   cogito        → cogito-2.1:671b       (debate, seguridad, adversarial)
+ *   gemini-flash  → gemini-flash          (iteración rápida, bajo costo)
+ *   gemini-pro    → gemini-pro            (razonamiento general, largo contexto)
  *
  * Sets: defaultProfile=minimax, reviewProfile=deepseek-pro, taskProfile=minimax
  */
@@ -46,12 +48,14 @@ const PROFILES = [
   { name: "minimax",       defaultModel: "minimax-m3" },
   { name: "deepseek-pro",  defaultModel: "deepseek-v4-pro" },
   { name: "deepseek-flash",defaultModel: "deepseek-v4-flash" },
-  { name: "glm",           defaultModel: "glm-5.1" },
+  { name: "glm",           defaultModel: "glm-5.2" },
   { name: "nemotron",      defaultModel: "nemotron-3-ultra" },
   { name: "kimi-think",    defaultModel: "kimi-k2-thinking" },
   { name: "kimi-code",     defaultModel: "kimi-k2.6" },
   { name: "devstral",      defaultModel: "devstral-2:123b" },
   { name: "cogito",        defaultModel: "cogito-2.1:671b" },
+  { name: "gemini-flash",  defaultModel: "gemini-flash" },
+  { name: "gemini-pro",    defaultModel: "gemini-pro" },
 ];
 
 let config = loadConfig();

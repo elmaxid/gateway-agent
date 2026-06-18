@@ -8,7 +8,7 @@ export function buildSubprocessEnv(profile) {
     Object.assign(env, profile.subprocessEnv);
   }
   env.ANTHROPIC_BASE_URL = profile.baseUrl;
-  env.ANTHROPIC_API_KEY = profile.apiKey || "";
+  env.ANTHROPIC_API_KEY = profile.apiKey || profile.authToken || "";
   env.ANTHROPIC_AUTH_TOKEN = profile.authToken || "";
   return env;
 }

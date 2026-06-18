@@ -88,19 +88,21 @@ node plugins/gateway/scripts/bootstrap-profiles.mjs \
   --api-key sk-...
 ```
 
-Crea los 9 perfiles estándar con roles correctos de una vez:
+Crea los 11 perfiles estándar con roles correctos de una vez:
 
 | Perfil | Modelo | Uso |
 |--------|--------|-----|
 | `minimax` | `minimax-m3` | default + task — análisis, síntesis |
 | `deepseek-pro` | `deepseek-v4-pro` | review — razonamiento profundo |
 | `deepseek-flash` | `deepseek-v4-flash` | iteración rápida |
-| `glm` | `glm-5.1` | coding, research |
+| `glm` | `glm-5.2` | coding, research — large context |
 | `nemotron` | `nemotron-3-ultra` | seguridad, razonamiento |
 | `kimi-think` | `kimi-k2-thinking` | debug, análisis profundo |
 | `kimi-code` | `kimi-k2.6` | coding |
 | `devstral` | `devstral-2:123b` | coding especializado |
 | `cogito` | `cogito-2.1:671b` | debate, seguridad, adversarial |
+| `gemini-flash` | `gemini-flash` | iteración rápida, bajo costo |
+| `gemini-pro` | `gemini-pro` | razonamiento general, largo contexto |
 
 También acepta variables de entorno: `GATEWAY_URL` y `GATEWAY_API_KEY`.
 
@@ -162,10 +164,9 @@ Para tasks (`/gateway:task`), el perfil **debe** ser `kind: claude-gateway`. Los
 
 El subprocess hereda estas variables del perfil:
 - `ANTHROPIC_BASE_URL` → URL del endpoint
-- `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` → credenciales
-- `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` → habilita traducción Anthropic→OpenAI en Claude CLI
+- `ANTHROPIC_API_KEY` → credenciales para el gateway (usa `profile.apiKey`, con fallback a `profile.authToken`)
 
-Sin `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` el subprocess no puede conectar al endpoint alternativo.
+> **Nota:** `ANTHROPIC_API_KEY` siempre se setea con el token del gateway. Usar solo `authToken` en el perfil (sin `apiKey`) es válido — el subprocess lo recibe correctamente como API key. Si `ANTHROPIC_API_KEY` quedara vacío el subprocess usaría las credenciales de `~/.claude/` y se conectaría a Anthropic real en lugar del gateway.
 
 ## Comandos
 
@@ -334,19 +335,19 @@ Guardado en `~/.gateway-plugin/config.json` (o `$GATEWAY_PLUGIN_CONFIG_DIR/confi
     "minimax": {
       "kind": "claude-gateway",
       "baseUrl": "http://GATEWAY:4000",
-      "defaultModel": "minimax-m3:cloud",
+      "defaultModel": "minimax-m3",
       "authToken": "YOUR_API_KEY_HERE"
     },
     "deepseek-pro": {
       "kind": "claude-gateway",
       "baseUrl": "http://GATEWAY:4000",
-      "defaultModel": "deepseek-v4-pro:cloud",
+      "defaultModel": "deepseek-v4-pro",
       "authToken": "YOUR_API_KEY_HERE"
     },
-    "deepseek-flash": {
+    "glm": {
       "kind": "claude-gateway",
       "baseUrl": "http://GATEWAY:4000",
-      "defaultModel": "deepseek-v4-flash:cloud",
+      "defaultModel": "glm-5.2",
       "authToken": "YOUR_API_KEY_HERE"
     }
   },
@@ -364,19 +365,19 @@ El archivo tiene permisos `0o600` (solo lectura para el owner).
 
 El gateway expone modelos vía `GET /v1/models`. Modelos confirmados en producción:
 
-| Modelo | Uso recomendado |
-|--------|----------------|
-| `minimax-m3` | Análisis estructurado, reviews, síntesis |
-| `deepseek-v4-pro` | Razonamiento profundo, review, segunda opinión |
-| `deepseek-v4-flash` | Tareas rápidas, iteración |
-| `glm-5.1` | Coding, research |
-| `nemotron-3-ultra` | Seguridad, razonamiento, análisis adversarial |
-| `kimi-k2-thinking` | Debug, razonamiento paso a paso |
-| `kimi-k2.6` | Coding general |
-| `devstral-2:123b` | Coding especializado (Mistral, 123B) |
-| `cogito-2.1:671b` | Debate, seguridad, crítica (671B) |
-| `codex-gpt5` | Tasks complejos de implementación |
-| `gemini-pro` / `gemini-flash` | Alternativas multi-modal |
+| Modelo | Uso recomendado | Notas |
+|--------|----------------|-------|
+| `minimax-m3` | Análisis estructurado, reviews, síntesis | default + taskProfile |
+| `deepseek-v4-pro` | Razonamiento profundo, review, segunda opinión | reviewProfile |
+| `deepseek-v4-flash` | Tareas rápidas, iteración | — |
+| `glm-5.2` | Coding, research — large context | thinking model: output en `reasoning_content` |
+| `nemotron-3-ultra` | Seguridad, razonamiento, análisis adversarial | — |
+| `kimi-k2-thinking` | Debug, razonamiento paso a paso | thinking model |
+| `kimi-k2.6` | Coding general | — |
+| `devstral-2:123b` | Coding especializado (Mistral, 123B) | — |
+| `cogito-2.1:671b` | Debate, seguridad, crítica (671B) | — |
+| `gemini-flash` | Iteración rápida, bajo costo | — |
+| `gemini-pro` | Razonamiento general, largo contexto | — |
 
 Para listar modelos disponibles en tu gateway:
 
@@ -445,19 +446,28 @@ Los nombres son exactos — sin prefijos adicionales.
 │           ├── tracked-jobs.mjs         # Logging por job
 │           └── workspace.mjs            # Resolución de workspace root
 └── tests/
-    ├── api-client.test.mjs
-    ├── claude-subprocess.test.mjs
-    └── config.test.mjs
+    ├── api-client.test.mjs          # HTTP client — unit
+    ├── claude-subprocess.test.mjs   # Subprocess env + auth — unit
+    ├── codex-harness.test.mjs       # Codex env + auth — unit
+    ├── config.test.mjs              # Profile CRUD — unit
+    └── integration.test.mjs         # Live gateway — connectivity, review, task (claude+codex)
 ```
 
 ## Tests
 
 ```bash
 cd /opt/agent-plugin-cc
-node --test tests/*.test.mjs
+
+# Unit tests (sin red)
+node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/config.test.mjs
+
+# Integration tests (requiere gateway activo)
+node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-30 tests: config (13), api-client (9), claude-subprocess (8).
+**Unit tests:** 37 tests — config (14), api-client (9), claude-subprocess (9), codex-harness (6). Sin red.
+
+**Integration tests:** 12 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness, task via codex harness; para los 3 modelos principales (glm-5.2, minimax-m3, deepseek-v4-pro).
 
 ## Hooks del ciclo de sesión
 
@@ -508,6 +518,17 @@ Actualizar `defaultModel` en el perfil con el nombre exacto que devuelve `/v1/mo
 ### Task subprocess no conecta al endpoint
 
 Verificar que el perfil tiene `kind: claude-gateway`. Los perfiles `openai-chat` no soportan subprocess delegation.
+
+### Task responde con Sonnet en lugar del modelo configurado
+
+El subprocess usa credenciales de `~/.claude/` en lugar del gateway. Esto ocurre si el perfil no tiene `apiKey` ni `authToken` seteados correctamente.
+
+Verificar con:
+```bash
+node plugins/gateway/scripts/gateway-companion.mjs setup test --profile <perfil>
+```
+
+Si conecta al gateway correctamente (modelo retornado ≠ `claude-sonnet-*`), el problema está en otro lado. Si falla, revisar que `authToken` esté seteado en el perfil — es el token que se pasa como `ANTHROPIC_API_KEY` al subprocess para autenticar contra el gateway.
 
 ### Job queda en `running` indefinidamente
 

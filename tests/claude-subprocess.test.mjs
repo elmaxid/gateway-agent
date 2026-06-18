@@ -60,6 +60,20 @@ describe("buildSubprocessEnv", () => {
     assert.strictEqual(env.ANTHROPIC_AUTH_TOKEN, "test-auth-token");
   });
 
+  it("falls back to authToken if apiKey is absent", () => {
+    const profile = {
+      kind: "claude-gateway",
+      baseUrl: "https://gw.example.com",
+      defaultModel: "glm-5.2",
+      authToken: "sk-gateway-key",
+    };
+    const env = buildSubprocessEnv(profile);
+
+    assert.strictEqual(env.ANTHROPIC_API_KEY, "sk-gateway-key",
+      "ANTHROPIC_API_KEY must fall back to authToken so subprocess authenticates to gateway");
+    assert.strictEqual(env.ANTHROPIC_AUTH_TOKEN, "sk-gateway-key");
+  });
+
   it("defaults apiKey and authToken to empty string when absent", () => {
     const minimal = {
       kind: "claude-gateway",

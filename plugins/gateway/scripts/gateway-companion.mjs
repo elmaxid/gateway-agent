@@ -7,7 +7,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
-import { chatCompletion, runDirectReview, testConnectivity, listModels } from "./lib/api-client.mjs";
+import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJson } from "./lib/api-client.mjs";
 import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
 import { runTask } from "./lib/codex-harness.mjs";
@@ -52,7 +52,7 @@ import {
   SESSION_ID_ENV
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
-import { applyPersona, getValidPersonas } from "./lib/personas.mjs";
+import { applyPersona, getValidPersonas, matchPersona } from "./lib/personas.mjs";
 import {
   renderCancelReport,
   renderJobStatusReport,
@@ -380,11 +380,13 @@ async function executeReviewRun(request) {
     maxTime: 120_000,
   });
 
-  let parsed;
-  try { parsed = JSON.parse(content); } catch { parsed = null; }
+  const { value: parsed, ok: parsedOk } = extractJson(content);
+  if (!parsedOk) {
+    process.stderr.write(`[gateway] warning: could not parse JSON from model output — rendering as plain text\n`);
+  }
 
   const rendered = renderReviewOutput(
-    { content: parsed ?? content, model, usage: null, parsed },
+    { content: parsed ?? content, model, usage: null, parsed: parsedOk },
     { reviewLabel: "Review", targetLabel: target.label, profileName: profile.name, model }
   );
 
@@ -731,7 +733,16 @@ async function handleTask(argv) {
         prompt,
         write,
         harness,
-        persona: options.as,
+        persona: (() => {
+          if (options.as === "auto") {
+            const matched = matchPersona(prompt);
+            if (matched) {
+              process.stderr.write(`[task] auto-matched persona: ${matched}\n`);
+            }
+            return matched ?? undefined;
+          }
+          return options.as;
+        })(),
         jobId: job.id,
         jobTitle: taskTitle,
         onProgress: progress

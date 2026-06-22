@@ -29,6 +29,78 @@ export function sanitizeError(error) {
   return msg.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
 }
 
+export function extractJson(content) {
+  if (typeof content !== "string") return { value: content, ok: true };
+  try { return { value: JSON.parse(content), ok: true }; } catch {}
+  const fenceRe = /```(?:json)?\s*\n([\s\S]*?)\n```/gi;
+  let last = null;
+  let m;
+  while ((m = fenceRe.exec(content)) !== null) last = m[1];
+  if (last !== null) {
+    try { return { value: JSON.parse(last), ok: true }; } catch {}
+  }
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    try { return { value: JSON.parse(content.slice(start, end + 1)), ok: true }; } catch {}
+  }
+  return { value: null, ok: false };
+}
+
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1_000;
+const RETRIABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const RETRIABLE_NET_CODES = new Set([
+  "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ECONNABORTED",
+  "ENOTFOUND", "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET",
+]);
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason ?? new Error("aborted")); return; }
+    let onAbort;
+    const timer = setTimeout(() => {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    if (signal) {
+      onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error("aborted")); };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+}
+
+function parseRetryAfter(headers) {
+  const val = headers?.get?.("retry-after") ?? headers?.["retry-after"] ?? headers?.["Retry-After"];
+  if (!val) return null;
+  const secs = Number(val);
+  if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 300_000);
+  const dateMs = Date.parse(val);
+  if (!Number.isNaN(dateMs)) return Math.min(Math.max(dateMs - Date.now(), 0), 300_000);
+  return null;
+}
+
+async function withRetry(fn, signal) {
+  let lastError;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try { return await fn(); } catch (err) {
+      lastError = err;
+      if (attempt === MAX_RETRIES - 1) throw err;
+      const status = err.status ?? parseInt(err.message?.match(/\((\d+)\)/)?.[1] ?? "0", 10);
+      const isNetworkError = err.name === "TypeError" && RETRIABLE_NET_CODES.has(err.cause?.code);
+      const isRetriable = isNetworkError || RETRIABLE_STATUS.has(status);
+      if (!isRetriable) throw err;
+      if (signal?.aborted) throw err;
+      const retryAfter = err.retryAfter ?? (status === 429 ? parseRetryAfter(err.headers) : null);
+      const delay = retryAfter ?? BASE_DELAY_MS * 2 ** attempt * (0.8 + Math.random() * 0.4);
+      await sleep(delay, signal);
+    }
+  }
+  throw lastError;
+}
+
 // ---------------------------------------------------------------------------
 // chatCompletion — non-streaming
 // ---------------------------------------------------------------------------
@@ -48,19 +120,24 @@ export async function chatCompletion(profile, messages, opts = {}) {
     stream: false,
   };
 
-  const res = await globalThis.fetch(url, {
-    method: "POST",
-    headers: buildHeaders(profile),
-    body: JSON.stringify(body),
-    signal: opts.signal,
-  });
+  return withRetry(async () => {
+    const res = await globalThis.fetch(url, {
+      method: "POST",
+      headers: buildHeaders(profile),
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Chat completion failed (${res.status}): ${text}`);
-  }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      const err = new Error(`Chat completion failed (${res.status}): ${text}`);
+      err.status = res.status;
+      err.headers = res.headers;
+      throw err;
+    }
 
-  return res.json();
+    return res.json();
+  }, opts.signal);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,16 +283,8 @@ export async function runDirectReview(profile, systemPrompt, userPrompt, opts = 
   const model = result.model ?? profile.defaultModel;
   const usage = result.usage ?? null;
 
-  let parsed = false;
-  let parsedContent = content;
-  try {
-    parsedContent = JSON.parse(content);
-    parsed = true;
-  } catch {
-    // content is not JSON — return as string
-  }
-
-  return { content: parsed ? parsedContent : content, model, usage, parsed };
+  const { value, ok } = extractJson(content);
+  return { content: ok ? value : content, model, usage, parsed: ok };
 }
 
 // ---------------------------------------------------------------------------

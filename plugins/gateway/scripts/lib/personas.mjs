@@ -53,7 +53,11 @@ function loadAll() {
     try {
       const raw = fs.readFileSync(fullPath, "utf8");
       const { meta, body } = parseFrontmatter(raw, filename);
-      _cache.set(meta.name, { body, keywords: meta.activation_keywords });
+      _cache.set(meta.name, {
+        body,
+        keywords: meta.activation_keywords,
+        regexes: meta.activation_keywords.map(buildKeywordRegex),
+      });
       discovered.push(meta.name);
     } catch (err) {
       process.stderr.write(`[personas] warning: skipping ${filename}: ${err.message}\n`);
@@ -81,14 +85,21 @@ export function applyPersona(prompt, persona) {
   return `${entry.body}\n\n---\n\n${prompt}`;
 }
 
+function buildKeywordRegex(kw) {
+  const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}(?:s|ed|ing|es)?\\b`, "i");
+}
+
 export function matchPersona(taskText) {
   if (!_discovered) loadAll();
-  const lower = taskText.toLowerCase();
+  const scores = {};
   for (const name of _discovered) {
     const entry = _cache.get(name);
-    if (entry.keywords.some((kw) => lower.includes(kw.toLowerCase()))) {
-      return name;
-    }
+    const hits = entry.regexes.filter((re) => re.test(taskText)).length;
+    if (hits > 0) scores[name] = hits;
   }
-  return null;
+  if (Object.keys(scores).length === 0) return null;
+  return _discovered
+    .filter((n) => scores[n] !== undefined)
+    .sort((a, b) => (scores[b] - scores[a]) || 0)[0];
 }

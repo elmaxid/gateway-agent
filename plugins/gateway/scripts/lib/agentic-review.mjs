@@ -234,7 +234,10 @@ async function forceFinish(profile, messages, opts) {
     role: "user",
     content: "You must now produce your final review as valid JSON only. No tool calls.",
   }];
-  const response = await chatCompletion(profile, forced, { model: opts.model });
+  const response = await chatCompletion(profile, forced, {
+    model: opts.model,
+    response_format: { type: "json_object" },
+  });
   const msg = response.choices[0].message;
   return { content: msg.content ?? "", messages: [...forced, msg] };
 }

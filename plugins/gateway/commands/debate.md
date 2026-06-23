@@ -28,7 +28,7 @@ Execution:
 
 Run:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" debate $ARGUMENTS
+node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" debate "$ARGUMENTS"
 ```
 
 Output rules:

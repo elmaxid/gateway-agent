@@ -26,7 +26,7 @@ Argument handling:
 Execution:
 - Run:
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" adversarial-review $ARGUMENTS
+node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" adversarial-review "$ARGUMENTS"
 ```
 - Return the command stdout verbatim, exactly as-is.
 - Do not paraphrase, summarize, or add commentary before or after it.

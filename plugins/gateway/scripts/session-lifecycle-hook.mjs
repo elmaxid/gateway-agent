@@ -9,13 +9,18 @@ import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
+export const TRANSCRIPT_PATH_ENV = "GATEWAY_TRANSCRIPT_PATH";
 
-function readHookInput() {
-  const raw = fs.readFileSync(0, "utf8").trim();
-  if (!raw) {
-    return {};
-  }
-  return JSON.parse(raw);
+async function readHookInput() {
+  return new Promise((resolve) => {
+    let raw = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      const trimmed = raw.trim();
+      resolve(trimmed ? JSON.parse(trimmed) : {});
+    });
+  });
 }
 
 function shellEscape(value) {
@@ -88,6 +93,7 @@ Run /gateway:setup to see configured profiles and endpoints.
 
 function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
+  appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
@@ -103,7 +109,7 @@ function handleSessionEnd(input) {
 }
 
 async function main() {
-  const input = readHookInput();
+  const input = await readHookInput();
   const eventName = process.argv[2] ?? input.hook_event_name ?? "";
 
   if (eventName === "SessionStart") {

@@ -11,6 +11,7 @@ import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJ
 import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
 import { runTask } from "./lib/codex-harness.mjs";
+import { loadTranscript, parseTranscript, buildMessages } from "./lib/claude-session-transfer.mjs";
 import { runDebate, renderDebateOutput } from "./lib/debate.mjs";
 import {
   loadConfig,
@@ -963,6 +964,35 @@ function getDefaultDebateProfiles(config) {
 }
 
 // ---------------------------------------------------------------------------
+// Transfer subcommand
+// ---------------------------------------------------------------------------
+
+async function handleTransfer(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["profile", "turns"],
+    aliasMap: { p: "profile" }
+  });
+
+  const transcriptPath = process.env.GATEWAY_TRANSCRIPT_PATH;
+  const raw = loadTranscript(transcriptPath);
+  const turns = parseTranscript(raw);
+  const transferPrompt = positionals.join(" ") || "Continue from where we left off.";
+  const maxTurns = Math.max(1, parseInt(options.turns, 10) || 30);
+  const messages = buildMessages(turns, { maxTurns, transferPrompt });
+
+  const config = loadConfig();
+  const profile = resolveProfile(options.profile, config);
+
+  process.stderr.write(
+    `[gateway:transfer] ${turns.length} turns parsed, ${Math.min(turns.length, maxTurns)} sent to ${profile.defaultModel}\n`
+  );
+
+  const response = await chatCompletion(profile, messages);
+  const content = response.choices?.[0]?.message?.content ?? "";
+  process.stdout.write(content + "\n");
+}
+
+// ---------------------------------------------------------------------------
 // Job infrastructure helpers
 // ---------------------------------------------------------------------------
 
@@ -1047,6 +1077,7 @@ const SUBCOMMANDS = {
   task: handleTask,
   "task-worker": handleTaskWorker,
   debate: handleDebate,
+  transfer: handleTransfer,
   status: handleStatus,
   result: handleResult,
   cancel: handleCancel

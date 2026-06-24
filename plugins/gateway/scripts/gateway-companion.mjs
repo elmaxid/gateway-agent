@@ -989,6 +989,11 @@ async function handleTransfer(argv) {
 
   const response = await chatCompletion(profile, messages);
   const content = response.choices?.[0]?.message?.content ?? "";
+  if (!content) {
+    process.stderr.write(`[gateway:transfer] empty response from ${profile.defaultModel} — check gateway endpoint\n`);
+    process.exitCode = 1;
+    return;
+  }
   process.stdout.write(content + "\n");
 }
 

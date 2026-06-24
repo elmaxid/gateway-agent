@@ -25,6 +25,11 @@ function extractTextContent(content) {
   const parts = [];
   for (const block of content) {
     if (block.type === "text") {
+      const t = block.text.trim();
+      if (t.startsWith('<local-command-') || t.startsWith('<command-name>') ||
+          t.startsWith('<command-message>') || t.startsWith('<command-args>')) {
+        continue;
+      }
       parts.push(block.text);
     } else if (block.type === "image" || block.type === "document") {
       const name = block.name || block.source?.media_type || "file";

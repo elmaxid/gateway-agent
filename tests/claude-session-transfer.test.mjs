@@ -36,6 +36,18 @@ describe("parseTranscript", () => {
     const turns = parseTranscript(lines.join("\n"));
     assert.strictEqual(turns.length, 0);
   });
+
+  it("skips user turns whose content is only tool_result blocks (no text)", () => {
+    const lines = [
+      JSON.stringify({ type: "user", message: { role: "user", content: [
+        { type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "output" }] }
+      ] } }),
+      JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "real question" }] } }),
+    ];
+    const turns = parseTranscript(lines.join("\n"));
+    assert.strictEqual(turns.length, 1, "tool_result-only user turn should be dropped");
+    assert.strictEqual(turns[0].content, "real question");
+  });
 });
 
 describe("buildMessages", () => {

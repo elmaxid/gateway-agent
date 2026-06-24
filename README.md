@@ -8,7 +8,7 @@ Agrega 10 comandos `/gateway:*` a Claude Code. Cuatro operaciones principales:
 
 | Operación | Backend | Cuándo usar |
 |-----------|---------|-------------|
-| **Review** | HTTP directo a `/v1/chat/completions` | Revisar código rápido, sin overhead |
+| **Review** | HTTP + agentic loop (tool-use multi-turn) | Revisar código; modelo explora repo con git/fs tools |
 | **Task** | Subprocess `claude -p` o `codex exec` (dual-harness) | Delegación completa con herramientas |
 | **Work** | Auto-routing → persona especializada | Detecta tipo de tarea por keywords |
 | **Debate** | HTTP paralelo multi-modelo | Posiciones independientes + crítica cruzada + síntesis |
@@ -144,6 +144,12 @@ Desde Claude Code, usar `/gateway:setup add` para cada endpoint:
 /gateway:setup set-task-profile --profile minimax
 ```
 
+### Eliminar un perfil
+
+```
+/gateway:setup remove --profile deepseek-flash
+```
+
 ### Cambiar modelo de un perfil (sin remove+add)
 
 ```
@@ -188,9 +194,16 @@ Review del diff actual usando el LLM configurado.
 - `--model MODEL` — override del modelo
 - `--base REF` — ref base para el diff
 - `--head REF` — ref head para el diff
-- `--scope auto|working-tree|branch` — qué diff revisar
-- `--include-diff` — fuerza inclusión del diff completo en el prompt aunque el repo sea grande (bypassa el límite de 2 archivos por defecto)
+- `--scope auto|working-tree|branch` — qué diff revisar:
+  - `auto` (default): staged/unstaged si los hay, sino branch diff contra rama base
+  - `working-tree`: solo cambios sin commitear
+  - `branch`: diff desde merge-base contra rama principal
+- `--include-diff` — inyecta el diff completo en el prompt de una vez en lugar de usar el agentic loop
 - `--json` — output estructurado JSON
+
+**Modo agentic vs `--include-diff`:**
+- **Sin `--include-diff`** (default): el modelo explora el repo incrementalmente via tool-use (`read_file`, `git_diff`, `list_changed_files`, `git_log`, `git_show`). Útil para repos grandes o cuando se necesita contexto adicional más allá del diff.
+- **Con `--include-diff`**: inyecta el diff completo en el prompt de una vez. Más rápido para diffs pequeños; puede truncar en repos con muchos cambios.
 
 **Output:** Structured review con `verdict` (`approve|request-changes|comment`), findings con severity (`critical|warning|suggestion|nitpick`), recomendaciones.
 
@@ -229,7 +242,7 @@ Delega una tarea al LLM via subprocess. Soporta dual-harness (claude o codex).
 - `--profile NAME` — perfil a usar (debe ser `claude-gateway`)
 - `--model MODEL` — override del modelo
 - `--harness claude|codex` — harness de ejecución (default: claude). Codex ofrece threads persistentes y sandbox real
-- `--as PERSONA` — inyecta system prompt de una persona antes de la tarea (`reviewer`, `debugger`, `security`, `researcher`, `coder`)
+- `--as PERSONA` — inyecta system prompt de una persona antes de la tarea (`reviewer`, `debugger`, `security`, `researcher`, `coder`). Si no se especifica, se intenta auto-match: el prompt se compara contra `activation_keywords` de cada persona y se selecciona la de mayor score (vía `matchPersona()`). Usar `--as` explícito para forzar una persona concreta.
 - `--write` — permite escritura de archivos (default)
 - `--no-write` — modo lectura, sin edits
 
@@ -356,6 +369,8 @@ Transfiere el contexto de la sesión actual de Claude Code a un modelo gateway. 
 
 Guardado en `~/.gateway-plugin/config.json` (o `$GATEWAY_PLUGIN_CONFIG_DIR/config.json`).
 
+> **Ejemplo:** El repo incluye `config.example.json` en la raíz con una plantilla de perfiles lista para copiar y editar.
+
 ```json
 {
   "profiles": {
@@ -450,14 +465,15 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── adversarial-review.md        # Template prompt segunda pasada
 │   │   └── stop-review-gate.md
 │   ├── skills/
-│   │   ├── gateway-cli-runtime/SKILL.md # Skill interno (contrato de runtime)
-│   │   └── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio
+│   │   ├── gateway-cli-runtime/SKILL.md # Contrato de runtime para gateway-rescue (cómo invocar gateway-companion.mjs)
+│   │   └── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio para agentes gateway-coder/debugger/reviewer/researcher
 │   └── scripts/
 │       ├── gateway-companion.mjs        # CLI principal (~1000 líneas)
 │       ├── bootstrap-profiles.mjs       # Setup de perfiles en máquina nueva (--url --api-key)
 │       ├── session-lifecycle-hook.mjs   # Limpieza de jobs al cerrar sesión
 │       ├── stop-review-gate-hook.mjs    # Espera jobs activos en Stop (TTY-safe)
 │       └── lib/
+│           ├── agentic-review.mjs       # Driver multi-turn tool-use para /gateway:review
 │           ├── api-client.mjs           # HTTP + SSE streaming (OpenAI-compat)
 │           ├── claude-subprocess.mjs    # Spawn claude -p con env custom
 │           ├── codex-harness.mjs       # Spawn codex exec (harness alternativo)
@@ -467,10 +483,11 @@ Los nombres son exactos — sin prefijos adicionales.
 │           ├── fs.mjs                   # Helpers de filesystem
 │           ├── git.mjs                  # Git diff, workspace root
 │           ├── job-control.mjs          # Estado enriquecido de jobs
+│           ├── personas.mjs             # Carga dinámica de personas desde archivos .md
 │           ├── process.mjs              # terminateProcessTree con SIGKILL escalation
-│           ├── prompts.mjs              # Construcción de prompts
 │           ├── render.mjs               # Markdown render de reviews
 │           ├── state.mjs                # Estado persistente de jobs (atomic writes)
+│           ├── subprocess-utils.mjs     # pickEnv + terminateProcessTree (shared por claude-subprocess y codex-harness)
 │           ├── tracked-jobs.mjs         # Logging por job
 │           ├── workspace.mjs            # Resolución de workspace root
 │           └── claude-session-transfer.mjs  # Parser de transcripts + window transfer
@@ -506,7 +523,7 @@ node --test --test-timeout=120000 tests/integration.test.mjs
 |------|---------|----------|
 | `SessionStart` | `session-lifecycle-hook.mjs` | Registra session ID y transcript path; inyecta routing rules de gateway en el contexto vía `additionalContext` |
 | `SessionEnd` | `session-lifecycle-hook.mjs` | Termina jobs activos, actualiza estado a `cancelled` |
-| `Stop` | `stop-review-gate-hook.mjs` | Espera hasta 120s que terminen jobs activos antes de cerrar |
+| `Stop` | `stop-review-gate-hook.mjs` | Espera hasta 125s que terminen jobs activos; retorna `ALLOW` si todos terminaron, `BLOCK` si alguno sigue activo |
 
 ## Logs de jobs
 
@@ -600,6 +617,12 @@ rm ~/.gateway-plugin/config.json
 | `CLAUDE_PLUGIN_ROOT` | Seteado automáticamente por Claude Code al cargar el plugin |
 | `GATEWAY_COMPANION_SESSION_ID` | Seteado por el hook SessionStart, identifica la sesión actual |
 | `GATEWAY_TRANSCRIPT_PATH` | Path al transcript JSONL de la sesión actual (seteado por SessionStart hook) |
+
+## Licencia
+
+UNLICENSED — código privado, todos los derechos reservados al autor.
+
+**Versión actual:** v0.3.0
 
 ## Créditos
 

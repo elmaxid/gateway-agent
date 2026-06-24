@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Claude Code plugin that routes reviews, tasks, and multi-model debates to Ollama, DeepSeek, MiniMax, and other OpenAI-compatible endpoints. Includes 4 specialized personas, dual-harness execution (claude/codex), prompt shaping, and auto-routing.",
   "author": "elmaxi",
-  "license": "MIT",
+  "license": "UNLICENSED",
   "keywords": [
     "claude-code",
     "plugin",

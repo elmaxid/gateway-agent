@@ -41,6 +41,7 @@ node plugins/gateway/scripts/gateway-companion.mjs setup test --profile ollama-d
 | Implementación / feature nueva | `gateway:gateway-coder` (codex harness) |
 | Debug / investigación de bug | `gateway:gateway-debugger` (codex harness) |
 | Exploración de código | `gateway:gateway-researcher` |
+| Window transfer a gateway model | `/gateway:transfer` |
 
 **Antes de cada commit**: correr adversarial review con `--include-diff` para validar cambios.
 
@@ -73,6 +74,7 @@ plugins/gateway/
       codex-harness.mjs       # Harness codex (stateful threads)
       render.mjs              # Formateo de output
       args.mjs                # Parser de argumentos CLI
+      claude-session-transfer.mjs # Parser de transcripts + window transfer
 .claude-plugin/
   manifest.json               # Manifiesto del plugin (skills, metadata)
 ```

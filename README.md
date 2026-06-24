@@ -4,7 +4,7 @@ Claude Code plugin que delega code reviews y tareas a endpoints LLM alternativos
 
 ## Qué hace
 
-Agrega 9 comandos `/gateway:*` a Claude Code. Cuatro operaciones principales:
+Agrega 10 comandos `/gateway:*` a Claude Code. Cuatro operaciones principales:
 
 | Operación | Backend | Cuándo usar |
 |-----------|---------|-------------|
@@ -325,6 +325,33 @@ Envía SIGTERM al proceso, escala a SIGKILL si no termina en 2s.
 
 ---
 
+### `/gateway:transfer`
+
+Transfiere el contexto de la sesión actual de Claude Code a un modelo gateway. Window transfer: el modelo gateway ve los últimos N turnos de conversación.
+
+```
+/gateway:transfer
+/gateway:transfer --profile deepseek-pro
+/gateway:transfer --turns 50 "resumí lo que estábamos haciendo"
+/gateway:transfer --profile glm --turns 20
+```
+
+**Flags:**
+- `--profile NAME` — perfil a usar (default: defaultProfile)
+- `--turns N` — cantidad de turnos a enviar (default: 30)
+- Texto libre después de los flags → prompt de continuación (default: "Continue from where we left off.")
+
+**Cómo funciona:**
+1. Lee el transcript de la sesión actual (`$GATEWAY_TRANSCRIPT_PATH`, seteado por SessionStart hook)
+2. Parsea turnos user/assistant, filtra tool_use/tool_result/thinking
+3. Merge turnos consecutivos del mismo rol (evita errores 400 en APIs estrictas)
+4. Envía los últimos N turnos como contexto al endpoint gateway
+5. Devuelve la respuesta del modelo
+
+**Seguridad:** El transcript path se valida contra `~/.claude/` y debe ser `.jsonl`. Paths fuera del directorio de Claude o symlinks son rechazados.
+
+---
+
 ## Archivo de configuración
 
 Guardado en `~/.gateway-plugin/config.json` (o `$GATEWAY_PLUGIN_CONFIG_DIR/config.json`).
@@ -401,7 +428,7 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── researcher.md
 │   │   ├── reviewer.md
 │   │   └── security.md
-│   ├── commands/                        # 9 comandos slash
+│   ├── commands/                        # 10 comandos slash
 │   │   ├── review.md
 │   │   ├── adversarial-review.md
 │   │   ├── task.md
@@ -410,7 +437,8 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── setup.md
 │   │   ├── status.md
 │   │   ├── result.md
-│   │   └── cancel.md
+│   │   ├── cancel.md
+│   │   └── transfer.md                 # Window transfer de contexto a gateway
 │   ├── agents/
 │   │   ├── gateway-rescue.md            # Subagente forwarding genérico (fallback)
 │   │   ├── gateway-coder.md             # Implementación/refactoring (codex harness)
@@ -444,12 +472,15 @@ Los nombres son exactos — sin prefijos adicionales.
 │           ├── render.mjs               # Markdown render de reviews
 │           ├── state.mjs                # Estado persistente de jobs (atomic writes)
 │           ├── tracked-jobs.mjs         # Logging por job
-│           └── workspace.mjs            # Resolución de workspace root
+│           ├── workspace.mjs            # Resolución de workspace root
+│           └── claude-session-transfer.mjs  # Parser de transcripts + window transfer
 └── tests/
     ├── api-client.test.mjs          # HTTP client — unit
     ├── claude-subprocess.test.mjs   # Subprocess env + auth — unit
     ├── codex-harness.test.mjs       # Codex env + auth — unit
     ├── config.test.mjs              # Profile CRUD — unit
+    ├── claude-session-transfer.test.mjs # Transcript parser + buildMessages — unit
+    ├── session-lifecycle-hook.test.mjs  # Hook stdin + env var — unit
     └── integration.test.mjs         # Live gateway — connectivity, review, task (claude+codex)
 ```
 
@@ -459,13 +490,13 @@ Los nombres son exactos — sin prefijos adicionales.
 cd /opt/agent-plugin-cc
 
 # Unit tests (sin red)
-node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/config.test.mjs
+node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs
 
 # Integration tests (requiere gateway activo)
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Unit tests:** 37 tests — config (14), api-client (9), claude-subprocess (9), codex-harness (6). Sin red.
+**Unit tests:** 48 tests — config (13), api-client (9), claude-subprocess (9), codex-harness (6), claude-session-transfer (9), session-lifecycle-hook (2). Sin red.
 
 **Integration tests:** 12 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness, task via codex harness; para los 3 modelos principales (glm-5.2, minimax-m3, deepseek-v4-pro).
 
@@ -473,7 +504,7 @@ node --test --test-timeout=120000 tests/integration.test.mjs
 
 | Hook | Archivo | Qué hace |
 |------|---------|----------|
-| `SessionStart` | `session-lifecycle-hook.mjs` | Registra session ID; inyecta routing rules de gateway en el contexto vía `additionalContext` |
+| `SessionStart` | `session-lifecycle-hook.mjs` | Registra session ID y transcript path; inyecta routing rules de gateway en el contexto vía `additionalContext` |
 | `SessionEnd` | `session-lifecycle-hook.mjs` | Termina jobs activos, actualiza estado a `cancelled` |
 | `Stop` | `stop-review-gate-hook.mjs` | Espera hasta 120s que terminen jobs activos antes de cerrar |
 
@@ -568,6 +599,7 @@ rm ~/.gateway-plugin/config.json
 | `GATEWAY_PLUGIN_CONFIG_DIR` | Override del directorio de config (default: `~/.gateway-plugin`) |
 | `CLAUDE_PLUGIN_ROOT` | Seteado automáticamente por Claude Code al cargar el plugin |
 | `GATEWAY_COMPANION_SESSION_ID` | Seteado por el hook SessionStart, identifica la sesión actual |
+| `GATEWAY_TRANSCRIPT_PATH` | Path al transcript JSONL de la sesión actual (seteado por SessionStart hook) |
 
 ## Créditos
 

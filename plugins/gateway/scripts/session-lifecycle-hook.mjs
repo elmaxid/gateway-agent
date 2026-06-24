@@ -12,13 +12,16 @@ const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 export const TRANSCRIPT_PATH_ENV = "GATEWAY_TRANSCRIPT_PATH";
 
 async function readHookInput() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let raw = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("error", reject);
     process.stdin.on("end", () => {
       const trimmed = raw.trim();
-      resolve(trimmed ? JSON.parse(trimmed) : {});
+      if (!trimmed) { resolve({}); return; }
+      try { resolve(JSON.parse(trimmed)); }
+      catch (err) { reject(new Error(`Failed to parse hook input: ${err.message}`)); }
     });
   });
 }

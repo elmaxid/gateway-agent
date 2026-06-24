@@ -973,28 +973,34 @@ async function handleTransfer(argv) {
     aliasMap: { p: "profile" }
   });
 
-  const transcriptPath = process.env.GATEWAY_TRANSCRIPT_PATH;
-  const raw = loadTranscript(transcriptPath);
-  const turns = parseTranscript(raw);
-  const transferPrompt = positionals.join(" ") || "Continue from where we left off.";
-  const maxTurns = Math.max(1, parseInt(options.turns, 10) || 30);
-  const messages = buildMessages(turns, { maxTurns, transferPrompt });
+  try {
+    const transcriptPath = process.env.GATEWAY_TRANSCRIPT_PATH;
+    const raw = loadTranscript(transcriptPath);
+    const turns = parseTranscript(raw);
+    const transferPrompt = positionals.join(" ") || "Continue from where we left off.";
+    const maxTurns = Math.max(1, parseInt(options.turns, 10) || 30);
+    const messages = buildMessages(turns, { maxTurns, transferPrompt });
 
-  const config = loadConfig();
-  const profile = resolveProfile(options.profile, config);
+    const config = loadConfig();
+    const profile = resolveProfile(options.profile, config);
 
-  process.stderr.write(
-    `[gateway:transfer] ${turns.length} turns parsed, ${Math.min(turns.length, maxTurns)} sent to ${profile.defaultModel}\n`
-  );
+    process.stderr.write(
+      `[gateway:transfer] ${turns.length} turns parsed, ${Math.min(turns.length, maxTurns)} sent to ${profile.defaultModel}\n`
+    );
 
-  const response = await chatCompletion(profile, messages);
-  const content = response.choices?.[0]?.message?.content ?? "";
-  if (!content) {
-    process.stderr.write(`[gateway:transfer] empty response from ${profile.defaultModel} — check gateway endpoint\n`);
+    const response = await chatCompletion(profile, messages);
+    const content = response.choices?.[0]?.message?.content ?? "";
+    if (!content) {
+      process.stderr.write(`[gateway:transfer] empty response from ${profile.defaultModel} — check gateway endpoint\n`);
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(content + "\n");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[gateway:transfer] ${message}\n`);
     process.exitCode = 1;
-    return;
   }
-  process.stdout.write(content + "\n");
 }
 
 // ---------------------------------------------------------------------------

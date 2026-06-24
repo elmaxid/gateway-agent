@@ -48,6 +48,19 @@ describe("parseTranscript", () => {
     assert.strictEqual(turns.length, 1, "tool_result-only user turn should be dropped");
     assert.strictEqual(turns[0].content, "real question");
   });
+
+  it("handles non-string block.text gracefully", () => {
+    const lines = [
+      JSON.stringify({ type: "user", message: { role: "user", content: [
+        { type: "text", text: null },
+        { type: "text", text: 42 },
+        { type: "text", text: "valid text" }
+      ] } }),
+    ];
+    const turns = parseTranscript(lines.join("\n"));
+    assert.strictEqual(turns.length, 1);
+    assert.strictEqual(turns[0].content, "valid text");
+  });
 });
 
 describe("buildMessages", () => {
@@ -63,5 +76,45 @@ describe("buildMessages", () => {
     assert.strictEqual(messages.length, 12);
     assert.strictEqual(messages[messages.length - 1].role, "user");
     assert.strictEqual(messages[messages.length - 1].content, "Continue.");
+  });
+
+  it("merges consecutive same-role turns", () => {
+    const turns = [
+      { role: "user", content: "q1" },
+      { role: "assistant", content: "a1" },
+      { role: "assistant", content: "a2" },  // consecutive assistant
+      { role: "user", content: "q2" },
+    ];
+    const messages = buildMessages(turns, { maxTurns: 10, transferPrompt: "Go." });
+    // system + merged(user, assistant, user-with-prompt)
+    // assistant a1+a2 merged, user q2 gets "Go." appended
+    const roles = messages.map(m => m.role);
+    assert.deepStrictEqual(roles, ["system", "user", "assistant", "user"]);
+    assert.ok(messages[2].content.includes("a1"));
+    assert.ok(messages[2].content.includes("a2"));
+  });
+
+  it("appends transferPrompt to trailing user turn instead of adding duplicate", () => {
+    const turns = [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+      { role: "user", content: "last question" },
+    ];
+    const messages = buildMessages(turns, { maxTurns: 10, transferPrompt: "Continue." });
+    const roles = messages.map(m => m.role);
+    // No consecutive user messages
+    assert.deepStrictEqual(roles, ["system", "user", "assistant", "user"]);
+    // Last user message has both original content and transferPrompt
+    const lastMsg = messages[messages.length - 1];
+    assert.ok(lastMsg.content.includes("last question"));
+    assert.ok(lastMsg.content.includes("Continue."));
+  });
+
+  it("handles empty turns array", () => {
+    const messages = buildMessages([], { maxTurns: 10, transferPrompt: "Start." });
+    assert.strictEqual(messages.length, 2); // system + user prompt
+    assert.strictEqual(messages[0].role, "system");
+    assert.strictEqual(messages[1].role, "user");
+    assert.strictEqual(messages[1].content, "Start.");
   });
 });

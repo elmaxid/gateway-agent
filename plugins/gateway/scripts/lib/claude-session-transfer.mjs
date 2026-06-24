@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 export function parseTranscript(rawContent) {
   const turns = [];
@@ -24,7 +26,7 @@ function extractTextContent(content) {
 
   const parts = [];
   for (const block of content) {
-    if (block.type === "text") {
+    if (block.type === "text" && typeof block.text === "string") {
       const t = block.text.trim();
       if (t.startsWith('<local-command-') || t.startsWith('<command-name>') ||
           t.startsWith('<command-message>') || t.startsWith('<command-args>')) {
@@ -42,12 +44,29 @@ function extractTextContent(content) {
 
 export function buildMessages(turns, { maxTurns = 30, transferPrompt = "Continue from where we left off." } = {}) {
   const sliced = turns.slice(-maxTurns);
+
+  // Merge consecutive same-role turns (created by filtering tool_use-only entries)
+  const merged = [];
+  for (const turn of sliced) {
+    if (merged.length > 0 && merged[merged.length - 1].role === turn.role) {
+      merged[merged.length - 1].content += "\n\n" + turn.content;
+    } else {
+      merged.push({ role: turn.role, content: turn.content });
+    }
+  }
+
   const systemMsg = {
     role: "system",
-    content: `This is a transferred Claude Code session. The last ${sliced.length} turns of context follow.`
+    content: `This is a transferred Claude Code session. The last ${merged.length} turns of context follow.`
   };
-  const userMsg = { role: "user", content: transferPrompt };
-  return [systemMsg, ...sliced.map(t => ({ role: t.role, content: t.content })), userMsg];
+
+  // If last turn is already user, append transferPrompt to it instead of creating consecutive user messages
+  if (merged.length > 0 && merged[merged.length - 1].role === "user") {
+    merged[merged.length - 1].content += "\n\n" + transferPrompt;
+    return [systemMsg, ...merged];
+  }
+
+  return [systemMsg, ...merged, { role: "user", content: transferPrompt }];
 }
 
 export function loadTranscript(transcriptPath) {
@@ -56,6 +75,14 @@ export function loadTranscript(transcriptPath) {
   }
   if (!fs.existsSync(transcriptPath)) {
     throw new Error(`Transcript not found: ${transcriptPath}`);
+  }
+  if (!transcriptPath.endsWith(".jsonl")) {
+    throw new Error(`Invalid transcript path (must be .jsonl): ${transcriptPath}`);
+  }
+  const realPath = fs.realpathSync(transcriptPath);
+  const claudeDir = path.join(os.homedir(), ".claude");
+  if (!realPath.startsWith(claudeDir + path.sep) && !realPath.startsWith(claudeDir + "/")) {
+    throw new Error(`Transcript path must be under ~/.claude/: ${transcriptPath}`);
   }
   return fs.readFileSync(transcriptPath, "utf8");
 }

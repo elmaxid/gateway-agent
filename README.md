@@ -4,7 +4,7 @@ Claude Code plugin que delega code reviews y tareas a endpoints LLM alternativos
 
 ## Qué hace
 
-Agrega 10 comandos `/gateway:*` a Claude Code. Cuatro operaciones principales:
+Agrega 10 comandos `/gateway:*` a Claude Code. Cinco operaciones principales:
 
 | Operación | Backend | Cuándo usar |
 |-----------|---------|-------------|
@@ -12,8 +12,9 @@ Agrega 10 comandos `/gateway:*` a Claude Code. Cuatro operaciones principales:
 | **Task** | Subprocess `claude -p` o `codex exec` (dual-harness) | Delegación completa con herramientas |
 | **Work** | Auto-routing → persona especializada | Detecta tipo de tarea por keywords |
 | **Debate** | HTTP paralelo multi-modelo | Posiciones independientes + crítica cruzada + síntesis |
+| **Transfer** | HTTP directo con contexto de sesión inyectado | Continuar sesión actual en modelo gateway |
 
-La diferencia clave con otros plugins: no hay broker ni servidor. Reviews van por HTTP directo. Tasks spawnan un proceso aislado apuntando al endpoint configurado.
+La diferencia clave con otros plugins: no hay broker ni servidor. Reviews usan un loop agentic (tool-use multi-turn) por defecto; `--no-tools` cambia a HTTP directo con diff pre-inyectado. Tasks spawnan un proceso aislado apuntando al endpoint configurado.
 
 ### Personas especializadas
 
@@ -198,12 +199,14 @@ Review del diff actual usando el LLM configurado.
   - `auto` (default): staged/unstaged si los hay, sino branch diff contra rama base
   - `working-tree`: solo cambios sin commitear
   - `branch`: diff desde merge-base contra rama principal
-- `--include-diff` — inyecta el diff completo en el prompt de una vez en lugar de usar el agentic loop
+- `--no-tools` — desactiva el loop agentic; usa HTTP directo con diff pre-inyectado en el prompt (más rápido, menos contexto)
+- `--include-diff` — fuerza inclusión del diff completo en el contexto pre-inyectado (solo tiene efecto con `--no-tools`)
 - `--json` — output estructurado JSON
 
-**Modo agentic vs `--include-diff`:**
-- **Sin `--include-diff`** (default): el modelo explora el repo incrementalmente via tool-use (`read_file`, `git_diff`, `list_changed_files`, `git_log`, `git_show`). Útil para repos grandes o cuando se necesita contexto adicional más allá del diff.
-- **Con `--include-diff`**: inyecta el diff completo en el prompt de una vez. Más rápido para diffs pequeños; puede truncar en repos con muchos cambios.
+**Modos de review:**
+- **Default (agentic)**: el modelo explora el repo incrementalmente via tool-use (`read_file`, `git_diff`, `list_changed_files`, `git_log`, `git_show`). Más contexto, más lento.
+- **`--no-tools`**: HTTP directo sin tools; el modelo recibe solo el contexto pre-calculado. Más rápido.
+- **`--no-tools --include-diff`**: igual que `--no-tools` pero fuerza incluir el diff completo en el prompt inicial.
 
 **Output:** Structured review con `verdict` (`approve|request-changes|comment`), findings con severity (`critical|warning|suggestion|nitpick`), recomendaciones.
 

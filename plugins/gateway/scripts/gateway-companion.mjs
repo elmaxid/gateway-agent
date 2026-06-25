@@ -996,6 +996,84 @@ async function handleDebate(argv) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Staged-review subcommand — 2-phase review
+// ---------------------------------------------------------------------------
+
+const PHASE1_SYSTEM = `You are a spec compliance reviewer. Given a diff and optional description of intent, evaluate whether the code changes match the stated goals. Check for:
+1. Missing functionality described in the intent
+2. Extra functionality not mentioned in the intent (scope creep)
+3. Incomplete implementations (TODOs, stubs, half-finished logic)
+4. Mismatch between commit message/PR description and actual changes
+
+Return a JSON object: { "phase": "spec-compliance", "verdict": "pass"|"partial"|"fail", "findings": [{ "severity": "critical"|"warning"|"suggestion", "file": "path", "description": "..." }], "summary": "..." }`;
+
+async function handleStagedReview(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["profile", "model", "base", "scope", "cwd"],
+    booleanOptions: ["json", "include-diff"],
+    aliasMap: { p: "profile", m: "model" }
+  });
+
+  const description = positionals.join(" ").trim();
+  const config = loadConfig();
+  const profile = resolveProfile(
+    options.profile || resolveReviewProfile(config)?.name || config.defaultProfile,
+    config
+  );
+  const model = options.model || undefined;
+  const cwd = resolveCommandCwd(options);
+
+  ensureGitRepository(cwd);
+  const target = resolveReviewTarget(cwd, { base: options.base, scope: options.scope });
+
+  if (!options.json) console.error("[staged-review] Collecting diff context...");
+  const context = collectReviewContext(cwd, target, {
+    includeDiff: options["include-diff"] || undefined
+  });
+
+  const userContent = description
+    ? `Intent: ${description}\n\n${context.content}`
+    : context.content;
+
+  // Phase 1: Spec compliance
+  if (!options.json) console.error("[staged-review] Phase 1: spec compliance...");
+  const phase1 = await runDirectReview(profile, PHASE1_SYSTEM, userContent, { model });
+
+  // Phase 2: Adversarial code quality (reuse existing prompts)
+  if (!options.json) console.error("[staged-review] Phase 2: code quality (first pass)...");
+  const pass1 = await runDirectReview(profile, REVIEW_SYSTEM_PROMPT, userContent, { model });
+
+  if (!options.json) console.error("[staged-review] Phase 2: adversarial filter...");
+  const pass1Str = typeof pass1.content === "string"
+    ? pass1.content
+    : JSON.stringify(pass1.content, null, 2);
+  const changedFilesList = context.changedFiles?.length > 0
+    ? context.changedFiles.join("\n")
+    : "(no files listed)";
+  const adversarialPrompt = `Original review findings:\n${pass1Str}\n\nChanged files (${context.fileCount}):\n${changedFilesList}\n\nContext: ${context.summary}`;
+  const pass2 = await runDirectReview(profile, ADVERSARIAL_SYSTEM_PROMPT, adversarialPrompt, { model });
+
+  const result = {
+    phase1: { ...phase1, type: "spec-compliance" },
+    phase2: { type: "code-quality-adversarial", firstPass: pass1, filtered: pass2 },
+    meta: { profile: profile.name, model: model || profile.defaultModel, target: target.label }
+  };
+
+  if (options.json) {
+    outputResult(result, true);
+  } else {
+    console.log("# Staged Review\n");
+    console.log("## Phase 1: Spec Compliance\n");
+    console.log(typeof phase1.content === "string" ? phase1.content : JSON.stringify(phase1.content, null, 2));
+    console.log("\n## Phase 2: Code Quality (Adversarial)\n");
+    console.log("### First Pass\n");
+    console.log(typeof pass1.content === "string" ? pass1.content : JSON.stringify(pass1.content, null, 2));
+    console.log("\n### Adversarial Filter\n");
+    console.log(typeof pass2.content === "string" ? pass2.content : JSON.stringify(pass2.content, null, 2));
+  }
+}
+
 function getDefaultDebateProfiles(config) {
   const names = Object.keys(config.profiles || {});
   if (config.defaultProfile && names.includes(config.defaultProfile)) {
@@ -1127,6 +1205,7 @@ const SUBCOMMANDS = {
   setup: handleSetup,
   review: handleReview,
   "adversarial-review": handleAdversarialReview,
+  "staged-review": handleStagedReview,
   task: handleTask,
   "task-worker": handleTaskWorker,
   debate: handleDebate,

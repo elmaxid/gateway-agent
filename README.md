@@ -4,14 +4,15 @@ Claude Code plugin que delega code reviews y tareas a endpoints LLM alternativos
 
 ## Qué hace
 
-Agrega 10 comandos `/gateway:*` a Claude Code. Cinco operaciones principales:
+Agrega 11 comandos `/gateway:*` a Claude Code. Seis operaciones principales:
 
 | Operación | Backend | Cuándo usar |
 |-----------|---------|-------------|
 | **Review** | HTTP + agentic loop (tool-use multi-turn) | Revisar código; modelo explora repo con git/fs tools |
+| **Staged Review** | HTTP directo 2-fases | Fase 1: spec compliance, Fase 2: code quality adversarial |
 | **Task** | Subprocess `claude -p` o `codex exec` (dual-harness) | Delegación completa con herramientas |
 | **Work** | Auto-routing → persona especializada | Detecta tipo de tarea por keywords |
-| **Debate** | HTTP paralelo multi-modelo | Posiciones independientes + crítica cruzada + síntesis |
+| **Debate** | HTTP paralelo multi-modelo con preflight + quorum | Posiciones independientes + crítica cruzada + síntesis |
 | **Transfer** | HTTP directo con contexto de sesión inyectado | Continuar sesión actual en modelo gateway |
 
 La diferencia clave con otros plugins: no hay broker ni servidor. Reviews usan un loop agentic (tool-use multi-turn) por defecto; `--no-tools` cambia a HTTP directo con diff pre-inyectado. Tasks spawnan un proceso aislado apuntando al endpoint configurado.
@@ -227,6 +228,45 @@ Mismos flags que `/gateway:review` (incluyendo `--include-diff`). Más lento per
 
 ---
 
+### `/gateway:staged-review`
+
+Review de 2 fases: Fase 1 evalúa spec compliance (¿el código hace lo que dice?), Fase 2 corre un review adversarial de calidad de código (encuentra issues, luego filtra falsos positivos).
+
+```
+/gateway:staged-review --include-diff "v0.3.1 robustness improvements"
+/gateway:staged-review --profile minimax --include-diff
+/gateway:staged-review --json --include-diff
+/gateway:staged-review --base main --scope branch "verificar feature branch"
+```
+
+**Flags:**
+- `--profile NAME` — perfil a usar (default: reviewProfile o defaultProfile)
+- `--model MODEL` — override del modelo
+- `--base REF` — ref base para el diff
+- `--scope auto|working-tree|branch` — qué diff revisar
+- `--include-diff` — incluye el diff completo en el contexto
+- `--json` — output estructurado JSON con `{ phase1, phase2, meta }`
+- Texto libre después de los flags → descripción del intent (se inyecta como contexto de la Fase 1)
+
+**Fases:**
+1. **Spec compliance:** Evalúa si los cambios de código coinciden con el intent declarado. Detecta funcionalidad faltante, scope creep, implementaciones incompletas, y mismatch entre descripción y cambios reales. Retorna JSON con `verdict` (`pass|partial|fail`) y `findings`.
+2. **Code quality adversarial:** Dos pasadas — primera busca issues usando `REVIEW_SYSTEM_PROMPT`, segunda filtra falsos positivos con `ADVERSARIAL_SYSTEM_PROMPT`. Reutiliza los mismos prompts que `/gateway:review` y `/gateway:adversarial-review`.
+
+**Output JSON (con `--json`):**
+```json
+{
+  "phase1": { "type": "spec-compliance", "content": "...", "model": "..." },
+  "phase2": {
+    "type": "code-quality-adversarial",
+    "firstPass": { "content": "...", "model": "..." },
+    "filtered": { "content": "...", "model": "..." }
+  },
+  "meta": { "profile": "minimax", "model": "minimax-m3", "target": "working-tree" }
+}
+```
+
+---
+
 ### `/gateway:task`
 
 Delega una tarea al LLM via subprocess. Soporta dual-harness (claude o codex).
@@ -288,12 +328,20 @@ Debate multi-modelo entre endpoints configurados. HTTP puro, sin subprocesses.
 - `--models profile1,profile2` — perfiles a usar (default: primeros 2 configurados)
 - `--rounds N` — número de rondas (default: 3)
 - `--synthesizer PROFILE` — perfil para síntesis final (default: primer perfil)
+- `--mode relaxed|standard` — quorum mode (default: `relaxed`)
+  - `relaxed`: mayoría (ceil(n/2)) de perfiles deben responder — si 1 de 2 falla, debate continúa
+  - `standard`: todos los perfiles deben responder — falla si alguno no responde
 - `--include-diff` — inyecta el diff del working tree en la pregunta (requiere repo git)
 - `--base REF` — ref base para el diff (implica inclusión de contexto git)
 - `--scope auto|working-tree|branch` — qué diff incluir
 - `--json` — output estructurado
 
-**Flujo:** Round 1 (posiciones paralelas) → Round 2 (crítica cruzada) → Round 3 (síntesis).
+**Flujo:**
+1. **Preflight:** Health check de conectividad a todos los perfiles (incluyendo synthesizer). Filtra perfiles inactivos si el quorum lo permite; falla rápido si no hay quorum o el synthesizer está caído.
+2. **Round 1:** Posiciones paralelas de cada modelo.
+3. **Quorum check:** Si menos de `quorumRequired` modelos respondieron, retorna resultado parcial con `quorum_failed: true` (no lanza excepción).
+4. **Round 2:** Crítica cruzada — cada modelo critica las posiciones de los otros.
+5. **Round 3:** Síntesis — el synthesizer produce un resumen equilibrado.
 
 ---
 
@@ -446,12 +494,13 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── researcher.md
 │   │   ├── reviewer.md
 │   │   └── security.md
-│   ├── commands/                        # 10 comandos slash
+│   ├── commands/                        # 11 comandos slash
 │   │   ├── review.md
 │   │   ├── adversarial-review.md
+│   │   ├── staged-review.md            # Review 2-fases: spec compliance + adversarial
 │   │   ├── task.md
 │   │   ├── work.md                     # Auto-routing por keywords → persona correcta
-│   │   ├── debate.md                   # Debate multi-modelo HTTP puro
+│   │   ├── debate.md                   # Debate multi-modelo con preflight + quorum
 │   │   ├── setup.md
 │   │   ├── status.md
 │   │   ├── result.md
@@ -477,10 +526,10 @@ Los nombres son exactos — sin prefijos adicionales.
 │       ├── stop-review-gate-hook.mjs    # Espera jobs activos en Stop (TTY-safe)
 │       └── lib/
 │           ├── agentic-review.mjs       # Driver multi-turn tool-use para /gateway:review
-│           ├── api-client.mjs           # HTTP + SSE streaming (OpenAI-compat)
+│           ├── api-client.mjs           # HTTP + SSE streaming + per-attempt AbortController timeout
 │           ├── claude-subprocess.mjs    # Spawn claude -p con env custom
 │           ├── codex-harness.mjs       # Spawn codex exec (harness alternativo)
-│           ├── debate.mjs              # Motor de debate multi-modelo HTTP
+│           ├── debate.mjs              # Motor de debate multi-modelo con quorum + preflight
 │           ├── config.mjs               # Sistema de perfiles multi-endpoint
 │           ├── args.mjs                 # Parser de flags CLI
 │           ├── fs.mjs                   # Helpers de filesystem
@@ -495,7 +544,8 @@ Los nombres son exactos — sin prefijos adicionales.
 │           ├── workspace.mjs            # Resolución de workspace root
 │           └── claude-session-transfer.mjs  # Parser de transcripts + window transfer
 └── tests/
-    ├── api-client.test.mjs          # HTTP client — unit
+    ├── api-client.test.mjs          # HTTP client + AbortController timeout — unit (11 tests)
+    ├── debate.test.mjs              # Quorum enforcement + exports — unit (6 tests)
     ├── claude-subprocess.test.mjs   # Subprocess env + auth — unit
     ├── codex-harness.test.mjs       # Codex env + auth — unit
     ├── config.test.mjs              # Profile CRUD — unit
@@ -510,13 +560,13 @@ Los nombres son exactos — sin prefijos adicionales.
 cd /opt/agent-plugin-cc
 
 # Unit tests (sin red)
-node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs
+node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs
 
 # Integration tests (requiere gateway activo)
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Unit tests:** 48 tests — config (13), api-client (9), claude-subprocess (9), codex-harness (6), claude-session-transfer (9), session-lifecycle-hook (2). Sin red.
+**Unit tests:** 56 tests — config (13), api-client (11), debate (6), claude-subprocess (9), codex-harness (6), claude-session-transfer (9), session-lifecycle-hook (2). Sin red.
 
 **Integration tests:** 12 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness, task via codex harness; para los 3 modelos principales (glm-5.2, minimax-m3, deepseek-v4-pro).
 
@@ -625,7 +675,7 @@ rm ~/.gateway-plugin/config.json
 
 UNLICENSED — código privado, todos los derechos reservados al autor.
 
-**Versión actual:** v0.3.0
+**Versión actual:** v0.3.1
 
 ## Créditos
 

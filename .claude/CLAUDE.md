@@ -36,6 +36,7 @@ node plugins/gateway/scripts/gateway-companion.mjs setup test --profile ollama-d
 | Tarea | Herramienta |
 |-------|-------------|
 | Code review antes de commit | `/gateway:review --include-diff` |
+| Review 2-fases (spec + adversarial) | `/gateway:staged-review --include-diff` |
 | Debate arquitectura / decisión técnica | `/gateway:debate --include-diff` |
 | Revisión adversarial (2-pass false-positive filter) | `/gateway:adversarial-review --include-diff` |
 | Implementación / feature nueva | `gateway:gateway-coder` (codex harness) |

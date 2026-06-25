@@ -12,7 +12,7 @@ import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
 import { runTask } from "./lib/codex-harness.mjs";
 import { loadTranscript, parseTranscript, buildMessages } from "./lib/claude-session-transfer.mjs";
-import { runDebate, renderDebateOutput } from "./lib/debate.mjs";
+import { runDebate, renderDebateOutput, preflightProfiles } from "./lib/debate.mjs";
 import {
   loadConfig,
   saveConfig,
@@ -902,7 +902,7 @@ async function handleCancel(argv) {
 
 async function handleDebate(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["models", "rounds", "synthesizer", "base", "scope", "cwd"],
+    valueOptions: ["models", "rounds", "synthesizer", "base", "scope", "cwd", "mode"],
     booleanOptions: ["json", "include-diff"]
   });
 
@@ -942,7 +942,8 @@ async function handleDebate(argv) {
     rounds,
     synthesizerProfile: options.synthesizer || profileNames[0],
     onProgress: (msg) => console.error(msg),
-    json: options.json
+    json: options.json,
+    mode: options.mode || "relaxed"
   });
 
   if (options.json) {

@@ -1,6 +1,6 @@
 // Multi-model debate engine — HTTP-pure, no subprocesses.
 // Flow: parallel positions → cross-critique → synthesis.
-import { chatCompletion, sanitizeError } from "./api-client.mjs";
+import { chatCompletion, sanitizeError, testConnectivity } from "./api-client.mjs";
 import { loadConfig, resolveProfile } from "./config.mjs";
 
 function extractResponseText(completion) {
@@ -25,12 +25,17 @@ export async function runDebate(options) {
     rounds = 3,
     synthesizerProfile: synthName,
     onProgress,
-    json = false
+    json = false,
+    mode = "relaxed"
   } = options;
 
   const config = loadConfig();
   const profiles = profileNames.map((n) => resolveProfile(n, config));
   const synthProfile = resolveProfile(synthName || profileNames[0], config);
+
+  const quorumRequired = mode === "relaxed"
+    ? Math.ceil(profiles.length / 2)
+    : profiles.length;
 
   const progress = (msg) => {
     console.error(`[debate] ${msg}`);
@@ -54,6 +59,21 @@ export async function runDebate(options) {
 
   const validPositions = positions.filter((p) => p.response !== null);
   if (validPositions.length === 0) throw new Error("All debate participants failed to respond");
+
+  if (validPositions.length < quorumRequired) {
+    const partial = {
+      question,
+      positions: validPositions,
+      critiques: [],
+      synthesis: null,
+      synthProfile: null,
+      quorum_failed: true,
+      quorum: { got: validPositions.length, need: quorumRequired, mode }
+    };
+    progress(`Quorum not met: ${validPositions.length}/${quorumRequired} (mode=${mode})`);
+    return json ? partial : `⚠️ Quorum not met: ${validPositions.length}/${quorumRequired} responses (mode=${mode})\n\n` +
+      renderDebateOutput(partial);
+  }
 
   if (rounds < 2) {
     const result = { question, positions: validPositions, critiques: [], synthesis: null, synthProfile: null };
@@ -166,4 +186,16 @@ export function renderDebateOutput(result) {
   }
 
   return lines.join("\n");
+}
+
+export async function preflightProfiles(profileNames, config) {
+  const resolvedConfig = config ?? loadConfig();
+  const results = await Promise.all(
+    profileNames.map(async (name) => {
+      const profile = resolveProfile(name, resolvedConfig);
+      const result = await testConnectivity(profile);
+      return { name, ...result };
+    })
+  );
+  return results;
 }

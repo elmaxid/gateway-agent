@@ -419,8 +419,24 @@ async function handleSetup(argv) {
 
     case "models": {
       const { options } = parseArgs(rest, { valueOptions: ["profile"], booleanOptions: ["json"] });
-      const config = loadConfig();
-      const profile = resolveProfile(options.profile, config);
+
+      let config;
+      try {
+        config = loadConfig();
+      } catch (err) {
+        console.error(`Config error: ${err.message}`);
+        process.exitCode = 2;
+        break;
+      }
+
+      let profile;
+      try {
+        profile = resolveProfile(options.profile, config);
+      } catch (err) {
+        console.error(`Profile error: ${err.message}`);
+        process.exitCode = 2;
+        break;
+      }
 
       let models;
       try {

@@ -49,6 +49,7 @@ export function extractJson(content) {
 
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1_000;
+export const REQUEST_TIMEOUT_MS = 60_000;
 const RETRIABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const RETRIABLE_NET_CODES = new Set([
   "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ECONNABORTED",
@@ -82,20 +83,35 @@ function parseRetryAfter(headers) {
   return null;
 }
 
-async function withRetry(fn, signal) {
+async function withRetry(fn, externalSignal, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    try { return await fn(); } catch (err) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let onAbort;
+    if (externalSignal) {
+      onAbort = () => controller.abort(externalSignal.reason);
+      externalSignal.addEventListener("abort", onAbort, { once: true });
+      if (externalSignal.aborted) controller.abort(externalSignal.reason);
+    }
+    try {
+      return await fn(controller.signal);
+    } catch (err) {
       lastError = err;
+      if (err.name === "AbortError") throw err;
+      if (externalSignal?.aborted) throw err;
       if (attempt === MAX_RETRIES - 1) throw err;
       const status = err.status ?? parseInt(err.message?.match(/\((\d+)\)/)?.[1] ?? "0", 10);
       const isNetworkError = err.name === "TypeError" && RETRIABLE_NET_CODES.has(err.cause?.code);
       const isRetriable = isNetworkError || RETRIABLE_STATUS.has(status);
       if (!isRetriable) throw err;
-      if (signal?.aborted) throw err;
       const retryAfter = err.retryAfter ?? (status === 429 ? parseRetryAfter(err.headers) : null);
       const delay = retryAfter ?? BASE_DELAY_MS * 2 ** attempt * (0.8 + Math.random() * 0.4);
-      await sleep(delay, signal);
+      await sleep(delay, externalSignal);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort && externalSignal) externalSignal.removeEventListener("abort", onAbort);
     }
   }
   throw lastError;
@@ -120,12 +136,12 @@ export async function chatCompletion(profile, messages, opts = {}) {
     stream: false,
   };
 
-  return withRetry(async () => {
+  return withRetry(async (signal) => {
     const res = await globalThis.fetch(url, {
       method: "POST",
       headers: buildHeaders(profile),
       body: JSON.stringify(body),
-      signal: opts.signal,
+      signal,
     });
 
     if (!res.ok) {
@@ -137,7 +153,7 @@ export async function chatCompletion(profile, messages, opts = {}) {
     }
 
     return res.json();
-  }, opts.signal);
+  }, opts.signal, { timeoutMs: opts.timeoutMs });
 }
 
 // ---------------------------------------------------------------------------

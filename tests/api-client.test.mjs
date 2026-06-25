@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import net from "node:net";
 
 import * as apiClient from "../plugins/gateway/scripts/lib/api-client.mjs";
 
@@ -94,6 +95,61 @@ describe("runDirectReview", () => {
     } catch (err) {
       assert.ok(!err.message.includes("super-secret"),
         "Error should not contain auth token");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// chatCompletion per-attempt timeout
+// ---------------------------------------------------------------------------
+
+describe("chatCompletion per-attempt timeout", () => {
+  it("throws AbortError when endpoint hangs beyond timeout", async () => {
+    const server = net.createServer((socket) => {
+      socket.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n");
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const profile = {
+      baseUrl: `http://127.0.0.1:${port}`,
+      defaultModel: "test-model",
+    };
+    try {
+      await assert.rejects(
+        () => apiClient.chatCompletion(profile, [{ role: "user", content: "test" }], {
+          timeoutMs: 200,
+        }),
+        (err) => {
+          return err.name === "AbortError" || err.message.includes("aborted");
+        }
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it("does not retry AbortError (timeout is non-retriable, single attempt)", async () => {
+    let attemptCount = 0;
+    const server = net.createServer((socket) => {
+      attemptCount++;
+      socket.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n");
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const profile = {
+      baseUrl: `http://127.0.0.1:${port}`,
+      defaultModel: "test-model",
+    };
+    try {
+      await assert.rejects(
+        () => apiClient.chatCompletion(profile, [{ role: "user", content: "test" }], {
+          timeoutMs: 200,
+        }),
+        (err) => err.name === "AbortError" || err.message.includes("aborted")
+      );
+      assert.strictEqual(attemptCount, 1, "AbortError should not trigger retry");
+    } finally {
+      server.close();
     }
   });
 });

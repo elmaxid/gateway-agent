@@ -925,6 +925,47 @@ async function handleDebate(argv) {
   }
 
   const rounds = options.rounds ? Number(options.rounds) : 3;
+  const mode = options.mode || "relaxed";
+
+  // Pre-flight health check — includes synthesizer if different from debate profiles
+  const synthesizerName = options.synthesizer || profileNames[0];
+  const allProfilesToCheck = [...new Set([...profileNames, synthesizerName])];
+
+  if (!options.json) console.error("[debate] Running preflight health check...");
+  const health = await preflightProfiles(allProfilesToCheck, config);
+  const unhealthy = health.filter((h) => !h.ok);
+
+  if (unhealthy.length > 0) {
+    for (const h of unhealthy) {
+      console.error(`[debate] ⚠️ ${h.name}: ${h.error}`);
+    }
+  }
+
+  const synthHealth = health.find((h) => h.name === synthesizerName);
+  if (synthHealth && !synthHealth.ok && rounds >= 3) {
+    throw new Error(
+      `Preflight failed: synthesizer profile "${synthesizerName}" is unreachable. ` +
+      `Cannot complete Round 3 synthesis. Error: ${synthHealth.error}`
+    );
+  }
+
+  const healthyDebate = health.filter((h) => h.ok && profileNames.includes(h.name));
+  const quorumRequired = mode === "relaxed"
+    ? Math.ceil(profileNames.length / 2)
+    : profileNames.length;
+
+  if (healthyDebate.length < quorumRequired) {
+    throw new Error(
+      `Preflight failed: ${healthyDebate.length}/${profileNames.length} debate profiles reachable, ` +
+      `need ${quorumRequired} (mode=${mode}). ` +
+      `Unreachable: ${unhealthy.filter(h => profileNames.includes(h.name)).map((h) => h.name).join(", ")}`
+    );
+  }
+
+  const activeProfileNames = healthyDebate.map((h) => h.name);
+  if (activeProfileNames.length < profileNames.length && !options.json) {
+    console.error(`[debate] Continuing with ${activeProfileNames.length} healthy profiles: ${activeProfileNames.join(", ")}`);
+  }
 
   let fullQuestion = question;
   if (options["include-diff"] || options.base || options.scope) {
@@ -938,12 +979,12 @@ async function handleDebate(argv) {
 
   const result = await runDebate({
     question: fullQuestion,
-    profileNames,
+    profileNames: activeProfileNames,
     rounds,
-    synthesizerProfile: options.synthesizer || profileNames[0],
+    synthesizerProfile: synthesizerName,
     onProgress: (msg) => console.error(msg),
     json: options.json,
-    mode: options.mode || "relaxed"
+    mode
   });
 
   if (options.json) {

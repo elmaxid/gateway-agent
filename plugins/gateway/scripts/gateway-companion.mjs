@@ -417,8 +417,45 @@ async function handleSetup(argv) {
       break;
     }
 
+    case "models": {
+      const { options } = parseArgs(rest, { valueOptions: ["profile"], booleanOptions: ["json"] });
+      const config = loadConfig();
+      const profile = resolveProfile(options.profile, config);
+
+      let models;
+      try {
+        models = await listModels(profile);
+      } catch (err) {
+        console.error(`Failed to list models from ${profile.baseUrl}: ${err.message}`);
+        process.exitCode = 1;
+        break;
+      }
+
+      const payload = {
+        profile:          profile.name,
+        endpoint:         profile.baseUrl,
+        configured_model: profile.defaultModel,
+        models,
+      };
+
+      if (options.json) {
+        outputResult(payload, true);
+      } else {
+        if (models.length === 0) {
+          console.log(`No models returned by ${profile.name} (${profile.baseUrl})`);
+        } else {
+          console.log(`Models available at ${profile.name} (${profile.baseUrl}):`);
+          for (const m of models) {
+            const marker = m === profile.defaultModel ? "  ← configured" : "";
+            console.log(`  ${m}${marker}`);
+          }
+        }
+      }
+      break;
+    }
+
     default:
-      throw new Error(`Unknown setup action: ${action}. Use add, remove, list, test, set-default, set-review-profile, set-task-profile, set-model, or doctor.`);
+      throw new Error(`Unknown setup action: ${action}. Use add, remove, list, test, set-default, set-review-profile, set-task-profile, set-model, doctor, or models.`);
   }
 }
 

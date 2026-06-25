@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -324,8 +324,101 @@ async function handleSetup(argv) {
       break;
     }
 
+    case "doctor": {
+      const { options } = parseArgs(rest, { booleanOptions: ["json"] });
+
+      let config;
+      try {
+        config = loadConfig();
+      } catch (err) {
+        console.error(`Config error: ${err.message}`);
+        process.exitCode = 2;
+        break;
+      }
+
+      function checkBinary(name) {
+        const r = spawnSync(name, ["--version"], { encoding: "utf8", timeout: 5000 });
+        if (r.status === 0) {
+          const version = (r.stdout || r.stderr || "").trim().split("\n")[0];
+          return { ok: true, version };
+        }
+        return { ok: false, error: r.error?.code || `exit ${r.status}` };
+      }
+
+      const profileNames = Object.keys(config.profiles ?? {});
+
+      // spawnSync is synchronous — run sequentially, NOT in Promise.all
+      const claudeCheck = checkBinary("claude");
+      const codexCheck  = checkBinary("codex");
+      const profileResults = profileNames.length > 0
+        ? await preflightProfiles(profileNames, config)
+        : [];
+
+      const anyProfileFail = profileResults.some(p => !p.ok);
+      if (!claudeCheck.ok || anyProfileFail) process.exitCode = 1;
+
+      const roles = {
+        default: config.defaultProfile ?? null,
+        review:  config.reviewProfile  ?? null,
+        task:    config.taskProfile    ?? null,
+      };
+
+      if (options.json) {
+        const profilesMap = {};
+        for (const p of profileResults) {
+          profilesMap[p.name] = {
+            ok: p.ok,
+            latency_ms: p.latencyMs,
+            model: p.model,
+            ...(p.error && { error: p.error }),
+          };
+        }
+        const checks = {
+          claude: claudeCheck.ok
+            ? { ok: true, version: claudeCheck.version }
+            : { ok: false, error: claudeCheck.error },
+          codex: codexCheck.ok
+            ? { ok: true, version: codexCheck.version }
+            : { ok: false, warning: "not found — fallback to claude harness active" },
+        };
+        outputResult({ checks, profiles: profilesMap, roles }, true);
+      } else {
+        const ok = "✓", fail = "✗", warn = "⚠";
+        const lines = [];
+
+        lines.push("[harness]");
+        lines.push(`  claude  ${claudeCheck.ok ? ok : fail}  ${claudeCheck.ok ? claudeCheck.version : claudeCheck.error}`);
+        lines.push(`  codex   ${codexCheck.ok ? ok : warn}  ${codexCheck.ok ? codexCheck.version : "not found (fallback: claude harness active)"}`);
+
+        lines.push("");
+        lines.push("[profiles]");
+        if (profileResults.length === 0) {
+          lines.push("  (no profiles configured — run `setup add` first)");
+        } else {
+          const nameW = Math.max(4, ...profileResults.map(p => p.name.length)) + 2;
+          lines.push(`  ${"NAME".padEnd(nameW)}  STATUS    LATENCY    MODEL`);
+          for (const p of profileResults) {
+            const marker = p.name === config.defaultProfile ? " *" : "  ";
+            const status = p.ok ? `${ok} OK  ` : `${fail} FAIL`;
+            const latency = p.ok ? `${p.latencyMs}ms` : "";
+            const model = p.model ?? p.error ?? "";
+            lines.push(`  ${(p.name + marker).padEnd(nameW)}  ${status}  ${latency.padEnd(8)}  ${model}`);
+          }
+        }
+
+        lines.push("");
+        lines.push("[roles]");
+        lines.push(`  default → ${roles.default ?? "(unset)"}`);
+        lines.push(`  review  → ${roles.review  ?? "(unset)"}`);
+        lines.push(`  task    → ${roles.task    ?? "(unset)"}`);
+
+        console.log(lines.join("\n"));
+      }
+      break;
+    }
+
     default:
-      throw new Error(`Unknown setup action: ${action}. Use add, remove, list, test, set-default, set-review-profile, set-task-profile, or set-model.`);
+      throw new Error(`Unknown setup action: ${action}. Use add, remove, list, test, set-default, set-review-profile, set-task-profile, set-model, or doctor.`);
   }
 }
 

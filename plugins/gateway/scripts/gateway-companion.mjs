@@ -75,7 +75,7 @@ function printUsage() {
   console.log(
     [
       "Usage:",
-      "  gateway-companion setup <add|remove|list|test|set-default|set-review-profile|set-task-profile> [args]",
+      "  gateway-companion setup <add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model|doctor|models> [args]",
       "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--json]",
       "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--json] [focus]",
       "  gateway-companion task [--profile NAME] [--model MODEL] [--as PERSONA] [--background] [--write|--no-write] [prompt]",

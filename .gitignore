@@ -3,3 +3,5 @@ config.json
 *.log
 .DS_Store
 docs/superpowers/
+.claude/worktrees/
+tasks/

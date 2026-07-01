@@ -1048,7 +1048,7 @@ async function handleCancel(argv) {
 
 async function handleDebate(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["models", "rounds", "synthesizer", "base", "scope", "cwd", "mode"],
+    valueOptions: ["models", "rounds", "synthesizer", "base", "scope", "cwd", "mode", "timeout", "max-concurrency"],
     booleanOptions: ["json", "include-diff"]
   });
 
@@ -1130,7 +1130,9 @@ async function handleDebate(argv) {
     synthesizerProfile: synthesizerName,
     onProgress: (msg) => console.error(msg),
     json: options.json,
-    mode
+    mode,
+    timeoutMs: options.timeout ? Number(options.timeout) : undefined,
+    maxConcurrency: options["max-concurrency"] ? Number(options["max-concurrency"]) : undefined
   });
 
   if (options.json) {

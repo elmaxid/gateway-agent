@@ -1057,6 +1057,13 @@ async function handleDebate(argv) {
     throw new Error("Provide a question or topic to debate.");
   }
 
+  if (options.timeout !== undefined && (!Number.isFinite(Number(options.timeout)) || Number(options.timeout) <= 0)) {
+    throw new Error(`Invalid --timeout "${options.timeout}". Expected a positive number of milliseconds.`);
+  }
+  if (options["max-concurrency"] !== undefined && (!Number.isInteger(Number(options["max-concurrency"])) || Number(options["max-concurrency"]) < 1)) {
+    throw new Error(`Invalid --max-concurrency "${options["max-concurrency"]}". Expected an integer >= 1.`);
+  }
+
   const config = loadConfig();
   const profileNames = options.models
     ? options.models.split(",").map(s => s.trim())

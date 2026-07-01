@@ -3,18 +3,52 @@
 import { chatCompletion, sanitizeError, testConnectivity } from "./api-client.mjs";
 import { loadConfig, resolveProfile } from "./config.mjs";
 
+class Semaphore {
+  constructor(max) {
+    this.max = max;
+    this.active = 0;
+    this.queue = [];
+  }
+  async acquire() {
+    if (this.active < this.max) {
+      this.active++;
+      return;
+    }
+    await new Promise((resolve) => this.queue.push(resolve));
+    this.active++;
+  }
+  release() {
+    this.active--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
+function normalizeBaseUrl(baseUrl) {
+  try {
+    const u = new URL(baseUrl);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return baseUrl;
+  }
+}
+
 function extractResponseText(completion) {
   return completion?.choices?.[0]?.message?.content ?? "";
 }
 
-async function safeCompletion(profile, messages, label, onProgress) {
+async function safeCompletion(profile, messages, label, onProgress, callOpts = {}) {
+  const { timeoutMs, sem } = callOpts;
+  if (sem) await sem.acquire();
   try {
-    return extractResponseText(await chatCompletion(profile, messages));
+    return extractResponseText(await chatCompletion(profile, messages, { timeoutMs }));
   } catch (err) {
     const msg = sanitizeError(err);
     console.error(`[debate] ${label} failed: ${msg}`);
     if (onProgress) onProgress({ type: "error", label, message: msg });
     return null;
+  } finally {
+    if (sem) sem.release();
   }
 }
 
@@ -26,12 +60,21 @@ export async function runDebate(options) {
     synthesizerProfile: synthName,
     onProgress,
     json = false,
-    mode = "relaxed"
+    mode = "relaxed",
+    timeoutMs,
+    maxConcurrency = 1
   } = options;
 
   const config = loadConfig();
   const profiles = profileNames.map((n) => resolveProfile(n, config));
   const synthProfile = resolveProfile(synthName || profileNames[0], config);
+
+  const semaphores = new Map();
+  const getSemaphore = (baseUrl) => {
+    const key = normalizeBaseUrl(baseUrl);
+    if (!semaphores.has(key)) semaphores.set(key, new Semaphore(maxConcurrency));
+    return semaphores.get(key);
+  };
 
   const quorumRequired = mode === "relaxed"
     ? Math.ceil(profiles.length / 2)
@@ -52,7 +95,8 @@ export async function runDebate(options) {
         p,
         [{ role: "user", content: question }],
         `position from ${p.name}`,
-        onProgress
+        onProgress,
+        { timeoutMs, sem: getSemaphore(p.baseUrl) }
       )
     }))
   );
@@ -101,7 +145,8 @@ export async function runDebate(options) {
           content: `You previously answered a question. Now critique this alternative answer. Be specific about flaws, gaps, and strengths.\n\nOriginal question: ${question}\n\nAnswer to critique:\n${target.response}`
         }],
         `${reviewer.name} critiques ${target.profile}`,
-        onProgress
+        onProgress,
+        { timeoutMs, sem: getSemaphore(reviewer.baseUrl) }
       )
     }))
   );
@@ -133,7 +178,8 @@ export async function runDebate(options) {
     synthProfile,
     [{ role: "user", content: synthPrompt }],
     "synthesis",
-    onProgress
+    onProgress,
+    { timeoutMs, sem: getSemaphore(synthProfile.baseUrl) }
   );
 
   const result = {

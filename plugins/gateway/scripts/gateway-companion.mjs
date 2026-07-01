@@ -1138,8 +1138,8 @@ async function handleDebate(argv) {
     onProgress: (msg) => console.error(msg),
     json: options.json,
     mode,
-    timeoutMs: options.timeout ? Number(options.timeout) : undefined,
-    maxConcurrency: options["max-concurrency"] ? Number(options["max-concurrency"]) : undefined
+    timeoutMs: options.timeout !== undefined ? Number(options.timeout) : undefined,
+    maxConcurrency: options["max-concurrency"] !== undefined ? Number(options["max-concurrency"]) : undefined
   });
 
   if (options.json) {

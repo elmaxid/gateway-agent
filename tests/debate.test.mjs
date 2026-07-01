@@ -138,12 +138,12 @@ describe("runDebate quorum enforcement", () => {
 });
 
 describe("runDebate per-backend semaphore + timeoutMs", () => {
-  it("serializes requests to the same backend under maxConcurrency=1, normalizing baseUrl by scheme://host", async () => {
+  it("serializes requests to the same backend by default, normalizing baseUrl by scheme://host", async () => {
     // glm and minimax point at the same scheme://host (different path).
     // Track how many fetch calls are simultaneously in flight: without
     // per-backend serialization, Promise.all fires both positions'
-    // requests in the same tick (2 concurrent). With the semaphore
-    // (maxConcurrency=1), the second must wait for the first to release.
+    // requests in the same tick (2 concurrent). With the default
+    // maxConcurrency=1 semaphore, the second must wait for the first to release.
     const origFetch = globalThis.fetch;
     let active = 0;
     let maxActive = 0;
@@ -164,12 +164,11 @@ describe("runDebate per-backend semaphore + timeoutMs", () => {
         profileNames: ["glm", "minimax"], // same host, different path
         rounds: 1,
         json: true,
-        maxConcurrency: 1,
       });
       assert.strictEqual(
         maxActive,
         1,
-        `expected requests to the shared backend to be serialized (max 1 concurrent in flight), got ${maxActive}`
+        `expected requests to the shared backend to be serialized by default (max 1 concurrent in flight), got ${maxActive}`
       );
     } finally {
       globalThis.fetch = origFetch;

@@ -73,6 +73,23 @@ export function parseArgs(argv, config = {}) {
   return { options, positionals };
 }
 
+const MAX_TIMEOUT_MS = 2_147_483_647; // 2^31 - 1, Node's setTimeout limit — larger values overflow and fire almost immediately
+
+export function validateTimeoutOption(rawValue, flagName = "timeout") {
+  if (rawValue === undefined) {
+    return undefined;
+  }
+
+  const num = Number(rawValue);
+  if (!Number.isFinite(num) || num <= 0 || num > MAX_TIMEOUT_MS) {
+    throw new Error(
+      `Invalid --${flagName} "${rawValue}". Expected a positive number of milliseconds (max ${MAX_TIMEOUT_MS}).`
+    );
+  }
+
+  return num;
+}
+
 export function splitRawArgumentString(raw) {
   const tokens = [];
   let current = "";

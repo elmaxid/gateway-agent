@@ -527,23 +527,56 @@ export async function executeReviewRun(request) {
   // Agentic path — model self-collects via tools
   request.onProgress?.({ message: `Starting agentic review via ${profile.name} (${model})...`, phase: "reviewing" });
 
-  // maxTime is a soft deadline checked between tool-loop iterations, not a hard cutoff:
-  // the true worst-case wall-clock is maxTime + 2×timeoutMs — the call already in flight
-  // when the deadline is crossed, plus one more chatCompletion call made by forceFinish().
-  const { content, messages: msgHistory } = await runAgenticReview(profile, request.cwd, target, {
+  // maxTime is a soft deadline checked between tool-loop iterations, not a hard cutoff.
+  // Worst-case wall-clock ceiling: maxTime + 4×timeoutMs — the call already in flight
+  // when the deadline is crossed (+timeoutMs), plus the main loop's own terminal-turn
+  // retry-on-malformed-output before falling through to forceFinish (+timeoutMs), plus
+  // forceFinish()'s own call with its one retry-on-malformed-output (+2×timeoutMs).
+  const { content, messages: msgHistory, ok: contentOk } = await runAgenticReview(profile, request.cwd, target, {
     model,
     maxIterations: 10,
     maxTime: request.timeoutMs ? Math.max(120_000, request.timeoutMs * 2) : 120_000,
     timeoutMs: request.timeoutMs,
   });
 
-  const { value: parsed, ok: parsedOk } = extractJson(content);
-  if (!parsedOk) {
-    process.stderr.write(`[gateway] warning: could not parse JSON from model output — rendering as plain text\n`);
+  if (!contentOk) {
+    const rendered = [
+      `# Gateway Review — FAILED`,
+      ``,
+      `Target: ${target.label}`,
+      `Profile: ${profile.name} (${model})`,
+      ``,
+      `${profile.name} returned malformed output twice in a row instead of a valid JSON review or a structured tool call (retried automatically once). This is not a review — treat this run as failed, not completed.`,
+      ``,
+      `Raw model output:`,
+      "```",
+      content,
+      "```",
+    ].join("\n");
+    return {
+      exitStatus: 1,
+      payload: {
+        review: "Review",
+        target,
+        profile: profile.name,
+        model,
+        usage: null,
+        result: content,
+        messages: msgHistory,
+        error: "malformed_model_output",
+      },
+      rendered,
+      summary: `Review failed: ${profile.name} returned malformed output twice`,
+      jobTitle: "Gateway Review",
+      jobClass: "review",
+      targetLabel: target.label
+    };
   }
 
+  const { value: parsed } = extractJson(content);
+
   const rendered = renderReviewOutput(
-    { content: parsed ?? content, model, usage: null, parsed: parsedOk },
+    { content: parsed ?? content, model, usage: null, parsed: true },
     { reviewLabel: "Review", targetLabel: target.label, profileName: profile.name, model }
   );
 

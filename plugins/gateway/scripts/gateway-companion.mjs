@@ -484,7 +484,7 @@ async function handleSetup(argv) {
 // Review subcommand
 // ---------------------------------------------------------------------------
 
-async function executeReviewRun(request) {
+export async function executeReviewRun(request) {
   ensureGitRepository(request.cwd);
 
   const config = loadConfig();

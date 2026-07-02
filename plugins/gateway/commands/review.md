@@ -20,7 +20,7 @@ Argument handling:
 - `--model` overrides the model for this review. Do not add one if the user did not specify it.
 - `--base` and `--head` specify the git ref range for the review.
 - `--json` requests JSON-formatted output.
-- `--timeout` sets the per-request timeout in milliseconds (default: 60000). In `--no-tools` mode, the review makes 1 HTTP request (bounded by the timeout). In default agentic mode, the review may make up to `maxIterations` requests (each bounded by the timeout — the total time is not capped). Raise this for slow local models or large backends under load.
+- `--timeout` sets the per-request timeout in milliseconds (default: 60000). In `--no-tools` mode, the review makes 1 HTTP request (bounded by the timeout). In default agentic mode, the review may make up to `maxIterations` requests; the tool loop's internal deadline scales with `--timeout` as `max(120000, timeout × 2)` (120s when `--timeout` is left at its default), so worst-case total wait ≈ that deadline + 2×the configured timeout — the call already in flight when the deadline passes, plus one final forced-completion call. Raise this for slow local models or large backends under load.
 - Any remaining text after the flags is a description of what to focus the review on.
 - If no diff context is provided (no `--base`/`--head`), the review targets staged and unstaged changes.
 

@@ -202,6 +202,7 @@ Review del diff actual usando el LLM configurado.
   - `branch`: diff desde merge-base contra rama principal
 - `--no-tools` — desactiva el loop agentic; usa HTTP directo con diff pre-inyectado en el prompt (más rápido, menos contexto)
 - `--include-diff` — fuerza inclusión del diff completo en el contexto pre-inyectado (solo tiene efecto con `--no-tools`)
+- `--timeout MS` — timeout HTTP por request en milisegundos (default: 60000). Útil con modelos lentos (ej. minimax-m3). En modo `--no-tools` es 1 request; en modo agentic default puede ser hasta `maxIterations` requests, cada una bounded por este valor (el deadline interno del loop escala como `max(120000, timeout × 2)`)
 - `--json` — output estructurado JSON
 
 **Modos de review:**
@@ -222,9 +223,10 @@ Review de dos pasadas: primera encuentra issues, segunda filtra falsos positivos
 /gateway:adversarial-review --profile minimax "focus en seguridad"
 /gateway:adversarial-review --base main
 /gateway:adversarial-review --include-diff "verificar cambios de seguridad"
+/gateway:adversarial-review --profile minimax --timeout 120000 --include-diff
 ```
 
-Mismos flags que `/gateway:review` (incluyendo `--include-diff`). Más lento pero más preciso — útil antes de merge a main.
+Mismos flags que `/gateway:review` (incluyendo `--include-diff`, `--timeout`). Más lento pero más preciso — útil antes de merge a main. Hace 2 requests HTTP secuenciales (primera pasada + filtro adversarial), así que el peor caso con modelos lentos es ≈2×`--timeout`.
 
 ---
 
@@ -245,6 +247,7 @@ Review de 2 fases: Fase 1 evalúa spec compliance (¿el código hace lo que dice
 - `--base REF` — ref base para el diff
 - `--scope auto|working-tree|branch` — qué diff revisar
 - `--include-diff` — incluye el diff completo en el contexto
+- `--timeout MS` — timeout HTTP por request en milisegundos (default: 60000). Hace 3 requests secuenciales (fase 1 + review + filtro adversarial), peor caso ≈3×`--timeout` con modelos lentos
 - `--json` — output estructurado JSON con `{ phase1, phase2, meta }`
 - Texto libre después de los flags → descripción del intent (se inyecta como contexto de la Fase 1)
 
@@ -544,8 +547,12 @@ Los nombres son exactos — sin prefijos adicionales.
 │           ├── workspace.mjs            # Resolución de workspace root
 │           └── claude-session-transfer.mjs  # Parser de transcripts + window transfer
 └── tests/
-    ├── api-client.test.mjs          # HTTP client + AbortController timeout — unit (11 tests)
-    ├── debate.test.mjs              # Quorum enforcement + exports — unit (6 tests)
+    ├── api-client.test.mjs          # HTTP client + AbortController timeout + testConnectivity timeoutMs — unit (12 tests)
+    ├── debate.test.mjs              # Quorum enforcement + exports + preflight timeoutMs — unit (9 tests)
+    ├── args.test.mjs                # validateTimeoutOption (--timeout de review/adversarial-review/staged-review/debate) — unit (10 tests)
+    ├── agentic-review.test.mjs      # timeoutMs threading en runToolLoop/forceFinish — unit (2 tests)
+    ├── agentic-review-maxtime.test.mjs # maxTime scaling del loop agentic (max(120000, timeout×2)) — unit (1 test)
+    ├── cli-timeout.test.mjs         # --timeout end-to-end vía CLI real, mocks HTTP stateful — unit (6 tests)
     ├── claude-subprocess.test.mjs   # Subprocess env + auth — unit
     ├── codex-harness.test.mjs       # Codex env + auth — unit
     ├── config.test.mjs              # Profile CRUD — unit
@@ -559,14 +566,14 @@ Los nombres son exactos — sin prefijos adicionales.
 ```bash
 cd /opt/agent-plugin-cc
 
-# Unit tests (sin red)
-node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs
+# Unit tests (sin red) — todos menos integration.test.mjs
+node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs tests/args.test.mjs tests/agentic-review.test.mjs tests/agentic-review-maxtime.test.mjs tests/cli-timeout.test.mjs
 
 # Integration tests (requiere gateway activo)
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Unit tests:** 56 tests — config (13), api-client (11), debate (6), claude-subprocess (9), codex-harness (6), claude-session-transfer (9), session-lifecycle-hook (2). Sin red.
+**Unit tests:** 79 tests — config (13), api-client (12), debate (9), args (10), agentic-review (2), agentic-review-maxtime (1), cli-timeout (6), claude-subprocess (9), codex-harness (6), claude-session-transfer (9), session-lifecycle-hook (2). Sin red — todos usan `http.createServer`/`net.createServer` locales cuando necesitan simular un backend, nunca el gateway real.
 
 **Integration tests:** 12 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness, task via codex harness; para los 3 modelos principales (glm-5.2, minimax-m3, deepseek-v4-pro).
 

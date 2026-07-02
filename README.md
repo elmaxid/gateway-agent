@@ -202,7 +202,7 @@ Review del diff actual usando el LLM configurado.
   - `branch`: diff desde merge-base contra rama principal
 - `--no-tools` — desactiva el loop agentic; usa HTTP directo con diff pre-inyectado en el prompt (más rápido, menos contexto)
 - `--include-diff` — fuerza inclusión del diff completo en el contexto pre-inyectado (solo tiene efecto con `--no-tools`)
-- `--timeout MS` — timeout HTTP por request en milisegundos (default: 60000). Útil con modelos lentos (ej. minimax-m3). En modo `--no-tools` es 1 request; en modo agentic default puede ser hasta `maxIterations` requests, cada una bounded por este valor (el deadline interno del loop escala como `max(120000, timeout × 2)`)
+- `--timeout MS` — timeout HTTP por request en milisegundos (default: 60000). Útil con modelos lentos (ej. minimax-m3). En modo `--no-tools` es 1 request; en modo agentic default puede ser hasta `maxIterations` requests, cada una bounded por este valor (el deadline interno del loop escala como `max(120000, timeout × 2)`, worst-case wall-clock ≈ deadline + hasta 4×timeout). Si el modelo devuelve output que no tiene forma de review válida (no-JSON, o JSON sin verdict/summary/findings) dos veces seguidas en el mismo turno terminal, la review reintenta automáticamente una vez por punto de fallo; si persiste, falla explícito (`exitStatus` no-cero, render dice "FAILED") en vez de renderizar el garbage como si fuera un review real.
 - `--json` — output estructurado JSON
 
 **Modos de review:**
@@ -550,7 +550,8 @@ Los nombres son exactos — sin prefijos adicionales.
     ├── api-client.test.mjs          # HTTP client + AbortController timeout + testConnectivity timeoutMs — unit (12 tests)
     ├── debate.test.mjs              # Quorum enforcement + exports + preflight timeoutMs — unit (9 tests)
     ├── args.test.mjs                # validateTimeoutOption (--timeout de review/adversarial-review/staged-review/debate) — unit (10 tests)
-    ├── agentic-review.test.mjs      # timeoutMs threading en runToolLoop/forceFinish — unit (2 tests)
+    ├── agentic-review.test.mjs      # timeoutMs threading + retry-on-malformed-output + validación de forma en runToolLoop/forceFinish — unit (8 tests)
+    ├── agentic-review-malformed-output.test.mjs # exitStatus/render de fallo end-to-end cuando el modelo devuelve garbage — unit (2 tests)
     ├── agentic-review-maxtime.test.mjs # maxTime scaling del loop agentic (max(120000, timeout×2)) — unit (1 test)
     ├── cli-timeout.test.mjs         # --timeout end-to-end vía CLI real, mocks HTTP stateful — unit (6 tests)
     ├── claude-subprocess.test.mjs   # Subprocess env + auth — unit
@@ -567,13 +568,13 @@ Los nombres son exactos — sin prefijos adicionales.
 cd /opt/agent-plugin-cc
 
 # Unit tests (sin red) — todos menos integration.test.mjs
-node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs tests/args.test.mjs tests/agentic-review.test.mjs tests/agentic-review-maxtime.test.mjs tests/cli-timeout.test.mjs
+node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs tests/args.test.mjs tests/agentic-review.test.mjs tests/agentic-review-malformed-output.test.mjs tests/agentic-review-maxtime.test.mjs tests/cli-timeout.test.mjs
 
 # Integration tests (requiere gateway activo)
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Unit tests:** 79 tests — config (13), api-client (12), debate (9), args (10), agentic-review (2), agentic-review-maxtime (1), cli-timeout (6), claude-subprocess (9), codex-harness (6), claude-session-transfer (9), session-lifecycle-hook (2). Sin red — todos usan `http.createServer`/`net.createServer` locales cuando necesitan simular un backend, nunca el gateway real.
+**Unit tests:** 87 tests — config (13), api-client (12), debate (9), args (10), agentic-review (8), agentic-review-maxtime (1), agentic-review-malformed-output (2), cli-timeout (6), claude-subprocess (9), codex-harness (6), claude-session-transfer (9), session-lifecycle-hook (2). Sin red — todos usan `http.createServer`/`net.createServer` locales cuando necesitan simular un backend, nunca el gateway real.
 
 **Integration tests:** 12 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness, task via codex harness; para los 3 modelos principales (glm-5.2, minimax-m3, deepseek-v4-pro).
 

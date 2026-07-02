@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
+import { parseArgs, splitRawArgumentString, validateTimeoutOption } from "./lib/args.mjs";
 import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJson } from "./lib/api-client.mjs";
 import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
@@ -76,9 +76,9 @@ function printUsage() {
     [
       "Usage:",
       "  gateway-companion setup <add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model|doctor|models> [args]",
-      "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--include-diff] [--no-tools] [--json]",
-      "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--include-diff] [--no-tools] [--json] [focus]",
-      "  gateway-companion staged-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--include-diff] [--json] [intent]",
+      "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json]",
+      "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json] [focus]",
+      "  gateway-companion staged-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [intent]",
       "  gateway-companion task [--profile NAME] [--model MODEL] [--harness claude|codex] [--as PERSONA] [--background] [--write|--no-write] [--prompt-file FILE] [prompt]",
   `                          PERSONA: ${getValidPersonas().join("|")}`,
       "  gateway-companion task-worker --job-id ID [--profile NAME] [--model MODEL] [--harness claude|codex] [--write|--no-write] [prompt]",
@@ -504,7 +504,8 @@ async function executeReviewRun(request) {
     request.onProgress?.({ message: `Sending review to ${profile.name} (${model})...`, phase: "reviewing" });
     const result = await runDirectReview(profile, REVIEW_SYSTEM_PROMPT, userPrompt, {
       model,
-      response_format: { type: "json_object" }
+      response_format: { type: "json_object" },
+      timeoutMs: request.timeoutMs
     });
     const rendered = renderReviewOutput(result, {
       reviewLabel: "Review",
@@ -526,10 +527,14 @@ async function executeReviewRun(request) {
   // Agentic path — model self-collects via tools
   request.onProgress?.({ message: `Starting agentic review via ${profile.name} (${model})...`, phase: "reviewing" });
 
+  // maxTime is a soft deadline checked between tool-loop iterations, not a hard cutoff:
+  // the true worst-case wall-clock is maxTime + 2×timeoutMs — the call already in flight
+  // when the deadline is crossed, plus one more chatCompletion call made by forceFinish().
   const { content, messages: msgHistory } = await runAgenticReview(profile, request.cwd, target, {
     model,
     maxIterations: 10,
-    maxTime: 120_000,
+    maxTime: request.timeoutMs ? Math.max(120_000, request.timeoutMs * 2) : 120_000,
+    timeoutMs: request.timeoutMs,
   });
 
   const { value: parsed, ok: parsedOk } = extractJson(content);
@@ -563,10 +568,12 @@ async function executeReviewRun(request) {
 
 async function handleReview(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["profile", "model", "base", "scope", "cwd"],
+    valueOptions: ["profile", "model", "base", "scope", "cwd", "timeout"],
     booleanOptions: ["json", "include-diff", "no-tools"],
     aliasMap: { m: "model", p: "profile" }
   });
+
+  const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -594,6 +601,7 @@ async function handleReview(argv) {
         scope: options.scope,
         includeDiff: options["include-diff"] || undefined,
         noTools: options["no-tools"] || undefined,
+        timeoutMs,
         onProgress: progress
       }),
     { json: options.json }
@@ -625,7 +633,8 @@ async function executeAdversarialReviewRun(request) {
 
   const firstPass = await runDirectReview(profile, REVIEW_SYSTEM_PROMPT, userPrompt, {
     model,
-    response_format: { type: "json_object" }
+    response_format: { type: "json_object" },
+    timeoutMs: request.timeoutMs
   });
 
   request.onProgress?.({ message: "Pass 2: adversarial false-positive analysis...", phase: "reviewing" });
@@ -640,7 +649,8 @@ async function executeAdversarialReviewRun(request) {
     { role: "user", content: adversarialUserPrompt }
   ], {
     model,
-    response_format: { type: "json_object" }
+    response_format: { type: "json_object" },
+    timeoutMs: request.timeoutMs
   });
 
   const choice = secondPass.choices?.[0];
@@ -684,10 +694,12 @@ async function executeAdversarialReviewRun(request) {
 
 async function handleAdversarialReview(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["profile", "model", "base", "scope", "cwd"],
+    valueOptions: ["profile", "model", "base", "scope", "cwd", "timeout"],
     booleanOptions: ["json", "include-diff", "no-tools"],
     aliasMap: { m: "model", p: "profile" }
   });
+
+  const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -716,6 +728,7 @@ async function handleAdversarialReview(argv) {
         scope: options.scope,
         focusText,
         includeDiff: options["include-diff"] || undefined,
+        timeoutMs,
         onProgress: progress
       }),
     { json: options.json }
@@ -1062,9 +1075,7 @@ async function handleDebate(argv) {
     throw new Error("Provide a question or topic to debate.");
   }
 
-  if (options.timeout !== undefined && (!Number.isFinite(Number(options.timeout)) || Number(options.timeout) <= 0)) {
-    throw new Error(`Invalid --timeout "${options.timeout}". Expected a positive number of milliseconds.`);
-  }
+  const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
   if (options["max-concurrency"] !== undefined && (!Number.isInteger(Number(options["max-concurrency"])) || Number(options["max-concurrency"]) < 1)) {
     throw new Error(`Invalid --max-concurrency "${options["max-concurrency"]}". Expected an integer >= 1.`);
   }
@@ -1090,7 +1101,7 @@ async function handleDebate(argv) {
   const allProfilesToCheck = [...new Set([...profileNames, synthesizerName])];
 
   if (!options.json) console.error("[debate] Running preflight health check...");
-  const health = await preflightProfiles(allProfilesToCheck, config);
+  const health = await preflightProfiles(allProfilesToCheck, config, timeoutMs);
   const unhealthy = health.filter((h) => !h.ok);
 
   if (unhealthy.length > 0) {
@@ -1143,7 +1154,7 @@ async function handleDebate(argv) {
     onProgress: (msg) => console.error(msg),
     json: options.json,
     mode,
-    timeoutMs: options.timeout !== undefined ? Number(options.timeout) : undefined,
+    timeoutMs,
     maxConcurrency: options["max-concurrency"] !== undefined ? Number(options["max-concurrency"]) : undefined
   });
 
@@ -1170,10 +1181,12 @@ Return a JSON object: { "phase": "spec-compliance", "verdict": "pass"|"partial"|
 
 async function handleStagedReview(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["profile", "model", "base", "scope", "cwd"],
+    valueOptions: ["profile", "model", "base", "scope", "cwd", "timeout"],
     booleanOptions: ["json", "include-diff"],
     aliasMap: { p: "profile", m: "model" }
   });
+
+  const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
 
   const description = positionals.join(" ").trim();
   const config = loadConfig();
@@ -1198,11 +1211,11 @@ async function handleStagedReview(argv) {
 
   // Phase 1: Spec compliance
   if (!options.json) console.error("[staged-review] Phase 1: spec compliance...");
-  const phase1 = await runDirectReview(profile, PHASE1_SYSTEM, userContent, { model });
+  const phase1 = await runDirectReview(profile, PHASE1_SYSTEM, userContent, { model, timeoutMs });
 
   // Phase 2: Adversarial code quality (reuse existing prompts)
   if (!options.json) console.error("[staged-review] Phase 2: code quality (first pass)...");
-  const pass1 = await runDirectReview(profile, REVIEW_SYSTEM_PROMPT, userContent, { model });
+  const pass1 = await runDirectReview(profile, REVIEW_SYSTEM_PROMPT, userContent, { model, timeoutMs });
 
   if (!options.json) console.error("[staged-review] Phase 2: adversarial filter...");
   const pass1Str = typeof pass1.content === "string"
@@ -1212,7 +1225,7 @@ async function handleStagedReview(argv) {
     ? context.changedFiles.join("\n")
     : "(no files listed)";
   const adversarialPrompt = `Original review findings:\n${pass1Str}\n\nChanged files (${context.fileCount}):\n${changedFilesList}\n\nContext: ${context.summary}`;
-  const pass2 = await runDirectReview(profile, ADVERSARIAL_SYSTEM_PROMPT, adversarialPrompt, { model });
+  const pass2 = await runDirectReview(profile, ADVERSARIAL_SYSTEM_PROMPT, adversarialPrompt, { model, timeoutMs });
 
   const result = {
     phase1: { ...phase1, type: "spec-compliance" },

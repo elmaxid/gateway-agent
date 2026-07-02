@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { chatCompletion } from "./api-client.mjs";
+import { chatCompletion, extractJson } from "./api-client.mjs";
 
 const MAX_OUTPUT_BYTES = 32 * 1024;
 const TOOL_TIMEOUT_MS = 10_000;
@@ -229,18 +229,52 @@ async function dispatchTool(name, args, cwd, repoRoot) {
 // Tool loop
 // ---------------------------------------------------------------------------
 
+async function requestTurn(profile, msgs, tools, opts) {
+  const response = await chatCompletion(profile, msgs, {
+    model: opts.model,
+    tools,
+    tool_choice: "auto",
+    timeoutMs: opts.timeoutMs,
+  });
+  return response.choices[0];
+}
+
+// extractJson alone isn't enough: its brace-slicing fallback will happily
+// parse a stray {...} fragment embedded in otherwise-malformed text (e.g.
+// leftover tool-call arguments in a garbled native tool-call template) as
+// "valid JSON", even though it isn't a review. Require the actual review
+// schema fields the SYSTEM_PROMPT below asks for, not just parseability.
+function isValidReviewPayload(content) {
+  const { value, ok } = extractJson(content);
+  if (!ok || value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  return typeof value.verdict === "string" && typeof value.summary === "string" && Array.isArray(value.findings);
+}
+
 async function forceFinish(profile, messages, opts) {
   const forced = [...messages, {
     role: "user",
     content: "You must now produce your final review as valid JSON only. No tool calls.",
   }];
-  const response = await chatCompletion(profile, forced, {
-    model: opts.model,
-    response_format: { type: "json_object" },
-    timeoutMs: opts.timeoutMs,
-  });
-  const msg = response.choices[0].message;
-  return { content: msg.content ?? "", messages: [...forced, msg] };
+  const callOnce = async () => {
+    const response = await chatCompletion(profile, forced, {
+      model: opts.model,
+      response_format: { type: "json_object" },
+      timeoutMs: opts.timeoutMs,
+    });
+    return response.choices[0].message;
+  };
+
+  let msg = await callOnce();
+  let ok = isValidReviewPayload(msg.content ?? "");
+  if (!ok) {
+    // Model returned a non-review forced-completion instead of clean JSON
+    // shaped like a review (observed intermittently with minimax-m3 — a
+    // malformed native tool-call template leaking into content). The
+    // failure is stochastic; retry once before giving up.
+    msg = await callOnce();
+    ok = isValidReviewPayload(msg.content ?? "");
+  }
+  return { content: msg.content ?? "", messages: [...forced, msg], ok };
 }
 
 export async function runToolLoop(profile, messages, tools, opts = {}) {
@@ -252,33 +286,37 @@ export async function runToolLoop(profile, messages, tools, opts = {}) {
   for (let i = 0; i < maxIterations; i++) {
     if (Date.now() > deadline) return forceFinish(profile, msgs, opts);
 
-    const response = await chatCompletion(profile, msgs, {
-      model: opts.model,
-      tools,
-      tool_choice: "auto",
-      timeoutMs: opts.timeoutMs,
-    });
-    const choice = response.choices[0];
-    msgs = [...msgs, choice.message];
+    let choice = await requestTurn(profile, msgs, tools, opts);
 
-    const reason = choice.finish_reason;
-
-    if (reason === "stop" || reason === "length" || reason === "content_filter" || !reason) {
-      return { content: choice.message.content ?? "", messages: msgs };
+    if (choice.finish_reason !== "tool_calls") {
+      let ok = isValidReviewPayload(choice.message?.content ?? "");
+      if (!ok) {
+        // Model returned a non-tool_calls, non-review turn — e.g. a
+        // malformed native tool-call template leaking into content instead
+        // of the structured tool_calls field (observed intermittently with
+        // minimax-m3, ~2/3 of the time in manual testing, no clear
+        // correlation with context size). Retry this exact turn once before
+        // giving up — the failure is stochastic, so a fresh attempt often
+        // recovers, either with a valid review or with a proper tool_calls
+        // turn.
+        choice = await requestTurn(profile, msgs, tools, opts);
+        ok = isValidReviewPayload(choice.message?.content ?? "");
+      }
+      if (choice.finish_reason !== "tool_calls") {
+        msgs = [...msgs, choice.message];
+        return { content: choice.message.content ?? "", messages: msgs, ok };
+      }
     }
 
-    if (reason === "tool_calls") {
-      for (const tc of choice.message.tool_calls ?? []) {
-        let args;
-        try { args = JSON.parse(tc.function.arguments); }
-        catch { args = null; }
-        const result = args === null
-          ? "Error: malformed JSON arguments"
-          : await dispatchTool(tc.function.name, args, opts.cwd, opts.repoRoot);
-        msgs = [...msgs, { role: "tool", tool_call_id: tc.id, content: String(result) }];
-      }
-    } else {
-      return { content: choice.message.content ?? "", messages: msgs };
+    msgs = [...msgs, choice.message];
+    for (const tc of choice.message.tool_calls ?? []) {
+      let args;
+      try { args = JSON.parse(tc.function.arguments); }
+      catch { args = null; }
+      const result = args === null
+        ? "Error: malformed JSON arguments"
+        : await dispatchTool(tc.function.name, args, opts.cwd, opts.repoRoot);
+      msgs = [...msgs, { role: "tool", tool_call_id: tc.id, content: String(result) }];
     }
   }
 

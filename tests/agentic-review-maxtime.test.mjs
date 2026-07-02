@@ -75,7 +75,10 @@ function toolCallCompletion() {
 
 function finalCompletion() {
   return JSON.stringify({
-    choices: [{ finish_reason: "stop", message: { role: "assistant", content: "{}" } }],
+    choices: [{
+      finish_reason: "stop",
+      message: { role: "assistant", content: JSON.stringify({ verdict: "approve", summary: "ok", findings: [] }) },
+    }],
   });
 }
 

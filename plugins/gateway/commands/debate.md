@@ -1,6 +1,6 @@
 ---
 description: Run a multi-model debate between gateway LLM endpoints (positions, cross-critique, synthesis)
-argument-hint: "[--models <profile1,profile2>] [--rounds <N>] [--synthesizer <profile>] [--timeout <ms>] [--max-concurrency <N>] [--json] \"question or topic\""
+argument-hint: "[--models <profile1,profile2>] [--rounds <N>] [--synthesizer <profile>] [--mode <relaxed|strict>] [--timeout <ms>] [--max-concurrency <N>] [--base <ref>] [--scope <auto|branch|working-tree>] [--include-diff] [--json] \"question or topic\""
 allowed-tools: Bash(node:*)
 ---
 
@@ -15,6 +15,8 @@ Argument handling:
 - `--synthesizer` selects which profile produces the final synthesis.
 - `--timeout` sets the per-request timeout in milliseconds (default: 60000). Raise this for slow local models or large backends under load.
 - `--max-concurrency` limits how many simultaneous requests hit the same backend `baseUrl` (default: 1 — safe for single-slot local servers; raise it if your backend supports true parallel generation, e.g. vLLM with `--max-num-seqs`).
+- `--mode relaxed|strict` sets the quorum required to proceed after the preflight health check (default: `relaxed`). `relaxed` needs a majority of `--models` reachable; `strict` needs all of them reachable.
+- `--base <ref>`, `--scope <auto|branch|working-tree>`, and `--include-diff` pull a git diff into the debate question as extra context, same semantics as `/gateway:review`. Omit all three to debate without diff context.
 - `--json` requests JSON-formatted output.
 - Any remaining text after the flags is the debate question or topic.
 

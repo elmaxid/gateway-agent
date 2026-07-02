@@ -1,6 +1,6 @@
 ---
 description: Cancel a running gateway background task
-argument-hint: "[--job-id <id>]"
+argument-hint: "[job-id]"
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---

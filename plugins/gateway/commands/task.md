@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, fix, or task to an alternative LLM via Claude subprocess
-argument-hint: "[--background|--wait] [--profile <name>] [--model <model>] [--write|--no-write] [what the model should do]"
+argument-hint: "[--background|--wait] [--profile <name>] [--model <model>] [--harness claude|codex] [--as persona] [--write|--no-write] [--prompt-file <path>] [what the model should do]"
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
@@ -17,7 +17,8 @@ Execution mode:
 - If the request includes `--wait`, run the `gateway:gateway-rescue` subagent in the foreground.
 - If neither flag is present, default to foreground.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
-- `--profile`, `--model`, `--write`, and `--no-write` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
+- `--profile`, `--model`, `--write`, `--no-write`, `--harness`, `--as`, and `--prompt-file` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
+- `--harness claude|codex` selects the execution harness (default: `claude`). `--as` selects a persona (`debugger`, `reviewer`, `security`, `researcher`, `coder`). `--prompt-file <path>` reads the task prompt from a file instead of the natural-language text.
 
 Operating rules:
 
@@ -28,4 +29,5 @@ Operating rules:
 - Leave `--profile` unset unless the user explicitly asks for a specific profile.
 - Leave `--model` unset unless the user explicitly asks for one.
 - `--write` allows the gateway model to write files. `--no-write` disables file writes. Leave unset unless the user explicitly specifies.
+- Leave `--harness`, `--as`, and `--prompt-file` unset unless the user explicitly asks for them.
 - If the user did not supply a request, ask what the gateway model should investigate or do.

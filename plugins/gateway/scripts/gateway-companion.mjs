@@ -540,6 +540,10 @@ export async function executeReviewRun(request) {
   });
 
   if (!contentOk) {
+    const RAW_OUTPUT_LIMIT = 4000;
+    const truncatedContent = content.length > RAW_OUTPUT_LIMIT
+      ? `${content.slice(0, RAW_OUTPUT_LIMIT)}\n... [truncated, ${content.length} bytes total]`
+      : content;
     const rendered = [
       `# Gateway Review — FAILED`,
       ``,
@@ -550,7 +554,7 @@ export async function executeReviewRun(request) {
       ``,
       `Raw model output:`,
       "```",
-      content,
+      truncatedContent,
       "```",
     ].join("\n");
     return {

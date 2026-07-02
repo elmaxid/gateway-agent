@@ -362,8 +362,11 @@ Rules:
 
 /**
  * Run an agentic review for the given target.
- * Returns { content: string, messages: array }.
+ * Returns { content: string, messages: array, ok: boolean }.
  * content is the model's final message (expected to be valid JSON).
+ * ok is false when the model returned malformed output twice in a row
+ * instead of a valid JSON review — callers must check it before treating
+ * content as a usable review.
  */
 export async function runAgenticReview(profile, cwd, target, opts = {}) {
   const repoRoot = (await runCommand("git", ["rev-parse", "--show-toplevel"], cwd)).trim();

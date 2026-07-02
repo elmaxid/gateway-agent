@@ -307,11 +307,12 @@ export async function runDirectReview(profile, systemPrompt, userPrompt, opts = 
 // testConnectivity — quick health probe
 // ---------------------------------------------------------------------------
 
-export async function testConnectivity(profile) {
+export async function testConnectivity(profile, opts = {}) {
   const start = Date.now();
   try {
     const result = await chatCompletion(profile, [{ role: "user", content: "hi" }], {
       max_tokens: 1,
+      timeoutMs: opts.timeoutMs,
     });
     return {
       ok: true,

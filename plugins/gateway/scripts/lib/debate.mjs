@@ -234,12 +234,12 @@ export function renderDebateOutput(result) {
   return lines.join("\n");
 }
 
-export async function preflightProfiles(profileNames, config) {
+export async function preflightProfiles(profileNames, config, timeoutMs = undefined) {
   const resolvedConfig = config ?? loadConfig();
   const results = await Promise.all(
     profileNames.map(async (name) => {
       const profile = resolveProfile(name, resolvedConfig);
-      const result = await testConnectivity(profile);
+      const result = await testConnectivity(profile, { timeoutMs });
       return { name, ...result };
     })
   );

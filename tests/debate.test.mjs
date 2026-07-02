@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import http from "node:http";
 
 // Point config at a temp directory so these tests don't depend on the
 // operator's real ~/.gateway-plugin/config.json (see tests/config.test.mjs
@@ -205,6 +206,40 @@ describe("runDebate per-backend semaphore + timeoutMs", () => {
       assert.strictEqual(sawAbort, true, "expected the short timeoutMs to abort the slow mock request");
     } finally {
       globalThis.fetch = origFetch;
+    }
+  });
+});
+
+describe("preflightProfiles timeoutMs", () => {
+  it("threads timeoutMs to testConnectivity, aborting a hanging profile instead of waiting 60s", async () => {
+    let requestCount = 0;
+    const server = http.createServer((req, res) => {
+      requestCount++;
+      // Deliberately never respond — the health-check must abort via timeoutMs.
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const config = {
+      profiles: {
+        hanging: { kind: "claude-gateway", baseUrl: `http://127.0.0.1:${port}`, defaultModel: "test-model" },
+      },
+      defaultProfile: "hanging",
+      reviewProfile: null,
+      taskProfile: null,
+    };
+
+    try {
+      const start = Date.now();
+      const results = await debateModule.preflightProfiles(["hanging"], config, 200);
+      const duration = Date.now() - start;
+
+      assert.strictEqual(results.length, 1);
+      assert.strictEqual(results[0].ok, false);
+      assert.ok(duration < 200 + 3000,
+        `expected preflightProfiles to abort near timeoutMs=200, took ${duration}ms`);
+      assert.ok(requestCount >= 1, "expected the server to have received the request");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
     }
   });
 });

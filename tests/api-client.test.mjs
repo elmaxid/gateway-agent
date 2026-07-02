@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
+import http from "node:http";
 
 import * as apiClient from "../plugins/gateway/scripts/lib/api-client.mjs";
 
@@ -150,6 +151,38 @@ describe("chatCompletion per-attempt timeout", () => {
       assert.strictEqual(attemptCount, 1, "AbortError should not trigger retry");
     } finally {
       server.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// testConnectivity timeoutMs
+// ---------------------------------------------------------------------------
+
+describe("testConnectivity timeoutMs", () => {
+  it("aborts a hanging endpoint using opts.timeoutMs instead of waiting for the default 60s timeout", async () => {
+    let requestCount = 0;
+    const server = http.createServer((req, res) => {
+      requestCount++;
+      // Deliberately never respond — the client must abort via timeoutMs.
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const profile = {
+      baseUrl: `http://127.0.0.1:${port}`,
+      defaultModel: "test-model",
+    };
+    try {
+      const start = Date.now();
+      const result = await apiClient.testConnectivity(profile, { timeoutMs: 200 });
+      const duration = Date.now() - start;
+
+      assert.strictEqual(result.ok, false);
+      assert.ok(duration < 200 + 3000,
+        `expected testConnectivity to abort near timeoutMs=200, took ${duration}ms`);
+      assert.ok(requestCount >= 1, "expected the server to have received the request");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
     }
   });
 });

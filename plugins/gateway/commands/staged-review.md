@@ -1,6 +1,6 @@
 ---
 description: Run a 2-phase staged review — Phase 1 checks spec compliance, Phase 2 runs adversarial code quality review
-argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--scope <auto|branch|working-tree>] [--json] [--include-diff] [description]"
+argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--scope <auto|branch|working-tree>] [--json] [--include-diff] [--timeout <ms>] [description]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
@@ -22,6 +22,7 @@ Argument handling:
 - `--profile` selects a configured gateway profile. Do not add one if the user did not specify it.
 - `--model` overrides the model for this review. Do not add one if the user did not specify it.
 - `--base` and `--scope` specify the git ref range for the review.
+- `--timeout` sets the per-request timeout in milliseconds (default: 60000). This command makes three sequential HTTP requests (Phase 1 checks spec compliance, Phase 2 pass 1 finds issues, Phase 2 pass 2 filters false positives), so worst-case total wait ≈ 3×the configured timeout. Raise this for slow local models or large backends under load.
 - Any remaining text after flags is a description of what to review.
 
 Execution:

@@ -1,6 +1,6 @@
 ---
 description: Run a code review using an alternative LLM endpoint (Ollama, DeepSeek, MiniMax, etc.)
-argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--head <ref>] [--json] [--include-diff] [--scope <auto|branch|working-tree>] [description of what to review]"
+argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--head <ref>] [--json] [--include-diff] [--scope <auto|branch|working-tree>] [--timeout <ms>] [description of what to review]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
@@ -20,6 +20,7 @@ Argument handling:
 - `--model` overrides the model for this review. Do not add one if the user did not specify it.
 - `--base` and `--head` specify the git ref range for the review.
 - `--json` requests JSON-formatted output.
+- `--timeout` sets the per-request timeout in milliseconds (default: 60000). In `--no-tools` mode, the review makes 1 HTTP request (bounded by the timeout). In default agentic mode, the review may make up to `maxIterations` requests (each bounded by the timeout — the total time is not capped). Raise this for slow local models or large backends under load.
 - Any remaining text after the flags is a description of what to focus the review on.
 - If no diff context is provided (no `--base`/`--head`), the review targets staged and unstaged changes.
 

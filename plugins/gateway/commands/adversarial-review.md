@@ -1,6 +1,6 @@
 ---
 description: Run a two-pass adversarial code review — first pass finds issues, second pass filters false positives
-argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--head <ref>] [--include-diff]"
+argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--head <ref>] [--include-diff] [--timeout <ms>]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
@@ -21,6 +21,7 @@ Argument handling:
 - `--profile` selects a configured gateway profile. Do not add one if the user did not specify it.
 - `--model` overrides the model for this review. Do not add one if the user did not specify it.
 - `--base` and `--head` specify the git ref range for the review.
+- `--timeout` sets the per-request timeout in milliseconds (default: 60000). This command makes two sequential HTTP requests (pass 1 finds issues, pass 2 filters false positives), so worst-case total wait ≈ 2×the configured timeout. Raise this for slow local models or large backends under load.
 - Any remaining text after the flags is a description of what to focus the review on.
 
 Execution:

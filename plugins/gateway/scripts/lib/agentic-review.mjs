@@ -237,6 +237,7 @@ async function forceFinish(profile, messages, opts) {
   const response = await chatCompletion(profile, forced, {
     model: opts.model,
     response_format: { type: "json_object" },
+    timeoutMs: opts.timeoutMs,
   });
   const msg = response.choices[0].message;
   return { content: msg.content ?? "", messages: [...forced, msg] };
@@ -255,6 +256,7 @@ export async function runToolLoop(profile, messages, tools, opts = {}) {
       model: opts.model,
       tools,
       tool_choice: "auto",
+      timeoutMs: opts.timeoutMs,
     });
     const choice = response.choices[0];
     msgs = [...msgs, choice.message];

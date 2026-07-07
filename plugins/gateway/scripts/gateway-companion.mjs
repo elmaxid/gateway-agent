@@ -64,6 +64,16 @@ import {
   renderStoredJobResult,
   renderTaskResult
 } from "./lib/render.mjs";
+import {
+  parsePlanFile,
+  parseInlineTasks,
+  parseAssignment,
+  parseModelOverrides,
+  buildTaskList,
+  runDispatch,
+  runCrossReview,
+  renderDispatchOutput,
+} from "./lib/dispatch.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -85,6 +95,9 @@ function printUsage() {
       "  gateway-companion debate [--models P1,P2,...] [--rounds N] [--synthesizer NAME] [--mode relaxed|strict]",
       "                           [--timeout MS] [--max-concurrency N] [--base REF] [--scope auto|working-tree|branch]",
       "                           [--include-diff] [--json] [question]",
+      "  gateway-companion dispatch [--plan FILE|--task PROMPT:PROFILE...] [--assign RANGES] [--model-override PROF:MODEL...]",
+      "                             [--max-concurrency N] [--timeout MS] [--harness claude|codex] [--write|--no-write]",
+      "                             [--cross-review PROFILE] [--cross-review-model MODEL] [--fail-fast] [--dry-run] [--json]",
       "  gateway-companion transfer [--profile NAME] [--turns N] [prompt]",
       "  gateway-companion status [job-id] [--all] [--json]",
       "  gateway-companion result [job-id] [--json]",
@@ -175,6 +188,22 @@ const REVIEW_SYSTEM_PROMPT = `You are a senior code reviewer. Review the followi
 Return ONLY the JSON object, no markdown fences.`;
 
 const ADVERSARIAL_SYSTEM_PROMPT = `You are an adversarial code reviewer. You have been given a prior review with findings. Your job is to critically examine each finding and determine which are genuine issues and which are false positives. For each finding, state whether it is VALID or FALSE_POSITIVE with a brief justification. Then produce a refined final review with only the valid findings. Return a JSON object with the same shape as the original review.`;
+
+function extractRepeatableFlags(argv) {
+  const tasks = [];
+  const modelOverrides = [];
+  const cleaned = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--task" && i + 1 < argv.length) {
+      tasks.push(argv[++i]);
+    } else if (argv[i] === "--model-override" && i + 1 < argv.length) {
+      modelOverrides.push(argv[++i]);
+    } else {
+      cleaned.push(argv[i]);
+    }
+  }
+  return { tasks, modelOverrides, cleaned };
+}
 
 // ---------------------------------------------------------------------------
 // Setup subcommand
@@ -1284,6 +1313,161 @@ async function handleStagedReview(argv) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Dispatch subcommand
+// ---------------------------------------------------------------------------
+
+async function handleDispatch(argv) {
+  const { tasks: rawTaskArgs, modelOverrides: rawOverrides, cleaned } = extractRepeatableFlags(argv);
+  const { options, positionals } = parseCommandInput(cleaned, {
+    valueOptions: ["plan", "assign", "max-concurrency", "timeout", "harness", "cross-review", "cross-review-model", "cwd"],
+    booleanOptions: ["json", "write", "no-write", "fail-fast", "dry-run", "background"],
+  });
+
+  const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
+  const cwd = resolveCommandCwd(options);
+
+  // --- Validation (exit code 2 per §3.2) ---
+  function validationError(msg) { process.exitCode = 2; throw new Error(msg); }
+
+  const hasPlan = Boolean(options.plan);
+  const hasTasks = rawTaskArgs.length > 0;
+  if (hasPlan && hasTasks) validationError("--plan and --task are mutually exclusive. Use one, not both.");
+  if (!hasPlan && !hasTasks) validationError("Provide --plan <file> or at least one --task.");
+  if (options.assign && !hasPlan) validationError("--assign is only valid with --plan.");
+
+  const maxConcurrency = options["max-concurrency"] !== undefined ? Number(options["max-concurrency"]) : 3;
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 16) {
+    validationError(`Invalid --max-concurrency "${options["max-concurrency"]}". Expected 1-16.`);
+  }
+
+  const harness = options.harness || "codex";
+  if (!["claude", "codex"].includes(harness)) {
+    validationError(`Unknown --harness "${harness}". Valid: claude, codex.`);
+  }
+
+  const write = options["no-write"] ? false : true;
+  const config = loadConfig();
+  const defaultProfile = resolveTaskProfile(config);
+
+  // --- Parse input ---
+  let rawTasks;
+  if (hasPlan) {
+    const planPath = path.resolve(cwd, options.plan);
+    const content = fs.readFileSync(planPath, "utf8");
+    rawTasks = parsePlanFile(content);
+  } else {
+    rawTasks = parseInlineTasks(rawTaskArgs, defaultProfile.name);
+  }
+
+  const assignment = options.assign ? parseAssignment(options.assign, rawTasks.length) : null;
+  const overrides = rawOverrides.length > 0 ? parseModelOverrides(rawOverrides) : null;
+  const tasks = buildTaskList(rawTasks, assignment, overrides, defaultProfile.name);
+
+  // --- Resolve and validate all profiles ---
+  const profileNames = [...new Set(tasks.map((t) => t.profile).filter(Boolean))];
+  if (options["cross-review"]) profileNames.push(options["cross-review"]);
+  for (const name of profileNames) resolveProfile(name, config);
+
+  // --- Dry run ---
+  if (options["dry-run"]) {
+    const matrix = tasks.map((t) => ({ id: t.id, prompt: shorten(t.prompt, 80), profile: t.profile, model: t.model || "(default)" }));
+    if (options.json) {
+      outputResult({ dryRun: true, tasks: matrix, crossReview: options["cross-review"] || null }, true);
+    } else {
+      console.log("Dispatch dry-run:");
+      for (const t of matrix) console.log(`  Task ${t.id}: ${t.prompt} → ${t.profile}/${t.model}`);
+      if (options["cross-review"]) console.log(`  Cross-review: ${options["cross-review"]}`);
+    }
+    return;
+  }
+
+  // --- Preflight ---
+  ensureGitRepository(cwd);
+
+  // §2.0: warn on dirty working tree (use spawnSync — already imported, unlike execSync)
+  const porcelain = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" }).stdout.trim();
+  if (porcelain) {
+    console.error("[dispatch] ⚠ Working tree has uncommitted changes. Worktrees are created from HEAD; uncommitted changes are not included.");
+  }
+
+  if (!options.json) console.error("[dispatch] Preflight: checking profiles...");
+  const health = await preflightProfiles(profileNames, config, timeoutMs);
+  const unhealthy = health.filter((h) => !h.ok);
+  if (unhealthy.length > 0) {
+    const names = unhealthy.map((h) => `${h.name}: ${h.error}`).join("; ");
+    process.exitCode = 2;
+    throw new Error(`Preflight failed: ${names}`);
+  }
+
+  if (harness === "codex") {
+    const { isCodexAvailable } = await import("./lib/codex-harness.mjs");
+    if (!await isCodexAvailable()) {
+      process.exitCode = 2;
+      throw new Error("--harness codex requires codex CLI. Install: npm i -g @anthropic-ai/codex");
+    }
+  }
+
+  // --- Execute ---
+  if (!options.json) console.error(`[dispatch] Starting ${tasks.length} tasks across ${new Set(tasks.map((t) => t.profile)).size} profiles (max-concurrency: ${maxConcurrency}/endpoint)`);
+
+  const resolveProfileFn = (name) => resolveProfile(name, config);
+  const taskRunnerFn = harness === "codex" ? runTask : runClaudeTask;
+
+  const result = await runDispatch(tasks, {
+    cwd,
+    harness,
+    write,
+    maxConcurrency,
+    timeoutMs,
+    failFast: options["fail-fast"],
+    taskRunner: taskRunnerFn,
+    resolveProfileFn,
+    onProgress: options.json ? null : (evt) => console.error(`[dispatch] ${evt.message}`),
+  });
+
+  // --- Cross-review ---
+  if (options["cross-review"]) {
+    const reviewProfile = resolveProfile(options["cross-review"], config);
+    if (!options.json) console.error(`[dispatch] Cross-review: ${result.tasks.filter((t) => t.status === "completed" && !t.noChanges).length} tasks by ${reviewProfile.name}`);
+
+    // Read patches for review input
+    for (const task of result.tasks) {
+      if (task.patchFile && fs.existsSync(task.patchFile)) {
+        task.patch = fs.readFileSync(task.patchFile, "utf8");
+      }
+    }
+
+    await runCrossReview(result.tasks, {
+      reviewProfile,
+      reviewModel: options["cross-review-model"],
+      timeoutMs,
+      maxConcurrency,
+      reviewFn: runDirectReview,
+      onProgress: options.json ? null : (evt) => console.error(`[dispatch] ${evt.message}`),
+      outputDir: result.outputDir,
+    });
+
+    // Update manifest with review data
+    const manifestPath = path.join(result.outputDir, "manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifest.tasks = result.tasks;
+    const totalFindings = result.tasks.reduce((sum, t) => sum + (t.review?.findings?.length ?? 0), 0);
+    manifest.summary.reviewFindings = totalFindings;
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+    result.summary.reviewFindings = totalFindings;
+  }
+
+  // --- Output ---
+  if (options.json) {
+    outputResult(result, true);
+  } else {
+    console.log(renderDispatchOutput(result));
+  }
+
+  if (result.summary.failed > 0) process.exitCode = 1;
+}
+
 function getDefaultDebateProfiles(config) {
   const names = Object.keys(config.profiles || {});
   if (config.defaultProfile && names.includes(config.defaultProfile)) {
@@ -1416,6 +1600,7 @@ const SUBCOMMANDS = {
   review: handleReview,
   "adversarial-review": handleAdversarialReview,
   "staged-review": handleStagedReview,
+  dispatch: handleDispatch,
   task: handleTask,
   "task-worker": handleTaskWorker,
   debate: handleDebate,
@@ -1443,5 +1628,7 @@ async function main() {
 main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`${message}\n`);
-  process.exitCode = 1;
+  // Preserve a more specific exit code a handler already set (e.g. dispatch's
+  // validation/preflight errors use 2) instead of always forcing 1.
+  process.exitCode = process.exitCode || 1;
 });

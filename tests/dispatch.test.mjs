@@ -543,3 +543,51 @@ describe("renderDispatchOutput", () => {
     assert.ok(output.includes("FAILED"));
   });
 });
+
+// ---------------------------------------------------------------------------
+// CLI integration tests
+// ---------------------------------------------------------------------------
+
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+describe("extractRepeatableFlags", () => {
+  // This function lives in gateway-companion.mjs — test it via CLI integration.
+  // For now, test parsing correctness via parsePlanFile / parseInlineTasks (already covered).
+  // CLI-level validation is tested by running the actual binary.
+
+  it("validates --plan and --task mutual exclusion (via CLI)", async () => {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const companion = path.join(__dirname, "../plugins/gateway/scripts/gateway-companion.mjs");
+
+    try {
+      await execFileAsync(process.execPath, [companion, "dispatch", "--plan", "file.md", "--task", "something:profile"], {
+        timeout: 5000,
+        env: { ...process.env, GATEWAY_PLUGIN_CONFIG_DIR: path.join(os.tmpdir(), "nonexistent-config") },
+      });
+      assert.fail("Should have thrown");
+    } catch (err) {
+      assert.ok(err.stderr.includes("mutually exclusive") || err.stderr.includes("not both"), `Expected mutual exclusion error, got: ${err.stderr}`);
+    }
+  });
+
+  it("validates --assign requires --plan", async () => {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const companion = path.join(__dirname, "../plugins/gateway/scripts/gateway-companion.mjs");
+
+    try {
+      await execFileAsync(process.execPath, [companion, "dispatch", "--task", "something:p", "--assign", "1:a"], {
+        timeout: 5000,
+        env: { ...process.env, GATEWAY_PLUGIN_CONFIG_DIR: path.join(os.tmpdir(), "nonexistent-config") },
+      });
+      assert.fail("Should have thrown");
+    } catch (err) {
+      assert.ok(err.stderr.includes("--assign") && err.stderr.includes("--plan"), `Expected --assign/--plan error, got: ${err.stderr}`);
+    }
+  });
+});

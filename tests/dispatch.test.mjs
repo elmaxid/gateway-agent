@@ -368,6 +368,48 @@ describe("runDispatch", () => {
       rmSync(repo, { recursive: true, force: true });
     }
   });
+
+  it("marks a task failed (error: timeout) when --timeout fires and the runner is killed", async () => {
+    const repo = createTempGitRepo();
+    try {
+      const { runDispatch } = await import("../plugins/gateway/scripts/lib/dispatch.mjs");
+      const tasks = [{ id: 1, prompt: "slow task", profile: "mock", model: "mock-model" }];
+
+      // Exercises the real kill path (not a pre-built status:"failed" object):
+      // the runner hangs until opts.signal aborts, then resolves with exitCode: null
+      // — exactly what codex-harness.mjs / claude-subprocess.mjs return from
+      // proc.on("exit", (code=null, sig)) when terminateProcessTree kills the child.
+      const abortableRunner = (_profile, _prompt, opts) =>
+        new Promise((resolve) => {
+          const onAbort = () => resolve({ stdout: "partial output", stderr: "", exitCode: null, signal: "SIGTERM" });
+          if (opts.signal?.aborted) return onAbort();
+          opts.signal?.addEventListener("abort", onAbort, { once: true });
+          // Never resolves on its own — the only exit is the timeout-driven abort.
+        });
+
+      const result = await runDispatch(tasks, {
+        cwd: repo,
+        harness: "claude",
+        write: true,
+        maxConcurrency: 1,
+        timeoutMs: 100,
+        taskRunner: abortableRunner,
+        resolveProfileFn: () => ({ name: "mock", baseUrl: "http://localhost", defaultModel: "mock-model", kind: "claude-gateway" }),
+      });
+
+      const t1 = result.tasks.find((t) => t.id === 1);
+      // Before the fix, `null ?? 0 === 0` fell through to collectPatch and reported
+      // "completed_no_changes"; a timed-out task must be FAILED (timeout) instead.
+      assert.equal(t1.status, "failed");
+      assert.equal(t1.error, "timeout");
+      assert.equal(t1.model, "mock-model");
+      assert.equal(result.summary.failed, 1);
+      assert.equal(result.summary.completed, 0);
+      assert.equal(result.summary.completedNoChanges, 0);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -467,6 +509,44 @@ describe("runCrossReview", () => {
       assert.ok(existsSync(errorReviewFile));
       const errorContent = readFileSync(errorReviewFile, "utf8");
       assert.ok(errorContent.includes("error"));
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("isolates a review-file write failure: records reviewFileError without crashing the batch", async () => {
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), "dispatch-review-writefail-"));
+    try {
+      // Force writeFileSync to fail for task 1 only: pre-create its target review
+      // path as a *directory* so fs.writeFileSync(...) throws EISDIR. Task 2's file
+      // path is untouched and writes normally. A write failure for one task's review
+      // file must not reject Promise.all and abort every other task's review.
+      mkdirSync(path.join(outputDir, "reviews", "task-001-review.md"), { recursive: true });
+
+      const results = [
+        { id: 1, status: "completed", noChanges: false, prompt: "A", output: "ok", patch: "diff 1" },
+        { id: 2, status: "completed", noChanges: false, prompt: "B", output: "ok", patch: "diff 2" },
+      ];
+
+      const mockReview = async () => ({ content: { findings: [], summary: "LGTM" }, model: "m", usage: null, parsed: true });
+
+      // Must not throw — before the fix, task 1's EISDIR write rejected Promise.all.
+      await runCrossReview(results, {
+        reviewProfile: { name: "r", baseUrl: "http://l", defaultModel: "m", kind: "claude-gateway" },
+        maxConcurrency: 2,
+        reviewFn: mockReview,
+        outputDir,
+      });
+
+      // Task 1's write failure is recorded, not thrown; no reviewFile path was set.
+      assert.ok(results[0].review);
+      assert.ok(results[0].review.reviewFileError);
+      assert.equal(results[0].review.reviewFile, undefined);
+
+      // Task 2 still completed and its review landed on disk (isolation preserved).
+      assert.ok(results[1].review);
+      assert.equal(results[1].review.reviewFileError, undefined);
+      assert.ok(existsSync(results[1].review.reviewFile));
     } finally {
       rmSync(outputDir, { recursive: true, force: true });
     }

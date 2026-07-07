@@ -4,13 +4,14 @@ Claude Code plugin que delega code reviews y tareas a endpoints LLM alternativos
 
 ## Qué hace
 
-Agrega 11 comandos `/gateway:*` a Claude Code. Seis operaciones principales:
+Agrega 12 comandos `/gateway:*` a Claude Code. Siete operaciones principales:
 
 | Operación | Backend | Cuándo usar |
 |-----------|---------|-------------|
 | **Review** | HTTP + agentic loop (tool-use multi-turn) | Revisar código; modelo explora repo con git/fs tools |
 | **Staged Review** | HTTP directo 2-fases | Fase 1: spec compliance, Fase 2: code quality adversarial |
 | **Task** | Subprocess `claude -p` o `codex exec` (dual-harness) | Delegación completa con herramientas |
+| **Dispatch** | Worktrees git paralelas, un task runner (claude/codex) por tarea | Distribuir varias tareas de un plan across modelos en paralelo, con cross-review opcional |
 | **Work** | Auto-routing → persona especializada | Detecta tipo de tarea por keywords |
 | **Debate** | HTTP paralelo multi-modelo con preflight + quorum | Posiciones independientes + crítica cruzada + síntesis |
 | **Transfer** | HTTP directo con contexto de sesión inyectado | Continuar sesión actual en modelo gateway |
@@ -295,6 +296,49 @@ Delega una tarea al LLM via subprocess. Soporta dual-harness (claude o codex).
 **Foreground:** Stream del output del subprocess en tiempo real.
 
 **Background:** Retorna `task-XXXXX-YYYYYY`. Usar `/gateway:status` y `/gateway:result` para seguimiento.
+
+---
+
+### `/gateway:dispatch`
+
+Distribuye varias tareas de implementación across múltiples modelos gateway en paralelo, cada una en su propia worktree git aislada, con cross-review opcional. Ideal para ejecutar un plan (`## Task N`) repartiendo tareas entre modelos.
+
+```
+/gateway:dispatch --plan tasks/plan.md
+/gateway:dispatch --plan tasks/plan.md --assign "1-3:minimax,4-6:glm" --cross-review deepseek-pro
+/gateway:dispatch --task "add retry:minimax" --task "fix auth:glm"
+/gateway:dispatch --plan tasks/plan.md --model-override minimax:minimax-m3 --max-concurrency 4
+/gateway:dispatch --plan tasks/plan.md --dry-run
+```
+
+**Flags:**
+- `--plan FILE` — archivo de plan; cada sección `## Task N` se convierte en una tarea. Mutuamente excluyente con `--task`
+- `--task PROMPT:PROFILE` — tarea inline (repetible). El sufijo `:PROFILE` es opcional (usa el taskProfile por defecto). Mutuamente excluyente con `--plan`
+- `--assign RANGES` — asigna rangos de task IDs a perfiles, ej. `1-3:minimax,4-6:glm`. Solo válido con `--plan`
+- `--model-override PROF:MODEL` — override de modelo para un perfil (repetible)
+- `--max-concurrency N` — máximo de tareas concurrentes por endpoint (1-16, default 3)
+- `--harness claude|codex` — harness de ejecución por tarea (default `codex`; codex requiere el CLI instalado)
+- `--timeout MS` — timeout por tarea en ms. Si expira, esa tarea se marca `FAILED (timeout)` (no aborta las demás)
+- `--cross-review PROFILE` — tras completar, revisa el diff de cada tarea con este perfil y agrega los findings al manifest
+- `--cross-review-model MODEL` — override de modelo para el cross-review
+- `--fail-fast` — aborta las tareas pendientes tras el primer fallo
+- `--write` / `--no-write` — permitir/impedir escritura de archivos (default `--write`)
+- `--dry-run` — muestra el mapeo tarea→perfil/modelo sin ejecutar nada
+- `--json` — output estructurado
+- `--background` — aún no implementado; corre en foreground con un warning
+
+**Requisitos:** todos los perfiles usados (tasks, `--assign`, `--model-override`, `--cross-review`) deben existir y ser `kind: claude-gateway`.
+
+**Flujo:**
+1. **Parse:** extrae tareas del `--plan` o de los `--task`, y resuelve perfil y modelo por tarea (`--assign` / `--model-override`).
+2. **Preflight:** valida que cada perfil exista y sea `claude-gateway`, health check de conectividad, y warn si el working tree tiene cambios sin commitear (las worktrees se crean desde HEAD).
+3. **Ejecución:** cada tarea corre en una worktree git aislada creada desde HEAD, bajo `.gateway-dispatch/<jobId>/`. El diff resultante se guarda como patch en `patches/`; los logs en `logs/`.
+4. **Cross-review (opcional):** revisa cada diff completado con el perfil de `--cross-review`.
+5. **Cleanup:** cada worktree se elimina en un `finally` (éxito, fallo o timeout).
+
+**Output:** progreso por tarea (`done Ns` / `FAILED (razón)` / `no changes`), summary con conteos, y rutas de patches para aplicar con `git apply`. Los patches NO se aplican automáticamente — se dejan en disco para revisión manual.
+
+**Exit codes:** `0` OK · `1` una o más tareas fallaron · `2` argumentos inválidos, error de config o preflight.
 
 ---
 

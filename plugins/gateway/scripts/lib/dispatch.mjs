@@ -212,9 +212,7 @@ export async function runDispatch(tasks, opts) {
     failFast = false,
     taskRunner,
     resolveProfileFn,
-    skipPreflight = false,
     onProgress,
-    dryRun = false,
   } = opts;
 
   const repoRoot = execSync("git rev-parse --show-toplevel", { cwd, encoding: "utf8" }).trim();
@@ -224,10 +222,6 @@ export async function runDispatch(tasks, opts) {
 
   ensureDispatchGitignore(repoRoot);
   cleanOrphanedWorktrees(repoRoot);
-
-  if (dryRun) {
-    return { jobId, baseSha, outputDir, tasks: tasks.map((t) => ({ ...t, status: "pending" })), summary: { total: tasks.length } };
-  }
 
   fs.mkdirSync(path.join(outputDir, "patches"), { recursive: true });
   fs.mkdirSync(path.join(outputDir, "logs"), { recursive: true });
@@ -276,8 +270,9 @@ export async function runDispatch(tasks, opts) {
       globalAc.signal.addEventListener("abort", onGlobalAbort, { once: true });
 
       let timeoutTimer;
+      let timedOut = false;
       if (timeoutMs) {
-        timeoutTimer = setTimeout(() => taskAc.abort(), timeoutMs);
+        timeoutTimer = setTimeout(() => { timedOut = true; taskAc.abort(); }, timeoutMs);
       }
 
       try {
@@ -296,6 +291,21 @@ export async function runDispatch(tasks, opts) {
         });
 
         const rawOutput = runnerResult.stdout || "";
+
+        // A --timeout-driven taskAc.abort() kills the subprocess tree, and the runner
+        // resolves with exitCode: null (killed by signal, not a clean exit). `null ?? 0`
+        // would misclassify that as a success and fall through to collectPatch/completed,
+        // reporting a partial diff as done. Branch on the timeout flag (set only by *this*
+        // task's own timer, not the global SIGINT/failFast controller) before the exitCode
+        // check so a timed-out task is reported as FAILED (timeout), per spec §4.1.
+        if (timedOut) {
+          failedCount++;
+          const result = { ...task, model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: rawOutput, error: "timeout" };
+          fs.writeFileSync(logFile, rawOutput + "\n" + (runnerResult.stderr || ""), "utf8");
+          results.push(result);
+          return result;
+        }
+
         const exitCode = runnerResult.exitCode ?? 0;
 
         if (exitCode !== 0) {
@@ -414,11 +424,19 @@ export async function runCrossReview(results, opts) {
     }
 
     if (outputDir) {
-      const taskPad = padTaskId(task.id);
-      const reviewFile = path.join(outputDir, "reviews", `task-${taskPad}-review.md`);
-      const reviewContent = task.review.raw ?? JSON.stringify(task.review, null, 2);
-      fs.writeFileSync(reviewFile, reviewContent + "\n", "utf8");
-      task.review.reviewFile = reviewFile;
+      // A write failure here (disk full, permissions) must not reject Promise.all
+      // and crash the whole cross-review pass — every other task's actual work and
+      // review already succeeded. Isolate it: record the error on the review object
+      // and continue. The in-memory review is still reported to the caller.
+      try {
+        const taskPad = padTaskId(task.id);
+        const reviewFile = path.join(outputDir, "reviews", `task-${taskPad}-review.md`);
+        const reviewContent = task.review.raw ?? JSON.stringify(task.review, null, 2);
+        fs.writeFileSync(reviewFile, reviewContent + "\n", "utf8");
+        task.review.reviewFile = reviewFile;
+      } catch (err) {
+        task.review.reviewFileError = err.message;
+      }
     }
   })));
 }

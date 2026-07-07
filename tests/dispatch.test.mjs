@@ -329,12 +329,13 @@ describe("collectPatch", () => {
 });
 
 describe("ensureDispatchGitignore", () => {
-  it("appends .gateway-dispatch/ to .gitignore if missing", () => {
+  it("appends .gateway-dispatch/ to .git/info/exclude if missing", () => {
     const repo = createTempGitRepo();
     try {
       ensureDispatchGitignore(repo);
-      const content = readFileSync(path.join(repo, ".gitignore"), "utf8");
+      const content = readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8");
       assert.ok(content.includes(".gateway-dispatch/"));
+      assert.ok(!existsSync(path.join(repo, ".gitignore")));
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
@@ -343,12 +344,48 @@ describe("ensureDispatchGitignore", () => {
   it("does not duplicate if already present", () => {
     const repo = createTempGitRepo();
     try {
-      writeFileSync(path.join(repo, ".gitignore"), ".gateway-dispatch/\n");
+      const excludePath = path.join(repo, ".git", "info", "exclude");
+      writeFileSync(excludePath, ".gateway-dispatch/\n");
       ensureDispatchGitignore(repo);
-      const content = readFileSync(path.join(repo, ".gitignore"), "utf8");
+      const content = readFileSync(excludePath, "utf8");
       const count = content.split(".gateway-dispatch/").length - 1;
       assert.equal(count, 1);
     } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("does not duplicate if present without trailing slash", () => {
+    const repo = createTempGitRepo();
+    try {
+      const excludePath = path.join(repo, ".git", "info", "exclude");
+      writeFileSync(excludePath, ".gateway-dispatch\n");
+      ensureDispatchGitignore(repo);
+      const content = readFileSync(excludePath, "utf8");
+      const count = (content.match(/^\.gateway-dispatch\/?\s*$/gm) || []).length;
+      assert.equal(count, 1);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("does not throw if .git/info/exclude cannot be written", () => {
+    // Note: when run as root, chmod does not actually block root's own
+    // writes, so this test only guarantees ensureDispatchGitignore never
+    // throws — it can't force the failure branch to execute in every
+    // environment. Mirrors the tolerance pattern used by the
+    // "does not abort when .gateway-dispatch is unreadable" test above.
+    const repo = createTempGitRepo();
+    try {
+      const infoDir = path.join(repo, ".git", "info");
+      fsChmodSync(infoDir, 0o500);
+      try {
+        assert.doesNotThrow(() => ensureDispatchGitignore(repo));
+      } finally {
+        fsChmodSync(infoDir, 0o755);
+      }
+    } finally {
+      try { fsChmodSync(path.join(repo, ".git", "info"), 0o755); } catch {}
       rmSync(repo, { recursive: true, force: true });
     }
   });

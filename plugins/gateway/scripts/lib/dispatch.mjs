@@ -177,13 +177,26 @@ export function collectPatch(worktreePath) {
   });
 }
 
+// Ignores .gateway-dispatch/ via .git/info/exclude rather than the repo's
+// tracked .gitignore, so running dispatch never mutates a tracked file (no
+// surprise working-tree diff for the user) and never needs to be reverted.
+// Best-effort: a failure here must not abort the dispatch run.
 export function ensureDispatchGitignore(repoRoot) {
-  const gitignorePath = path.join(repoRoot, ".gitignore");
+  const excludePath = path.join(repoRoot, ".git", "info", "exclude");
   const entry = ".gateway-dispatch/";
-  let content = "";
-  try { content = fs.readFileSync(gitignorePath, "utf8"); } catch {}
-  if (!content.split("\n").some((line) => line.trim() === entry)) {
-    fs.appendFileSync(gitignorePath, `${content.endsWith("\n") || !content ? "" : "\n"}${entry}\n`);
+  try {
+    let content = "";
+    try { content = fs.readFileSync(excludePath, "utf8"); } catch {}
+    const alreadyPresent = content.split("\n").some((line) => {
+      const trimmed = line.trim();
+      return trimmed === entry || trimmed === ".gateway-dispatch";
+    });
+    if (!alreadyPresent) {
+      fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+      fs.appendFileSync(excludePath, `${content.endsWith("\n") || !content ? "" : "\n"}${entry}\n`);
+    }
+  } catch (err) {
+    process.stderr.write(`[dispatch] Warning: could not update ${excludePath}: ${err.message}\n`);
   }
 }
 

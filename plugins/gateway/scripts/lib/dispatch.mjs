@@ -210,8 +210,6 @@ export async function runDispatch(tasks, opts) {
     maxConcurrency = 3,
     timeoutMs,
     failFast = false,
-    crossReview = null,
-    crossReviewModel = null,
     taskRunner,
     resolveProfileFn,
     skipPreflight = false,
@@ -353,19 +351,6 @@ export async function runDispatch(tasks, opts) {
 
   fs.writeFileSync(path.join(outputDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", "utf8");
 
-  // Write review files to disk
-  if (crossReview) {
-    fs.mkdirSync(path.join(outputDir, "reviews"), { recursive: true });
-    for (const task of results) {
-      if (!task.review) continue;
-      const taskPad = padTaskId(task.id);
-      const reviewFile = path.join(outputDir, "reviews", `task-${taskPad}-review.md`);
-      const reviewContent = task.review.raw ?? JSON.stringify(task.review, null, 2);
-      fs.writeFileSync(reviewFile, reviewContent + "\n", "utf8");
-      task.review.reviewFile = reviewFile;
-    }
-  }
-
   return { ...manifest, outputDir };
 }
 
@@ -384,6 +369,7 @@ export async function runCrossReview(results, opts) {
     maxConcurrency = 3,
     reviewFn,
     onProgress,
+    outputDir = null,
   } = opts;
 
   const reviewable = results.filter((r) => r.status === "completed" && !r.noChanges);
@@ -391,15 +377,19 @@ export async function runCrossReview(results, opts) {
 
   const sem = new Semaphore(maxConcurrency);
 
+  if (outputDir) {
+    fs.mkdirSync(path.join(outputDir, "reviews"), { recursive: true });
+  }
+
   await Promise.all(reviewable.map((task) => sem.run(async () => {
-    const patchText = task.patch ?? (task.patchFile ? fs.readFileSync(task.patchFile, "utf8") : "");
-    const truncated = patchText.length > DIFF_TRUNCATE_LIMIT
-      ? `${patchText.slice(0, DIFF_TRUNCATE_LIMIT)}\n[... truncated, ${patchText.length} chars total, full diff in patch file ...]`
-      : patchText;
-
-    const userPrompt = `## Original Task\n${task.prompt}\n\n## Model Output\n${task.output}\n\n## Diff\n${truncated}`;
-
     try {
+      const patchText = task.patch ?? (task.patchFile ? fs.readFileSync(task.patchFile, "utf8") : "");
+      const truncated = patchText.length > DIFF_TRUNCATE_LIMIT
+        ? `${patchText.slice(0, DIFF_TRUNCATE_LIMIT)}\n[... truncated, ${patchText.length} chars total, full diff in patch file ...]`
+        : patchText;
+
+      const userPrompt = `## Original Task\n${task.prompt}\n\n## Model Output\n${task.output}\n\n## Diff\n${truncated}`;
+
       onProgress?.({ message: `Review Task ${task.id}...`, phase: "cross-review" });
       const review = await reviewFn(reviewProfile, CROSS_REVIEW_SYSTEM, userPrompt, {
         model: reviewModel,
@@ -421,6 +411,14 @@ export async function runCrossReview(results, opts) {
         summary: null,
         error: err.message,
       };
+    }
+
+    if (outputDir) {
+      const taskPad = padTaskId(task.id);
+      const reviewFile = path.join(outputDir, "reviews", `task-${taskPad}-review.md`);
+      const reviewContent = task.review.raw ?? JSON.stringify(task.review, null, 2);
+      fs.writeFileSync(reviewFile, reviewContent + "\n", "utf8");
+      task.review.reviewFile = reviewFile;
     }
   })));
 }

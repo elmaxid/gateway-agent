@@ -380,6 +380,98 @@ import {
 } from "../plugins/gateway/scripts/lib/dispatch.mjs";
 
 describe("runCrossReview", () => {
+  it("writes review files to disk under outputDir/reviews when outputDir is provided", async () => {
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), "dispatch-review-"));
+    try {
+      const results = [
+        { id: 1, status: "completed", noChanges: false, prompt: "A", output: "ok", patch: "diff..." },
+      ];
+
+      const mockReview = async () => ({
+        content: { findings: [{ severity: "warning", description: "x", location: "y" }], summary: "LGTM" },
+        model: "mock",
+        usage: null,
+        parsed: true,
+      });
+
+      await runCrossReview(results, {
+        reviewProfile: { name: "rev", baseUrl: "http://localhost", defaultModel: "rev-model", kind: "claude-gateway" },
+        reviewModel: null,
+        maxConcurrency: 1,
+        reviewFn: mockReview,
+        outputDir,
+      });
+
+      const reviewFile = path.join(outputDir, "reviews", "task-001-review.md");
+      assert.ok(existsSync(reviewFile));
+      assert.equal(results[0].review.reviewFile, reviewFile);
+      const content = readFileSync(reviewFile, "utf8");
+      assert.ok(content.includes("LGTM"));
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not write review files when outputDir is not provided", async () => {
+    const results = [
+      { id: 1, status: "completed", noChanges: false, prompt: "A", output: "ok", patch: "diff..." },
+    ];
+    const mockReview = async () => ({ content: { findings: [], summary: "ok" }, model: "m", usage: null, parsed: true });
+
+    await runCrossReview(results, {
+      reviewProfile: { name: "r", baseUrl: "http://l", defaultModel: "m", kind: "claude-gateway" },
+      maxConcurrency: 1,
+      reviewFn: mockReview,
+    });
+
+    assert.equal(results[0].review.reviewFile, undefined);
+  });
+
+  it("isolates a task with an unreadable patchFile: sets .review.error without crashing the batch", async () => {
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), "dispatch-review-err-"));
+    try {
+      const results = [
+        { id: 1, status: "completed", noChanges: false, prompt: "A", output: "ok", patchFile: "/nonexistent/path/does-not-exist.patch" },
+        { id: 2, status: "completed", noChanges: false, prompt: "B", output: "ok", patch: "diff for task 2" },
+      ];
+
+      let reviewCalls = 0;
+      const capturedPrompts = [];
+      const mockReview = async (_profile, _sys, userPrompt) => {
+        reviewCalls++;
+        capturedPrompts.push(userPrompt);
+        return { content: { findings: [], summary: "reviewed" }, model: "m", usage: null, parsed: true };
+      };
+
+      await runCrossReview(results, {
+        reviewProfile: { name: "r", baseUrl: "http://l", defaultModel: "m", kind: "claude-gateway" },
+        maxConcurrency: 2,
+        reviewFn: mockReview,
+        outputDir,
+      });
+
+      // Task 1's unreadable patchFile must not reject the whole Promise.all.
+      assert.ok(results[0].review);
+      assert.ok(results[0].review.error);
+      assert.equal(results[0].review.findings, null);
+
+      // Task 2 must still be reviewed normally (isolation preserved).
+      assert.equal(reviewCalls, 1);
+      assert.ok(results[1].review);
+      assert.equal(results[1].review.error, undefined);
+      assert.equal(results[1].review.summary, "reviewed");
+      assert.ok(capturedPrompts[0].includes("diff for task 2"));
+
+      // The error result is still written to disk (failures visible on disk too).
+      const errorReviewFile = path.join(outputDir, "reviews", "task-001-review.md");
+      assert.ok(existsSync(errorReviewFile));
+      const errorContent = readFileSync(errorReviewFile, "utf8");
+      assert.ok(errorContent.includes("error"));
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("skips tasks with no changes", async () => {
     const results = [
       { id: 1, status: "completed", noChanges: false, prompt: "A", output: "ok", patchFile: "/tmp/a.patch", patch: "diff..." },

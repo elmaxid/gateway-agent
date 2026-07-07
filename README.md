@@ -18,6 +18,38 @@ Agrega 12 comandos `/gateway:*` a Claude Code. Siete operaciones principales:
 
 La diferencia clave con otros plugins: no hay broker ni servidor. Reviews usan un loop agentic (tool-use multi-turn) por defecto; `--no-tools` cambia a HTTP directo con diff pre-inyectado. Tasks spawnan un proceso aislado apuntando al endpoint configurado.
 
+## Quick Start (5 minutos)
+
+Para alguien nuevo en el proyecto, el camino más corto a "estoy usando el plugin":
+
+```bash
+# 1. Instalar (dentro de Claude Code no hace falta reiniciar si usás /gateway:setup después)
+claude plugin marketplace add https://github.com/elmaxid/gateway-agent.git
+claude plugin install gateway@agent-gateway
+# reiniciar Claude Code
+
+# 2. Configurar un perfil (mínimo uno; ver "Configuración inicial" para el setup completo con 11 perfiles)
+node plugins/gateway/scripts/bootstrap-profiles.mjs --url http://TU_GATEWAY:4000 --api-key sk-...
+```
+
+Dentro de Claude Code:
+
+```
+# 3. Verificar que conecta
+/gateway:setup test --profile minimax
+
+# 4. Primer review — revisa el diff actual de tu working tree
+/gateway:review
+
+# 5. Primera delegación de tarea completa (el modelo puede escribir archivos)
+/gateway:task "agregá un test para la función X"
+
+# 6. Primer dispatch — distribuye varias tareas de un plan entre modelos en paralelo
+/gateway:dispatch --task "explica qué hace config.mjs:minimax" --dry-run
+```
+
+De acá en adelante, cada comando tiene su propia sección más abajo con flags completos y ejemplos. `/gateway:work "<lo que necesites>"` es el punto de entrada más simple si no estás seguro de qué comando usar — hace auto-routing por keywords.
+
 ### Personas especializadas
 
 5 subagentes con prompt-shaping por dominio y harness óptimo:
@@ -340,6 +372,70 @@ Distribuye varias tareas de implementación across múltiples modelos gateway en
 
 **Exit codes:** `0` OK · `1` una o más tareas fallaron · `2` argumentos inválidos, error de config o preflight.
 
+#### Ejemplo end-to-end
+
+1. Escribir un plan con secciones `## Task N` (cualquier markdown, el parser solo lee los headers):
+
+   ```markdown
+   <!-- tasks/refactor-plan.md -->
+   ## Task 1: Extraer helper de validación
+   Mover la lógica de validación de email de `signup.mjs` a `lib/validators.mjs`.
+
+   ## Task 2: Agregar tests para validators.mjs
+   Cubrir casos edge: email vacío, sin @, dominios inválidos.
+
+   ## Task 3: Actualizar README con la nueva API
+   Documentar `validators.mjs` en el README del módulo.
+   ```
+
+2. Repartir las 3 tareas entre 2 perfiles y pedir cross-review con un tercero:
+
+   ```bash
+   /gateway:dispatch --plan tasks/refactor-plan.md --assign "1-2:minimax,3:glm" --cross-review deepseek-pro
+   ```
+
+3. Salida esperada (resumida):
+
+   ```
+   [dispatch] job dispatch-mfx2a1-k9j3lp — 3 tasks, base a1b2c3d
+   [dispatch] task 1 (minimax): done 12s — patch task-001.patch
+   [dispatch] task 2 (minimax): done 18s — patch task-002.patch
+   [dispatch] task 3 (glm): no changes
+   [dispatch] Cross-review: 2 tasks by deepseek-pro
+   [dispatch] task 1: 0 findings — task 2: 1 finding (minor)
+
+   Summary: 2 completed, 1 no-changes, 0 failed
+   Patches: .gateway-dispatch/dispatch-mfx2a1-k9j3lp/patches/
+   Reviews: .gateway-dispatch/dispatch-mfx2a1-k9j3lp/reviews/
+   Manifest: .gateway-dispatch/dispatch-mfx2a1-k9j3lp/manifest.json
+   ```
+
+4. Revisar y aplicar los patches manualmente (nunca se aplican solos):
+
+   ```bash
+   cat .gateway-dispatch/dispatch-mfx2a1-k9j3lp/patches/task-001.patch
+   git apply --check .gateway-dispatch/dispatch-mfx2a1-k9j3lp/patches/task-001.patch  # dry-run
+   git apply .gateway-dispatch/dispatch-mfx2a1-k9j3lp/patches/task-001.patch
+   ```
+
+5. Si algo falla, el log de esa tarea puntual está en `.gateway-dispatch/<jobId>/logs/task-00N.log`; el resto de las tareas no se ven afectadas (excepto con `--fail-fast`).
+
+**Notas prácticas:**
+- `--max-concurrency` es por endpoint (por `baseUrl` normalizado), no global — si `minimax` y `glm` apuntan a gateways distintos, cada uno tiene su propio límite de tareas concurrentes.
+- Si el working tree tiene cambios sin commitear, el preflight avisa: las worktrees se crean desde `HEAD`, así que uncommitted changes no viajan a las tareas.
+- `--task "prompt:profile"` sin `:profile` usa el `taskProfile` configurado por defecto — útil para pruebas rápidas como el paso 6 del Quick Start.
+- Dos `dispatch` corriendo al mismo tiempo sobre el mismo repo no se pisan: cada job activo se marca con un `active.lock` (PID) bajo `.gateway-dispatch/<jobId>/`; un job nuevo salta los directorios de jobs activos de otro proceso al limpiar worktrees huérfanas, y nunca borra `patches/`, `logs/`, `reviews/` ni `manifest.json` de jobs ya completados — solo las worktrees huérfanas.
+- `dispatch` marca `.gateway-dispatch/` como ignorado vía `.git/info/exclude` (local al checkout), nunca toca tu `.gitignore` trackeado.
+
+**Errores comunes (`dispatch` sale con exit code 2 — ver el `Troubleshooting` general más abajo para el resto de los comandos):**
+- `--plan` y `--task` juntos, o ninguno de los dos → son mutuamente excluyentes, uno es obligatorio.
+- `--assign` sin `--plan` → solo tiene sentido con un plan file.
+- `--write` y `--no-write` juntos → mutuamente excluyentes.
+- `--max-concurrency` fuera de 1-16, o `--harness` que no sea `claude`/`codex`.
+- Un perfil (de `--task`, `--assign`, `--model-override` o `--cross-review`) no existe en config, o existe pero no es `kind: claude-gateway`.
+- El archivo de `--plan` no se puede leer.
+- `--model-override` referencia un perfil que ninguna tarea usa realmente → no es error fatal, pero avisa por stderr (`Warning: --model-override references profile "X" which is not used by any task`) — típico de un typo en el nombre del perfil.
+
 ---
 
 ### `/gateway:work`
@@ -541,11 +637,12 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── researcher.md
 │   │   ├── reviewer.md
 │   │   └── security.md
-│   ├── commands/                        # 11 comandos slash
+│   ├── commands/                        # 12 comandos slash
 │   │   ├── review.md
 │   │   ├── adversarial-review.md
 │   │   ├── staged-review.md            # Review 2-fases: spec compliance + adversarial
 │   │   ├── task.md
+│   │   ├── dispatch.md                 # Distribuye tareas de un plan entre modelos en paralelo
 │   │   ├── work.md                     # Auto-routing por keywords → persona correcta
 │   │   ├── debate.md                   # Debate multi-modelo con preflight + quorum
 │   │   ├── setup.md
@@ -558,7 +655,8 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── gateway-coder.md             # Implementación/refactoring (codex harness)
 │   │   ├── gateway-debugger.md          # Debug/test failures (codex harness)
 │   │   ├── gateway-reviewer.md          # Code review/audit (claude harness, read-only)
-│   │   └── gateway-researcher.md        # Research/exploración (claude harness, read-only)
+│   │   ├── gateway-researcher.md        # Research/exploración (claude harness, read-only)
+│   │   └── gateway-dispatcher.md        # Forwarder de dispatch (thin, sin prompt-shaping)
 │   ├── hooks/hooks.json                 # SessionStart / SessionEnd / Stop
 │   ├── prompts/
 │   │   ├── adversarial-review.md        # Template prompt segunda pasada
@@ -577,6 +675,8 @@ Los nombres son exactos — sin prefijos adicionales.
 │           ├── claude-subprocess.mjs    # Spawn claude -p con env custom
 │           ├── codex-harness.mjs       # Spawn codex exec (harness alternativo)
 │           ├── debate.mjs              # Motor de debate multi-modelo con quorum + preflight
+│           ├── concurrency.mjs         # Semaphore + normalizeBaseUrl (compartido por debate y dispatch)
+│           ├── dispatch.mjs            # Parsing, worktrees, ejecución paralela, cross-review de /gateway:dispatch
 │           ├── config.mjs               # Sistema de perfiles multi-endpoint
 │           ├── args.mjs                 # Parser de flags CLI
 │           ├── fs.mjs                   # Helpers de filesystem
@@ -598,11 +698,12 @@ Los nombres son exactos — sin prefijos adicionales.
     ├── agentic-review-malformed-output.test.mjs # exitStatus/render de fallo end-to-end cuando el modelo devuelve garbage — unit (2 tests)
     ├── agentic-review-maxtime.test.mjs # maxTime scaling del loop agentic (max(120000, timeout×2)) — unit (1 test)
     ├── cli-timeout.test.mjs         # --timeout end-to-end vía CLI real, mocks HTTP stateful — unit (6 tests)
-    ├── claude-subprocess.test.mjs   # Subprocess env + auth — unit
-    ├── codex-harness.test.mjs       # Codex env + auth — unit
-    ├── config.test.mjs              # Profile CRUD — unit
-    ├── claude-session-transfer.test.mjs # Transcript parser + buildMessages — unit
-    ├── session-lifecycle-hook.test.mjs  # Hook stdin + env var — unit
+    ├── claude-subprocess.test.mjs   # Subprocess env + auth — unit (9 tests)
+    ├── codex-harness.test.mjs       # Codex env + auth — unit (6 tests)
+    ├── config.test.mjs              # Profile CRUD — unit (13 tests)
+    ├── claude-session-transfer.test.mjs # Transcript parser + buildMessages — unit (9 tests)
+    ├── session-lifecycle-hook.test.mjs  # Hook stdin + env var — unit (2 tests)
+    ├── dispatch.test.mjs            # Semaphore, parsers, worktree lifecycle, execution engine, cross-review, CLI — unit (43 tests)
     └── integration.test.mjs         # Live gateway — connectivity, review, task (claude+codex)
 ```
 
@@ -612,13 +713,13 @@ Los nombres son exactos — sin prefijos adicionales.
 cd /opt/agent-plugin-cc
 
 # Unit tests (sin red) — todos menos integration.test.mjs
-node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs tests/args.test.mjs tests/agentic-review.test.mjs tests/agentic-review-malformed-output.test.mjs tests/agentic-review-maxtime.test.mjs tests/cli-timeout.test.mjs
+node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs tests/args.test.mjs tests/agentic-review.test.mjs tests/agentic-review-malformed-output.test.mjs tests/agentic-review-maxtime.test.mjs tests/cli-timeout.test.mjs tests/dispatch.test.mjs
 
 # Integration tests (requiere gateway activo)
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Unit tests:** 87 tests — config (13), api-client (12), debate (9), args (10), agentic-review (8), agentic-review-maxtime (1), agentic-review-malformed-output (2), cli-timeout (6), claude-subprocess (9), codex-harness (6), claude-session-transfer (9), session-lifecycle-hook (2). Sin red — todos usan `http.createServer`/`net.createServer` locales cuando necesitan simular un backend, nunca el gateway real.
+**Unit tests:** 130 tests — config (13), api-client (12), debate (9), args (10), agentic-review (8), agentic-review-maxtime (1), agentic-review-malformed-output (2), cli-timeout (6), claude-subprocess (9), codex-harness (6), claude-session-transfer (9), session-lifecycle-hook (2), dispatch (43 — Semaphore/normalizeBaseUrl, parsers, worktree lifecycle, execution engine, cross-review, CLI). Sin red — todos usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real.
 
 **Integration tests:** 12 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness, task via codex harness; para los 3 modelos principales (glm-5.2, minimax-m3, deepseek-v4-pro).
 
@@ -683,6 +784,22 @@ node plugins/gateway/scripts/gateway-companion.mjs setup test --profile <perfil>
 
 Si conecta al gateway correctamente (modelo retornado ≠ `claude-sonnet-*`), el problema está en otro lado. Si falla, revisar que `authToken` esté seteado en el perfil — es el token que se pasa como `ANTHROPIC_API_KEY` al subprocess para autenticar contra el gateway.
 
+### `dispatch` sale con exit code 2 inmediatamente (sin ejecutar nada)
+
+Exit 2 = error de validación o preflight, no de una tarea. El mensaje en stderr dice la causa exacta — casos típicos: `--plan`/`--task` juntos o ninguno, `--assign` sin `--plan`, `--write`/`--no-write` juntos, `--max-concurrency` fuera de 1-16, `--harness` inválido, un perfil que no existe o no es `kind: claude-gateway`, o el archivo de `--plan` no se puede leer. Correr con `--dry-run` primero para validar el mapeo tarea→perfil sin ejecutar nada.
+
+### Una tarea de `dispatch` queda `FAILED (timeout)`
+
+Superó el `--timeout` que pasaste (o corrió sin límite si no lo pasaste y el runner nunca volvió). El resto de las tareas no se ven afectadas — revisar `.gateway-dispatch/<jobId>/logs/task-00N.log` de esa tarea puntual para ver qué estaba haciendo. Con `--fail-fast` las tareas todavía no arrancadas se marcan `error: "aborted"` en vez de ejecutar.
+
+### `dispatch` dice "Preflight failed" o tarda mucho en el chequeo de perfiles
+
+El preflight hace un health check HTTP a cada perfil usado (tasks + `--cross-review`) antes de arrancar. Si algún perfil no responde, falla rápido con el nombre del perfil y el error de conexión — mismo diagnóstico que "No credentials for provider" arriba: probar `setup test --profile <perfil>` directamente.
+
+### `--model-override` no parece tener efecto
+
+Si el nombre de perfil en `--model-override PROF:MODEL` no coincide con ningún perfil realmente usado por una tarea, `dispatch` avisa por stderr (`Warning: --model-override references profile "X" which is not used by any task`) y sigue sin aplicar nada — típico de un typo. Verificar con `--dry-run` que el perfil de la tarea coincide exactamente con el de `--model-override`.
+
 ### Job queda en `running` indefinidamente
 
 ```
@@ -727,7 +844,7 @@ rm ~/.gateway-plugin/config.json
 
 UNLICENSED — código privado, todos los derechos reservados al autor.
 
-**Versión actual:** v0.3.1
+**Versión actual:** v0.4.1
 
 ## Créditos
 

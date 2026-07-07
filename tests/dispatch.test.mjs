@@ -184,3 +184,147 @@ describe("buildTaskList", () => {
     assert.equal(tasks[0].profile, "fallback");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Execution engine tests
+// ---------------------------------------------------------------------------
+
+import { execSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  createWorktree,
+  removeWorktree,
+  collectPatch,
+  ensureDispatchGitignore,
+  cleanOrphanedWorktrees,
+} from "../plugins/gateway/scripts/lib/dispatch.mjs";
+
+function createTempGitRepo() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "dispatch-test-"));
+  execSync("git init", { cwd: dir, stdio: "ignore" });
+  execSync("git config user.email test@test.com", { cwd: dir, stdio: "ignore" });
+  execSync("git config user.name Test", { cwd: dir, stdio: "ignore" });
+  writeFileSync(path.join(dir, "file.txt"), "original\n");
+  execSync("git add . && git commit -m init", { cwd: dir, stdio: "ignore" });
+  return dir;
+}
+
+describe("createWorktree", () => {
+  it("creates a detached worktree at the specified path", () => {
+    const repo = createTempGitRepo();
+    try {
+      const baseSha = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+      const wtPath = path.join(repo, ".gateway-dispatch", "test-job", "worktrees", "task-1");
+      createWorktree(repo, wtPath, baseSha);
+      assert.ok(existsSync(path.join(wtPath, "file.txt")));
+      removeWorktree(repo, wtPath);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("collectPatch", () => {
+  it("returns patch content for modified files", () => {
+    const repo = createTempGitRepo();
+    try {
+      const baseSha = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+      const wtPath = path.join(repo, ".gateway-dispatch", "test-job", "worktrees", "task-1");
+      createWorktree(repo, wtPath, baseSha);
+      writeFileSync(path.join(wtPath, "file.txt"), "modified\n");
+      const patch = collectPatch(wtPath);
+      assert.ok(patch.includes("modified"));
+      assert.ok(patch.length > 0);
+      removeWorktree(repo, wtPath);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("captures untracked files via intent-to-add", () => {
+    const repo = createTempGitRepo();
+    try {
+      const baseSha = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+      const wtPath = path.join(repo, ".gateway-dispatch", "test-job", "worktrees", "task-1");
+      createWorktree(repo, wtPath, baseSha);
+      writeFileSync(path.join(wtPath, "newfile.txt"), "new content\n");
+      const patch = collectPatch(wtPath);
+      assert.ok(patch.includes("newfile.txt"));
+      removeWorktree(repo, wtPath);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("returns empty string when no changes", () => {
+    const repo = createTempGitRepo();
+    try {
+      const baseSha = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+      const wtPath = path.join(repo, ".gateway-dispatch", "test-job", "worktrees", "task-1");
+      createWorktree(repo, wtPath, baseSha);
+      const patch = collectPatch(wtPath);
+      assert.equal(patch, "");
+      removeWorktree(repo, wtPath);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("ensureDispatchGitignore", () => {
+  it("appends .gateway-dispatch/ to .gitignore if missing", () => {
+    const repo = createTempGitRepo();
+    try {
+      ensureDispatchGitignore(repo);
+      const content = readFileSync(path.join(repo, ".gitignore"), "utf8");
+      assert.ok(content.includes(".gateway-dispatch/"));
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("does not duplicate if already present", () => {
+    const repo = createTempGitRepo();
+    try {
+      writeFileSync(path.join(repo, ".gitignore"), ".gateway-dispatch/\n");
+      ensureDispatchGitignore(repo);
+      const content = readFileSync(path.join(repo, ".gitignore"), "utf8");
+      const count = content.split(".gateway-dispatch/").length - 1;
+      assert.equal(count, 1);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runDispatch", () => {
+  it("creates patches dir and writes manifest", async () => {
+    const repo = createTempGitRepo();
+    try {
+      const { runDispatch } = await import("../plugins/gateway/scripts/lib/dispatch.mjs");
+      const tasks = [{ id: 1, prompt: "noop", profile: "mock", model: "mock-model" }];
+
+      const mockRunner = async (_profile, _prompt, _opts) => ({
+        stdout: "done", stderr: "", exitCode: 0,
+      });
+
+      const result = await runDispatch(tasks, {
+        cwd: repo,
+        harness: "claude",
+        write: true,
+        maxConcurrency: 1,
+        taskRunner: mockRunner,
+        resolveProfileFn: () => ({ name: "mock", baseUrl: "http://localhost", defaultModel: "mock-model", kind: "claude-gateway" }),
+        skipPreflight: true,
+      });
+
+      assert.equal(result.tasks.length, 1);
+      assert.equal(result.tasks[0].status, "completed_no_changes");
+      assert.ok(existsSync(path.join(repo, ".gateway-dispatch", result.jobId, "manifest.json")));
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});

@@ -1,6 +1,8 @@
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { Semaphore, normalizeBaseUrl } from "./concurrency.mjs";
+import { generateJobId } from "./state.mjs";
 
 // ---------------------------------------------------------------------------
 // Input parsing
@@ -124,4 +126,229 @@ export function buildTaskList(rawTasks, assignment, overrides, defaultProfile) {
     const model = (profile && overrides?.get(profile)) ?? null;
     return { id: t.id, prompt: t.prompt, profile, model };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Worktree lifecycle
+// ---------------------------------------------------------------------------
+
+export function createWorktree(repoRoot, worktreePath, baseSha) {
+  fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+  execSync(
+    `git worktree add --detach "${worktreePath}" ${baseSha}`,
+    { cwd: repoRoot, stdio: "ignore" }
+  );
+}
+
+export function removeWorktree(repoRoot, worktreePath) {
+  try {
+    execSync(`git worktree remove --force "${worktreePath}"`, {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
+  } catch {
+    process.stderr.write(`[dispatch] Warning: orphaned worktree at ${worktreePath}\n`);
+  }
+}
+
+export function collectPatch(worktreePath) {
+  const untracked = execSync("git ls-files --others --exclude-standard", {
+    cwd: worktreePath,
+    encoding: "utf8",
+  }).trim();
+  if (untracked) {
+    execSync("git add --intent-to-add .", { cwd: worktreePath, stdio: "ignore" });
+  }
+  return execSync("git diff --binary HEAD", {
+    cwd: worktreePath,
+    encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024,
+  });
+}
+
+export function ensureDispatchGitignore(repoRoot) {
+  const gitignorePath = path.join(repoRoot, ".gitignore");
+  const entry = ".gateway-dispatch/";
+  let content = "";
+  try { content = fs.readFileSync(gitignorePath, "utf8"); } catch {}
+  if (!content.split("\n").some((line) => line.trim() === entry)) {
+    fs.appendFileSync(gitignorePath, `${content.endsWith("\n") || !content ? "" : "\n"}${entry}\n`);
+  }
+}
+
+export function cleanOrphanedWorktrees(repoRoot) {
+  const dispatchDir = path.join(repoRoot, ".gateway-dispatch");
+  if (!fs.existsSync(dispatchDir)) return;
+  for (const jobDir of fs.readdirSync(dispatchDir)) {
+    const wtDir = path.join(dispatchDir, jobDir, "worktrees");
+    if (!fs.existsSync(wtDir)) continue;
+    for (const taskDir of fs.readdirSync(wtDir)) {
+      const wtPath = path.join(wtDir, taskDir);
+      try {
+        removeWorktree(repoRoot, wtPath);
+        process.stderr.write(`[dispatch] Cleaned orphaned worktree: ${wtPath}\n`);
+      } catch {}
+    }
+    try { fs.rmSync(path.join(dispatchDir, jobDir), { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Execution engine
+// ---------------------------------------------------------------------------
+
+function padTaskId(id) {
+  return String(id).padStart(3, "0");
+}
+
+export async function runDispatch(tasks, opts) {
+  const {
+    cwd,
+    harness = "codex",
+    write = true,
+    maxConcurrency = 3,
+    timeoutMs,
+    failFast = false,
+    crossReview = null,
+    crossReviewModel = null,
+    taskRunner,
+    resolveProfileFn,
+    skipPreflight = false,
+    onProgress,
+    dryRun = false,
+  } = opts;
+
+  const repoRoot = execSync("git rev-parse --show-toplevel", { cwd, encoding: "utf8" }).trim();
+  const baseSha = execSync("git rev-parse HEAD", { cwd: repoRoot, encoding: "utf8" }).trim();
+  const jobId = generateJobId("dispatch");
+  const outputDir = path.join(repoRoot, ".gateway-dispatch", jobId);
+
+  ensureDispatchGitignore(repoRoot);
+  cleanOrphanedWorktrees(repoRoot);
+
+  if (dryRun) {
+    return { jobId, baseSha, outputDir, tasks: tasks.map((t) => ({ ...t, status: "pending" })), summary: { total: tasks.length } };
+  }
+
+  fs.mkdirSync(path.join(outputDir, "patches"), { recursive: true });
+  fs.mkdirSync(path.join(outputDir, "logs"), { recursive: true });
+
+  const globalAc = new AbortController();
+  const createdWorktrees = new Set();
+  let aborted = false;
+
+  const onSignal = () => {
+    aborted = true;
+    globalAc.abort();
+    for (const wt of createdWorktrees) {
+      removeWorktree(repoRoot, wt);
+    }
+  };
+  process.on("SIGINT", onSignal);
+
+  const semaphores = new Map();
+  const getSemaphore = (baseUrl) => {
+    const key = normalizeBaseUrl(baseUrl);
+    if (!semaphores.has(key)) semaphores.set(key, new Semaphore(maxConcurrency));
+    return semaphores.get(key);
+  };
+
+  const results = [];
+  let failedCount = 0;
+
+  const taskPromises = tasks.map((task) => {
+    const profile = resolveProfileFn(task.profile);
+    const sem = getSemaphore(profile.baseUrl);
+    const taskPad = padTaskId(task.id);
+
+    return sem.run(async () => {
+      if (aborted || (failFast && failedCount > 0)) {
+        return { ...task, status: "failed", noChanges: false, duration: 0, patchFile: null, output: "", error: "aborted" };
+      }
+
+      const start = Date.now();
+      const wtPath = path.join(outputDir, "worktrees", `task-${task.id}`);
+      const logFile = path.join(outputDir, "logs", `task-${taskPad}.log`);
+
+      const taskAc = new AbortController();
+      const onGlobalAbort = () => taskAc.abort();
+      globalAc.signal.addEventListener("abort", onGlobalAbort, { once: true });
+
+      let timeoutTimer;
+      if (timeoutMs) {
+        timeoutTimer = setTimeout(() => taskAc.abort(), timeoutMs);
+      }
+
+      try {
+        createWorktree(repoRoot, wtPath, baseSha);
+        createdWorktrees.add(wtPath);
+
+        onProgress?.({ message: `Task ${task.id}: running (${profile.name}/${task.model || profile.defaultModel})`, phase: `task-${task.id}` });
+
+        const model = task.model || profile.defaultModel;
+        const runnerResult = await taskRunner(profile, task.prompt, {
+          model,
+          write,
+          harness,
+          cwd: wtPath,
+          signal: taskAc.signal,
+        });
+
+        const rawOutput = runnerResult.stdout || "";
+        const exitCode = runnerResult.exitCode ?? 0;
+
+        if (exitCode !== 0) {
+          failedCount++;
+          const result = { ...task, model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: rawOutput, error: runnerResult.stderr || `exit ${exitCode}` };
+          fs.writeFileSync(logFile, rawOutput + "\n" + (runnerResult.stderr || ""), "utf8");
+          results.push(result);
+          return result;
+        }
+
+        const patch = collectPatch(wtPath);
+        const noChanges = !patch.trim();
+        const patchFile = noChanges ? null : path.join(outputDir, "patches", `task-${taskPad}.patch`);
+        if (patchFile) {
+          fs.writeFileSync(patchFile, patch, "utf8");
+        }
+        fs.writeFileSync(logFile, rawOutput, "utf8");
+
+        const status = noChanges ? "completed_no_changes" : "completed";
+        const result = { ...task, model, status, noChanges, duration: Date.now() - start, patchFile, output: rawOutput, error: null };
+        results.push(result);
+        onProgress?.({ message: `Task ${task.id}: ${status} (${Math.round((Date.now() - start) / 1000)}s)${noChanges ? " (no changes)" : ""}`, phase: `task-${task.id}` });
+        return result;
+      } catch (err) {
+        failedCount++;
+        const result = { ...task, model: task.model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: "", error: err.message };
+        results.push(result);
+        return result;
+      } finally {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        globalAc.signal.removeEventListener("abort", onGlobalAbort);
+        if (createdWorktrees.has(wtPath)) {
+          removeWorktree(repoRoot, wtPath);
+          createdWorktrees.delete(wtPath);
+        }
+      }
+    });
+  });
+
+  await Promise.all(taskPromises);
+  process.removeListener("SIGINT", onSignal);
+
+  const completed = results.filter((r) => r.status === "completed").length;
+  const completedNoChanges = results.filter((r) => r.status === "completed_no_changes").length;
+  const failed = results.filter((r) => r.status === "failed").length;
+
+  const manifest = {
+    jobId,
+    baseSha,
+    tasks: results.sort((a, b) => a.id - b.id),
+    summary: { total: tasks.length, completed, completedNoChanges, failed },
+  };
+
+  fs.writeFileSync(path.join(outputDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", "utf8");
+
+  return { ...manifest, outputDir };
 }

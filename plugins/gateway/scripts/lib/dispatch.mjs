@@ -353,5 +353,130 @@ export async function runDispatch(tasks, opts) {
 
   fs.writeFileSync(path.join(outputDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", "utf8");
 
+  // Write review files to disk
+  if (crossReview) {
+    fs.mkdirSync(path.join(outputDir, "reviews"), { recursive: true });
+    for (const task of results) {
+      if (!task.review) continue;
+      const taskPad = padTaskId(task.id);
+      const reviewFile = path.join(outputDir, "reviews", `task-${taskPad}-review.md`);
+      const reviewContent = task.review.raw ?? JSON.stringify(task.review, null, 2);
+      fs.writeFileSync(reviewFile, reviewContent + "\n", "utf8");
+      task.review.reviewFile = reviewFile;
+    }
+  }
+
   return { ...manifest, outputDir };
+}
+
+// ---------------------------------------------------------------------------
+// Cross-review phase
+// ---------------------------------------------------------------------------
+
+const CROSS_REVIEW_SYSTEM = `You are a code reviewer. Review this implementation for correctness, bugs, and missed requirements. Return JSON: { "findings": [{ "severity": "critical"|"warning"|"suggestion", "description": "", "location": "" }], "summary": "" }`;
+const DIFF_TRUNCATE_LIMIT = 20_000;
+
+export async function runCrossReview(results, opts) {
+  const {
+    reviewProfile,
+    reviewModel,
+    timeoutMs,
+    maxConcurrency = 3,
+    reviewFn,
+    onProgress,
+  } = opts;
+
+  const reviewable = results.filter((r) => r.status === "completed" && !r.noChanges);
+  if (reviewable.length === 0) return;
+
+  const sem = new Semaphore(maxConcurrency);
+
+  await Promise.all(reviewable.map((task) => sem.run(async () => {
+    const patchText = task.patch ?? (task.patchFile ? fs.readFileSync(task.patchFile, "utf8") : "");
+    const truncated = patchText.length > DIFF_TRUNCATE_LIMIT
+      ? `${patchText.slice(0, DIFF_TRUNCATE_LIMIT)}\n[... truncated, ${patchText.length} chars total, full diff in patch file ...]`
+      : patchText;
+
+    const userPrompt = `## Original Task\n${task.prompt}\n\n## Model Output\n${task.output}\n\n## Diff\n${truncated}`;
+
+    try {
+      onProgress?.({ message: `Review Task ${task.id}...`, phase: "cross-review" });
+      const review = await reviewFn(reviewProfile, CROSS_REVIEW_SYSTEM, userPrompt, {
+        model: reviewModel,
+        timeoutMs,
+      });
+
+      task.review = {
+        profile: reviewProfile.name,
+        model: review.model || reviewModel || reviewProfile.defaultModel,
+        findings: review.parsed && Array.isArray(review.content?.findings) ? review.content.findings : null,
+        summary: review.parsed ? review.content?.summary : String(review.content ?? ""),
+        raw: review.parsed ? null : String(review.content ?? ""),
+      };
+    } catch (err) {
+      task.review = {
+        profile: reviewProfile.name,
+        model: reviewModel || reviewProfile.defaultModel,
+        findings: null,
+        summary: null,
+        error: err.message,
+      };
+    }
+  })));
+}
+
+// ---------------------------------------------------------------------------
+// Output rendering
+// ---------------------------------------------------------------------------
+
+export function renderDispatchOutput(result) {
+  const { jobId, baseSha, outputDir, tasks, summary } = result;
+  const lines = [];
+
+  lines.push(`=> Dispatch: ${summary.total} tasks, job ${jobId}`);
+  lines.push("");
+
+  const totalPad = String(summary.total).length;
+  for (const task of tasks) {
+    const idx = String(task.id).padStart(totalPad, "0");
+    const label = `[${idx}/${String(summary.total).padStart(totalPad, "0")}]`;
+    const profileLabel = `${task.profile}/${task.model || "default"}`;
+    const durationSec = task.duration ? `${Math.round(task.duration / 1000)}s` : "";
+
+    if (task.status === "failed") {
+      lines.push(`${label} > Task ${task.id}: ${task.prompt.slice(0, 60)} (${profileLabel}) ... FAILED${task.error ? ` (${task.error})` : ""}`);
+    } else if (task.noChanges) {
+      lines.push(`${label} > Task ${task.id}: ${task.prompt.slice(0, 60)} (${profileLabel}) ... done ${durationSec} (no changes)`);
+    } else {
+      lines.push(`${label} > Task ${task.id}: ${task.prompt.slice(0, 60)} (${profileLabel}) ... done ${durationSec}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("--- Summary ---");
+  lines.push(`Completed: ${summary.completed}/${summary.total} | No changes: ${summary.completedNoChanges}/${summary.total} | Failed: ${summary.failed}/${summary.total}`);
+
+  const patchTasks = tasks.filter((t) => t.patchFile);
+  if (patchTasks.length > 0) {
+    lines.push("");
+    lines.push(`Patches saved to: ${outputDir}/patches/`);
+    for (const t of patchTasks) {
+      lines.push(`  task-${padTaskId(t.id)}.patch`);
+    }
+  }
+
+  const reviewedTasks = tasks.filter((t) => t.review);
+  if (reviewedTasks.length > 0) {
+    const totalFindings = reviewedTasks.reduce((sum, t) => sum + (t.review.findings?.length ?? 0), 0);
+    lines.push("");
+    lines.push(`Review findings: ${totalFindings} total across ${reviewedTasks.length} reviewed tasks`);
+  }
+
+  if (patchTasks.length > 0) {
+    lines.push("");
+    lines.push(`Apply a patch:  git apply --check ${outputDir}/patches/task-001.patch`);
+    lines.push(`Apply all:      for f in ${outputDir}/patches/*.patch; do git apply --check "$f" && git apply "$f"; done`);
+  }
+
+  return lines.join("\n") + "\n";
 }

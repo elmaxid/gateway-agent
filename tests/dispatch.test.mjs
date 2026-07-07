@@ -369,3 +369,85 @@ describe("runDispatch", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cross-review + output rendering tests
+// ---------------------------------------------------------------------------
+
+import {
+  runCrossReview,
+  renderDispatchOutput,
+} from "../plugins/gateway/scripts/lib/dispatch.mjs";
+
+describe("runCrossReview", () => {
+  it("skips tasks with no changes", async () => {
+    const results = [
+      { id: 1, status: "completed", noChanges: false, prompt: "A", output: "ok", patchFile: "/tmp/a.patch", patch: "diff..." },
+      { id: 2, status: "completed_no_changes", noChanges: true, prompt: "B", output: "ok", patchFile: null },
+      { id: 3, status: "failed", noChanges: false, prompt: "C", output: "", patchFile: null },
+    ];
+
+    let reviewCalls = 0;
+    const mockReview = async () => {
+      reviewCalls++;
+      return { content: { findings: [], summary: "LGTM" }, model: "mock", usage: null, parsed: true };
+    };
+
+    await runCrossReview(results, {
+      reviewProfile: { name: "rev", baseUrl: "http://localhost", defaultModel: "rev-model", kind: "claude-gateway" },
+      reviewModel: null,
+      timeoutMs: undefined,
+      maxConcurrency: 1,
+      reviewFn: mockReview,
+    });
+
+    assert.equal(reviewCalls, 1);
+    assert.ok(results[0].review);
+    assert.equal(results[0].review.findings.length, 0);
+    assert.equal(results[1].review, undefined);
+    assert.equal(results[2].review, undefined);
+  });
+
+  it("truncates patch at 20k chars for review input", async () => {
+    const longPatch = "x".repeat(25_000);
+    const results = [
+      { id: 1, status: "completed", noChanges: false, prompt: "A", output: "ok", patch: longPatch },
+    ];
+
+    let capturedUserPrompt = "";
+    const mockReview = async (_profile, _sys, userPrompt) => {
+      capturedUserPrompt = userPrompt;
+      return { content: { findings: [], summary: "ok" }, model: "m", usage: null, parsed: true };
+    };
+
+    await runCrossReview(results, {
+      reviewProfile: { name: "r", baseUrl: "http://l", defaultModel: "m", kind: "claude-gateway" },
+      maxConcurrency: 1,
+      reviewFn: mockReview,
+    });
+
+    assert.ok(capturedUserPrompt.includes("[... truncated"));
+    assert.ok(capturedUserPrompt.length < 25_000);
+  });
+});
+
+describe("renderDispatchOutput", () => {
+  it("renders summary with counts", () => {
+    const result = {
+      jobId: "dispatch-test123",
+      baseSha: "abc123",
+      outputDir: "/tmp/.gateway-dispatch/dispatch-test123",
+      tasks: [
+        { id: 1, status: "completed", noChanges: false, duration: 45000, profile: "minimax", model: "minimax-m3", prompt: "Add retry", patchFile: "/p/task-001.patch" },
+        { id: 2, status: "failed", noChanges: false, duration: 5000, profile: "glm", model: "glm-5.2", prompt: "Fix auth", error: "timeout" },
+      ],
+      summary: { total: 2, completed: 1, completedNoChanges: 0, failed: 1 },
+    };
+
+    const output = renderDispatchOutput(result);
+    assert.ok(output.includes("Completed: 1/2"));
+    assert.ok(output.includes("Failed: 1/2"));
+    assert.ok(output.includes("task-001.patch"));
+    assert.ok(output.includes("FAILED"));
+  });
+});

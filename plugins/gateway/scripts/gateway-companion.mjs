@@ -98,6 +98,7 @@ function printUsage() {
       "  gateway-companion dispatch [--plan FILE|--task PROMPT:PROFILE...] [--assign RANGES] [--model-override PROF:MODEL...]",
       "                             [--max-concurrency N] [--timeout MS] [--harness claude|codex] [--write|--no-write]",
       "                             [--cross-review PROFILE] [--cross-review-model MODEL] [--fail-fast] [--dry-run] [--json]",
+      "                             [--background (not yet implemented)]",
       "  gateway-companion transfer [--profile NAME] [--turns N] [prompt]",
       "  gateway-companion status [job-id] [--all] [--json]",
       "  gateway-companion result [job-id] [--json]",
@@ -1327,6 +1328,10 @@ async function handleDispatch(argv) {
   const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
   const cwd = resolveCommandCwd(options);
 
+  if (options.background) {
+    console.error("[dispatch] Note: --background is not yet implemented; running in foreground.");
+  }
+
   // --- Validation (exit code 2 per §3.2) ---
   function validationError(msg) { process.exitCode = 2; throw new Error(msg); }
 
@@ -1348,7 +1353,12 @@ async function handleDispatch(argv) {
 
   const write = options["no-write"] ? false : true;
   const config = loadConfig();
-  const defaultProfile = resolveTaskProfile(config);
+  let defaultProfile;
+  try {
+    defaultProfile = resolveTaskProfile(config);
+  } catch (err) {
+    validationError(err.message);
+  }
 
   // --- Parse input ---
   let rawTasks;
@@ -1365,9 +1375,25 @@ async function handleDispatch(argv) {
   const tasks = buildTaskList(rawTasks, assignment, overrides, defaultProfile.name);
 
   // --- Resolve and validate all profiles ---
+  // Covers every profile name that will actually be used: --task prompt:profile,
+  // --assign mappings, and --model-override profile:model all flow into
+  // tasks[].profile via buildTaskList(); the --cross-review profile is added
+  // explicitly below. Per spec §3.1, every one of these must exist in config
+  // AND have kind === "claude-gateway" — checked here, in preflight, before
+  // any task starts executing.
   const profileNames = [...new Set(tasks.map((t) => t.profile).filter(Boolean))];
   if (options["cross-review"]) profileNames.push(options["cross-review"]);
-  for (const name of profileNames) resolveProfile(name, config);
+  for (const name of profileNames) {
+    let profile;
+    try {
+      profile = resolveProfile(name, config);
+    } catch (err) {
+      validationError(err.message);
+    }
+    if (profile.kind !== "claude-gateway") {
+      validationError(`Profile "${name}" has kind "${profile.kind}" — dispatch requires kind "claude-gateway".`);
+    }
+  }
 
   // --- Dry run ---
   if (options["dry-run"]) {

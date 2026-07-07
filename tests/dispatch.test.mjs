@@ -571,6 +571,9 @@ describe("extractRepeatableFlags", () => {
       assert.fail("Should have thrown");
     } catch (err) {
       assert.ok(err.stderr.includes("mutually exclusive") || err.stderr.includes("not both"), `Expected mutual exclusion error, got: ${err.stderr}`);
+      // Regression guard for main()'s catch handler: `process.exitCode = process.exitCode || 1`
+      // must preserve the validationError()-set exit code 2, not clobber it back to 1.
+      assert.equal(err.code, 2, `Expected exit code 2 for a validation error, got ${err.code}`);
     }
   });
 
@@ -588,6 +591,78 @@ describe("extractRepeatableFlags", () => {
       assert.fail("Should have thrown");
     } catch (err) {
       assert.ok(err.stderr.includes("--assign") && err.stderr.includes("--plan"), `Expected --assign/--plan error, got: ${err.stderr}`);
+    }
+  });
+});
+
+describe("handleDispatch profile-kind preflight validation (via CLI)", () => {
+  function writeConfig(tmpDir, config) {
+    writeFileSync(path.join(tmpDir, "config.json"), JSON.stringify(config, null, 2));
+  }
+
+  function makeTmpConfigDir() {
+    return mkdtempSync(path.join(os.tmpdir(), "gw-dispatch-kind-test-"));
+  }
+
+  it("exits 2 when a --task profile has kind !== claude-gateway", async () => {
+    const tmpDir = makeTmpConfigDir();
+    writeConfig(tmpDir, {
+      profiles: {
+        good: { kind: "claude-gateway", baseUrl: "http://localhost:1", defaultModel: "m" },
+        badkind: { kind: "openai", baseUrl: "http://localhost:2", defaultModel: "m" },
+      },
+      defaultProfile: "good",
+      reviewProfile: null,
+      taskProfile: "good",
+    });
+
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const companion = path.join(__dirname, "../plugins/gateway/scripts/gateway-companion.mjs");
+
+    try {
+      await execFileAsync(process.execPath, [companion, "dispatch", "--task", "do something:badkind"], {
+        timeout: 5000,
+        env: { ...process.env, GATEWAY_PLUGIN_CONFIG_DIR: tmpDir },
+      });
+      assert.fail("Should have thrown");
+    } catch (err) {
+      assert.equal(err.code, 2, `Expected exit code 2, got ${err.code}. stderr: ${err.stderr}`);
+      assert.ok(err.stderr.includes("badkind"), `Expected error to name the offending profile, got: ${err.stderr}`);
+      assert.ok(err.stderr.includes("claude-gateway"), `Expected error to mention the required kind, got: ${err.stderr}`);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("exits 2 (not 1) when a referenced profile does not exist in config", async () => {
+    const tmpDir = makeTmpConfigDir();
+    writeConfig(tmpDir, {
+      profiles: {
+        good: { kind: "claude-gateway", baseUrl: "http://localhost:1", defaultModel: "m" },
+      },
+      defaultProfile: "good",
+      reviewProfile: null,
+      taskProfile: "good",
+    });
+
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const companion = path.join(__dirname, "../plugins/gateway/scripts/gateway-companion.mjs");
+
+    try {
+      await execFileAsync(process.execPath, [companion, "dispatch", "--task", "do something:missingprofile"], {
+        timeout: 5000,
+        env: { ...process.env, GATEWAY_PLUGIN_CONFIG_DIR: tmpDir },
+      });
+      assert.fail("Should have thrown");
+    } catch (err) {
+      assert.equal(err.code, 2, `Expected exit code 2 (not 1) for profile-not-found, got ${err.code}. stderr: ${err.stderr}`);
+      assert.ok(err.stderr.includes("missingprofile") || err.stderr.toLowerCase().includes("not found"), `Expected not-found error, got: ${err.stderr}`);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });

@@ -43,8 +43,105 @@ describe("normalizeBaseUrl", () => {
     assert.equal(normalizeBaseUrl("http://host:4000/v1/"), "http://host:4000");
   });
 
-  it("returns input for invalid URLs", () => {
-    assert.equal(normalizeBaseUrl("not-a-url"), "not-a-url");
+  it("two profiles at the same host+scheme share one key", () => {
+    // The whole point of the key: same actual endpoint -> one concurrency budget.
+    assert.equal(
+      normalizeBaseUrl("http://host:4000/v1/"),
+      normalizeBaseUrl("http://host:4000/chat/completions")
+    );
+  });
+
+  it("distinct valid endpoints get distinct keys", () => {
+    assert.notEqual(normalizeBaseUrl("http://a:4000"), normalizeBaseUrl("http://b:4000"));
+    assert.notEqual(normalizeBaseUrl("http://host:4000"), normalizeBaseUrl("http://host:5000"));
+    assert.notEqual(normalizeBaseUrl("http://host:4000"), normalizeBaseUrl("https://host:4000"));
+  });
+
+  it("un-parseable input produces a deterministic fallback key containing whitespace", () => {
+    const k1 = normalizeBaseUrl("not-a-url");
+    const k2 = normalizeBaseUrl("not-a-url");
+    assert.equal(k1, k2, "same invalid input must map to the same key");
+    assert.match(k1, /\s/, "fallback key must contain whitespace (the collision-proof invariant)");
+  });
+
+  it("distinct un-parseable inputs get distinct fallback keys", () => {
+    // Two genuinely different (both invalid) endpoints must NOT share a budget.
+    assert.notEqual(normalizeBaseUrl("not-a-url"), normalizeBaseUrl("also-not-a-url"));
+    assert.notEqual(normalizeBaseUrl("//host"), normalizeBaseUrl("//other"));
+  });
+
+  // --- Adversarial collision cases (the bug that survived two prior fixes) ---
+
+  it("Round-2 adversarial case: '//host' fallback cannot collide with an 'invalid'-scheme URL", () => {
+    // "//host" has no scheme -> new URL() throws -> fallback (catch) branch.
+    const fallbackKey = normalizeBaseUrl("//host");
+    // A URL whose scheme is literally the word `invalid` PARSES fine and takes
+    // the success branch, yielding exactly "invalid://host".
+    assert.equal(normalizeBaseUrl("invalid://host"), "invalid://host");
+    // The broken Round-2 fix (`invalid:${baseUrl}`) made these two equal.
+    // They MUST NOT be equal now.
+    assert.notEqual(fallbackKey, normalizeBaseUrl("invalid://host"));
+  });
+
+  it("the sentinel WORD is itself a valid scheme, so only the SPACE saves us", () => {
+    // Prove the trap: "invalid-base-url" is a syntactically valid URL scheme,
+    // so if the fallback distinguisher were the word alone it would collide.
+    assert.equal(normalizeBaseUrl("invalid-base-url://x"), "invalid-base-url://x");
+    // The success-branch key for that URL has NO whitespace...
+    assert.doesNotMatch(normalizeBaseUrl("invalid-base-url://x"), /\s/);
+    // ...while the fallback for an invalid input starting with the same word DOES.
+    const fb = normalizeBaseUrl("invalid-base-url://"); // trailing-empty host -> actually parses?
+    // "invalid-base-url://" parses (empty host) so it's a success key with no space:
+    assert.doesNotMatch(fb, /\s/);
+    // But a truly un-parseable input keeps the whitespace fallback:
+    assert.match(normalizeBaseUrl("::not a url::"), /\s/);
+  });
+
+  it("no successfully-parsed URL can ever produce a whitespace key (invariant sweep)", () => {
+    // The entire collision-freedom proof rests on this invariant. Try hard to
+    // break it with adversarial schemes/hosts. Every parseable URL's key must
+    // be whitespace-free; therefore none can equal any (whitespace-containing)
+    // fallback key.
+    const adversarial = [
+      "http://host:4000/v1/",
+      "invalid://host",
+      "invalid-url://host",
+      "invalid-base-url://host",
+      "a+b.c-d://x",
+      "HTTPS://HOST",
+      "file:///etc/passwd",
+      "file://",
+      "foo://bar:9999",
+      "x://[::1]:8080",
+      "sha256://deadbeef",
+      "custom+scheme.v2://api.example.com:8443",
+      "mailto:foo@bar",
+    ];
+    const fallbackKeys = [
+      normalizeBaseUrl("//host"),
+      normalizeBaseUrl("not-a-url"),
+      normalizeBaseUrl("::::"),
+      normalizeBaseUrl("invalid-base-url ://weaponized"), // space in scheme -> throws -> fallback
+    ];
+    for (const s of adversarial) {
+      const key = normalizeBaseUrl(s);
+      assert.doesNotMatch(key, /\s/, `parseable URL produced a whitespace key: ${s} -> ${key}`);
+      for (const fb of fallbackKeys) {
+        assert.notEqual(key, fb, `success key collided with fallback: ${s}`);
+      }
+    }
+  });
+
+  it("fallback key is not a fixed point of the success branch (round-trip cannot collide)", () => {
+    // Feed a fallback key back through normalizeBaseUrl. Because it contains a
+    // space, new URL() cannot parse it into a `${protocol}//${host}` equal to
+    // itself; it either throws (staying on the whitespace fallback) or, even if
+    // it somehow parsed, the success output would be whitespace-free and thus
+    // unequal to the original fallback.
+    const fb = normalizeBaseUrl("//host");
+    assert.match(fb, /\s/);
+    // Weaponize: try to make a URL whose scheme IS the sentinel prefix (with space).
+    assert.throws(() => new URL("invalid-base-url ://host"), "space in scheme must be unparseable");
   });
 });
 

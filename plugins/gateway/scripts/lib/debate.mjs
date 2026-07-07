@@ -2,36 +2,7 @@
 // Flow: parallel positions → cross-critique → synthesis.
 import { chatCompletion, sanitizeError, testConnectivity } from "./api-client.mjs";
 import { loadConfig, resolveProfile } from "./config.mjs";
-
-class Semaphore {
-  constructor(max) {
-    this.max = max;
-    this.active = 0;
-    this.queue = [];
-  }
-  async acquire() {
-    if (this.active < this.max) {
-      this.active++;
-      return;
-    }
-    await new Promise((resolve) => this.queue.push(resolve));
-    this.active++;
-  }
-  release() {
-    this.active--;
-    const next = this.queue.shift();
-    if (next) next();
-  }
-}
-
-function normalizeBaseUrl(baseUrl) {
-  try {
-    const u = new URL(baseUrl);
-    return `${u.protocol}//${u.host}`;
-  } catch {
-    return baseUrl;
-  }
-}
+import { Semaphore, normalizeBaseUrl } from "./concurrency.mjs";
 
 function extractResponseText(completion) {
   return completion?.choices?.[0]?.message?.content ?? "";

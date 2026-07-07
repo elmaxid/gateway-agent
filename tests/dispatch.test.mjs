@@ -327,4 +327,45 @@ describe("runDispatch", () => {
       rmSync(repo, { recursive: true, force: true });
     }
   });
+
+  it("failFast short-circuited tasks are counted (fail-loud, not silently dropped)", async () => {
+    const repo = createTempGitRepo();
+    try {
+      const { runDispatch } = await import("../plugins/gateway/scripts/lib/dispatch.mjs");
+      // maxConcurrency 1 on a shared baseUrl serializes tasks (FIFO semaphore):
+      // task 1 fails -> failedCount>0 -> task 2 hits the failFast guard.
+      const tasks = [
+        { id: 1, prompt: "fail", profile: "mock", model: "mock-model" },
+        { id: 2, prompt: "noop", profile: "mock", model: "mock-model" },
+      ];
+
+      const mockRunner = async (_profile, _prompt, _opts) => ({
+        stdout: "", stderr: "boom", exitCode: 1,
+      });
+
+      const result = await runDispatch(tasks, {
+        cwd: repo,
+        harness: "claude",
+        write: true,
+        maxConcurrency: 1,
+        failFast: true,
+        taskRunner: mockRunner,
+        resolveProfileFn: () => ({ name: "mock", baseUrl: "http://localhost", defaultModel: "mock-model", kind: "claude-gateway" }),
+        skipPreflight: true,
+      });
+
+      // Both tasks must appear in the manifest — the aborted one must NOT be dropped.
+      assert.equal(result.tasks.length, 2);
+      // summary.failed must count the short-circuited task, or a downstream
+      // exit-code consumer would see failed:0 and exit 0 despite real failures.
+      assert.equal(result.summary.failed, 2);
+      const t2 = result.tasks.find((t) => t.id === 2);
+      assert.equal(t2.status, "failed");
+      assert.equal(t2.error, "aborted");
+      // model field present on the aborted TaskResult (shape consistency).
+      assert.equal(t2.model, "mock-model");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
 });

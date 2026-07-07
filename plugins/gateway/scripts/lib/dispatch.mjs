@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { Semaphore, normalizeBaseUrl } from "./concurrency.mjs";
@@ -134,15 +134,16 @@ export function buildTaskList(rawTasks, assignment, overrides, defaultProfile) {
 
 export function createWorktree(repoRoot, worktreePath, baseSha) {
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
-  execSync(
-    `git worktree add --detach "${worktreePath}" ${baseSha}`,
+  execFileSync(
+    "git",
+    ["worktree", "add", "--detach", worktreePath, baseSha],
     { cwd: repoRoot, stdio: "ignore" }
   );
 }
 
 export function removeWorktree(repoRoot, worktreePath) {
   try {
-    execSync(`git worktree remove --force "${worktreePath}"`, {
+    execFileSync("git", ["worktree", "remove", "--force", worktreePath], {
       cwd: repoRoot,
       stdio: "ignore",
     });
@@ -263,7 +264,9 @@ export async function runDispatch(tasks, opts) {
 
     return sem.run(async () => {
       if (aborted || (failFast && failedCount > 0)) {
-        return { ...task, status: "failed", noChanges: false, duration: 0, patchFile: null, output: "", error: "aborted" };
+        const result = { ...task, model: task.model, status: "failed", noChanges: false, duration: 0, patchFile: null, output: "", error: "aborted" };
+        results.push(result);
+        return result;
       }
 
       const start = Date.now();

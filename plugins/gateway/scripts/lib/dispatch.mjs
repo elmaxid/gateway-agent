@@ -8,7 +8,7 @@ import { generateJobId } from "./state.mjs";
 // Input parsing
 // ---------------------------------------------------------------------------
 
-const TASK_HEADER_RE = /^##\s+Task\s+(\d+)[\s:>\-]/i;
+const TASK_HEADER_RE = /^##\s+Task\s+(\d+)(?:[\s:>\-]|$)/i;
 
 export function parsePlanFile(content) {
   const lines = content.split(/\r?\n/);
@@ -63,7 +63,13 @@ export function parseInlineTasks(taskArgs, defaultProfile) {
   });
 }
 
-export function parseAssignment(assignStr, taskCount) {
+export function parseAssignment(assignStr, taskIds) {
+  if (assignStr.trim() === "") {
+    throw new Error("--assign no puede estar vacío.");
+  }
+
+  const idSet = new Set(taskIds);
+  const validIds = [...idSet].sort((a, b) => a - b);
   const assigned = new Map();
   const segments = assignStr.split(",").map((s) => s.trim()).filter(Boolean);
 
@@ -93,11 +99,14 @@ export function parseAssignment(assignStr, taskCount) {
     if (start > end) {
       throw new Error(`Invalid range "${rangeStr}": start (${start}) > end (${end}).`);
     }
-    if (end > taskCount) {
-      throw new Error(`Assignment range ${start}-${end} exceeds task count (${taskCount}).`);
-    }
 
     for (let i = start; i <= end; i++) {
+      if (!idSet.has(i)) {
+        throw new Error(
+          `Assignment refers to task ${i}, which does not exist in the plan. ` +
+          `Valid task IDs: ${validIds.join(", ")}.`
+        );
+      }
       if (assigned.has(i)) {
         throw new Error(`Overlapping assignment: task ${i} assigned to both "${assigned.get(i)}" and "${profile}".`);
       }
@@ -153,14 +162,15 @@ export function removeWorktree(repoRoot, worktreePath) {
 }
 
 export function collectPatch(worktreePath) {
-  const untracked = execSync("git ls-files --others --exclude-standard", {
+  const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], {
     cwd: worktreePath,
     encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024,
   }).trim();
   if (untracked) {
-    execSync("git add --intent-to-add .", { cwd: worktreePath, stdio: "ignore" });
+    execFileSync("git", ["add", "--intent-to-add", "."], { cwd: worktreePath, stdio: "ignore" });
   }
-  return execSync("git diff --binary HEAD", {
+  return execFileSync("git", ["diff", "--binary", "HEAD"], {
     cwd: worktreePath,
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
@@ -180,17 +190,64 @@ export function ensureDispatchGitignore(repoRoot) {
 export function cleanOrphanedWorktrees(repoRoot) {
   const dispatchDir = path.join(repoRoot, ".gateway-dispatch");
   if (!fs.existsSync(dispatchDir)) return;
-  for (const jobDir of fs.readdirSync(dispatchDir)) {
-    const wtDir = path.join(dispatchDir, jobDir, "worktrees");
-    if (!fs.existsSync(wtDir)) continue;
-    for (const taskDir of fs.readdirSync(wtDir)) {
+  let jobDirs;
+  try {
+    jobDirs = fs.readdirSync(dispatchDir);
+  } catch (err) {
+    process.stderr.write(`[dispatch] Warning: cannot read ${dispatchDir}: ${err.message}\n`);
+    return;
+  }
+
+  for (const jobDir of jobDirs) {
+    const jobPath = path.join(dispatchDir, jobDir);
+
+    // Never delete a completed job's results (patches/, logs/, reviews/,
+    // manifest.json) — they are left on disk for manual review per the README.
+    // Only orphaned worktrees are cleaned up. Skip any job that is still being
+    // driven by a live dispatch process (tracked via an `active.lock` PID file)
+    // so concurrent dispatches don't trample each other.
+    if (isJobActive(jobPath)) {
+      process.stderr.write(`[dispatch] Skipping active job: ${jobDir}\n`);
+      continue;
+    }
+
+    const wtDir = path.join(jobPath, "worktrees");
+    let taskDirs;
+    try {
+      taskDirs = fs.readdirSync(wtDir);
+    } catch {
+      // No worktrees directory (or unreadable) — nothing to clean for this job.
+      continue;
+    }
+
+    for (const taskDir of taskDirs) {
       const wtPath = path.join(wtDir, taskDir);
       try {
         removeWorktree(repoRoot, wtPath);
         process.stderr.write(`[dispatch] Cleaned orphaned worktree: ${wtPath}\n`);
-      } catch {}
+      } catch (err) {
+        process.stderr.write(`[dispatch] Warning: could not remove ${wtPath}: ${err.message}\n`);
+      }
     }
-    try { fs.rmSync(path.join(dispatchDir, jobDir), { recursive: true, force: true }); } catch {}
+  }
+}
+
+// Returns true if the job directory is owned by a dispatch process that is
+// still running (tracked via an `active.lock` file containing the owning PID).
+function isJobActive(jobPath) {
+  const lockFile = path.join(jobPath, "active.lock");
+  let pid;
+  try {
+    pid = parseInt(fs.readFileSync(lockFile, "utf8").trim(), 10);
+  } catch {
+    return false;
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -226,6 +283,13 @@ export async function runDispatch(tasks, opts) {
   fs.mkdirSync(path.join(outputDir, "patches"), { recursive: true });
   fs.mkdirSync(path.join(outputDir, "logs"), { recursive: true });
 
+  // Mark this job as active so a concurrent dispatch running
+  // cleanOrphanedWorktrees doesn't touch our worktrees while we work. If
+  // this process dies unexpectedly, the PID recorded here goes stale and
+  // isJobActive() treats the lock as inert, so a future cleanup can proceed.
+  const lockFile = path.join(outputDir, "active.lock");
+  fs.writeFileSync(lockFile, String(process.pid), "utf8");
+
   const globalAc = new AbortController();
   const createdWorktrees = new Set();
   let aborted = false;
@@ -235,9 +299,11 @@ export async function runDispatch(tasks, opts) {
     globalAc.abort();
     for (const wt of createdWorktrees) {
       removeWorktree(repoRoot, wt);
+      createdWorktrees.delete(wt);
     }
   };
   process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
 
   const semaphores = new Map();
   const getSemaphore = (baseUrl) => {
@@ -347,6 +413,7 @@ export async function runDispatch(tasks, opts) {
 
   await Promise.all(taskPromises);
   process.removeListener("SIGINT", onSignal);
+  process.removeListener("SIGTERM", onSignal);
 
   const completed = results.filter((r) => r.status === "completed").length;
   const completedNoChanges = results.filter((r) => r.status === "completed_no_changes").length;
@@ -360,6 +427,10 @@ export async function runDispatch(tasks, opts) {
   };
 
   fs.writeFileSync(path.join(outputDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", "utf8");
+
+  // Job completed — release the active marker so future cleanups can sweep
+  // any leftover worktrees without waiting for our PID to disappear.
+  try { fs.rmSync(lockFile, { force: true }); } catch {}
 
   return { ...manifest, outputDir };
 }

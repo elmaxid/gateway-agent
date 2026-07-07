@@ -1351,6 +1351,7 @@ async function handleDispatch(argv) {
     validationError(`Unknown --harness "${harness}". Valid: claude, codex.`);
   }
 
+  if (options.write && options["no-write"]) validationError("--write y --no-write son mutuamente excluyentes.");
   const write = options["no-write"] ? false : true;
   const config = loadConfig();
   let defaultProfile;
@@ -1364,13 +1365,18 @@ async function handleDispatch(argv) {
   let rawTasks;
   if (hasPlan) {
     const planPath = path.resolve(cwd, options.plan);
-    const content = fs.readFileSync(planPath, "utf8");
+    let content;
+    try {
+      content = fs.readFileSync(planPath, "utf8");
+    } catch (err) {
+      validationError(`No se pudo leer el plan file ${planPath}: ${err.message}`);
+    }
     rawTasks = parsePlanFile(content);
   } else {
     rawTasks = parseInlineTasks(rawTaskArgs, defaultProfile.name);
   }
 
-  const assignment = options.assign ? parseAssignment(options.assign, rawTasks.length) : null;
+  const assignment = options.assign ? parseAssignment(options.assign, rawTasks.map((t) => t.id)) : null;
   const overrides = rawOverrides.length > 0 ? parseModelOverrides(rawOverrides) : null;
   const tasks = buildTaskList(rawTasks, assignment, overrides, defaultProfile.name);
 
@@ -1383,6 +1389,19 @@ async function handleDispatch(argv) {
   // any task starts executing.
   const profileNames = [...new Set(tasks.map((t) => t.profile).filter(Boolean))];
   if (options["cross-review"]) profileNames.push(options["cross-review"]);
+
+  // Warn on --model-override keys that target a profile not actually used by
+  // any task (and not the cross-review profile). A typo here would otherwise be
+  // silently ignored: the override never matches a task's resolved profile, so
+  // the task keeps its profile's default model with no signal to the user.
+  if (overrides) {
+    const usedProfileNames = new Set(profileNames);
+    for (const key of overrides.keys()) {
+      if (!usedProfileNames.has(key)) {
+        console.error(`[dispatch] Warning: --model-override references profile "${key}" which is not used by any task; override will have no effect.`);
+      }
+    }
+  }
   for (const name of profileNames) {
     let profile;
     try {
@@ -1439,6 +1458,8 @@ async function handleDispatch(argv) {
 
   const resolveProfileFn = (name) => resolveProfile(name, config);
   const taskRunnerFn = harness === "codex" ? runTask : runClaudeTask;
+  if (typeof resolveProfileFn !== "function") throw new Error("Internal error: resolveProfileFn is not a function.");
+  if (typeof taskRunnerFn !== "function") throw new Error(`Internal error: no task runner available for harness "${harness}".`);
 
   const result = await runDispatch(tasks, {
     cwd,
@@ -1457,13 +1478,6 @@ async function handleDispatch(argv) {
     const reviewProfile = resolveProfile(options["cross-review"], config);
     if (!options.json) console.error(`[dispatch] Cross-review: ${result.tasks.filter((t) => t.status === "completed" && !t.noChanges).length} tasks by ${reviewProfile.name}`);
 
-    // Read patches for review input
-    for (const task of result.tasks) {
-      if (task.patchFile && fs.existsSync(task.patchFile)) {
-        task.patch = fs.readFileSync(task.patchFile, "utf8");
-      }
-    }
-
     await runCrossReview(result.tasks, {
       reviewProfile,
       reviewModel: options["cross-review-model"],
@@ -1475,13 +1489,20 @@ async function handleDispatch(argv) {
     });
 
     // Update manifest with review data
-    const manifestPath = path.join(result.outputDir, "manifest.json");
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    manifest.tasks = result.tasks;
-    const totalFindings = result.tasks.reduce((sum, t) => sum + (t.review?.findings?.length ?? 0), 0);
-    manifest.summary.reviewFindings = totalFindings;
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
-    result.summary.reviewFindings = totalFindings;
+    // Persisting the updated manifest is cosmetic: the tasks and cross-review
+    // themselves already succeeded. A failure here (disk full, permissions) must
+    // not clobber the real result/exit code — warn and continue.
+    try {
+      const manifestPath = path.join(result.outputDir, "manifest.json");
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      manifest.tasks = result.tasks;
+      const totalFindings = result.tasks.reduce((sum, t) => sum + (t.review?.findings?.length ?? 0), 0);
+      manifest.summary.reviewFindings = totalFindings;
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+      result.summary.reviewFindings = totalFindings;
+    } catch (err) {
+      console.error(`[dispatch] Warning: no se pudo actualizar manifest.json: ${err.message}`);
+    }
   }
 
   // --- Output ---

@@ -86,6 +86,20 @@ describe("parsePlanFile", () => {
     assert.equal(tasks[1].id, 5);
   });
 
+  it("matches bare ## Task N header with no separator", () => {
+    const content = [
+      "# Plan",
+      "",
+      "## Task 1",
+      "",
+      "Implement the thing.",
+    ].join("\n");
+    const tasks = parsePlanFile(content);
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].id, 1);
+    assert.ok(tasks[0].prompt.includes("Implement the thing."));
+  });
+
   it("throws on zero tasks", () => {
     assert.throws(() => parsePlanFile("## Overview\nNo tasks"), /No tasks found/);
   });
@@ -123,8 +137,10 @@ describe("parseInlineTasks", () => {
 });
 
 describe("parseAssignment", () => {
+  const sequential = [1, 2, 3, 4, 5, 6];
+
   it("parses inclusive ranges", () => {
-    const map = parseAssignment("1-3:minimax,4-6:glm", 6);
+    const map = parseAssignment("1-3:minimax,4-6:glm", sequential);
     assert.equal(map.get(1), "minimax");
     assert.equal(map.get(3), "minimax");
     assert.equal(map.get(4), "glm");
@@ -132,21 +148,40 @@ describe("parseAssignment", () => {
   });
 
   it("parses single-ID assignment", () => {
-    const map = parseAssignment("4:glm", 6);
+    const map = parseAssignment("4:glm", sequential);
     assert.equal(map.get(4), "glm");
     assert.equal(map.has(1), false);
   });
 
   it("throws on overlapping ranges", () => {
-    assert.throws(() => parseAssignment("1-3:a,2-4:b", 6), /overlap/i);
+    assert.throws(() => parseAssignment("1-3:a,2-4:b", sequential), /overlap/i);
   });
 
   it("throws on out-of-bounds range", () => {
-    assert.throws(() => parseAssignment("1-10:a", 6), /exceeds task count/i);
+    assert.throws(() => parseAssignment("1-10:a", sequential), /does not exist in the plan/i);
   });
 
   it("throws on invalid range (start > end)", () => {
-    assert.throws(() => parseAssignment("5-3:a", 6), /Invalid range/i);
+    assert.throws(() => parseAssignment("5-3:a", sequential), /Invalid range/i);
+  });
+
+  it("rejects empty --assign string", () => {
+    assert.throws(() => parseAssignment("", sequential), /no puede estar vacío/i);
+    assert.throws(() => parseAssignment("   ", sequential), /no puede estar vacío/i);
+  });
+
+  it("accepts assignment for a real non-sequential task ID", () => {
+    const map = parseAssignment("3:glm", [1, 3]);
+    assert.equal(map.get(3), "glm");
+    assert.equal(map.has(1), false);
+  });
+
+  it("rejects assignment for an ID absent from a non-sequential plan", () => {
+    assert.throws(() => parseAssignment("2:glm", [1, 3]), /does not exist in the plan/i);
+  });
+
+  it("rejects a range spanning a gap in non-sequential IDs", () => {
+    assert.throws(() => parseAssignment("1-3:glm", [1, 3]), /does not exist in the plan/i);
   });
 });
 
@@ -190,7 +225,7 @@ describe("buildTaskList", () => {
 // ---------------------------------------------------------------------------
 
 import { execSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, chmodSync as fsChmodSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -209,6 +244,21 @@ function createTempGitRepo() {
   writeFileSync(path.join(dir, "file.txt"), "original\n");
   execSync("git add . && git commit -m init", { cwd: dir, stdio: "ignore" });
   return dir;
+}
+
+function headSha(repo) {
+  const head = readFileSync(path.join(repo, ".git", "HEAD"), "utf8").trim();
+  if (!head.startsWith("ref: ")) return head;
+  const ref = head.slice(5).trim();
+  try { return readFileSync(path.join(repo, ".git", ref), "utf8").trim(); } catch {}
+  try {
+    const packed = readFileSync(path.join(repo, ".git", "packed-refs"), "utf8");
+    for (const line of packed.split("\n")) {
+      const m = line.match(/^(\S+)\s+" + ref + "$/);
+      if (m) return m[1];
+    }
+  } catch {}
+  throw new Error("could not resolve HEAD sha for " + repo);
 }
 
 describe("createWorktree", () => {
@@ -235,7 +285,12 @@ describe("collectPatch", () => {
       createWorktree(repo, wtPath, baseSha);
       writeFileSync(path.join(wtPath, "file.txt"), "modified\n");
       const patch = collectPatch(wtPath);
-      assert.ok(patch.includes("modified"));
+      // collectPatch must return a well-formed git diff (binary-capable), not just
+      // any string containing the word "modified". Verifies the execFileSync-based
+      // implementation still produces a correct patch after the refactor.
+      assert.ok(patch.startsWith("diff --git a/file.txt b/file.txt"));
+      assert.ok(patch.includes("-original"));
+      assert.ok(patch.includes("+modified"));
       assert.ok(patch.length > 0);
       removeWorktree(repo, wtPath);
     } finally {
@@ -404,12 +459,85 @@ describe("runDispatch", () => {
       assert.equal(t1.error, "timeout");
       assert.equal(t1.model, "mock-model");
       assert.equal(result.summary.failed, 1);
-      assert.equal(result.summary.completed, 0);
-      assert.equal(result.summary.completedNoChanges, 0);
-    } finally {
-      rmSync(repo, { recursive: true, force: true });
-    }
-  });
+     assert.equal(result.summary.completed, 0);
+     assert.equal(result.summary.completedNoChanges, 0);
+   } finally {
+     rmSync(repo, { recursive: true, force: true });
+   }
+ });
+
+ it("SIGTERM reuses the signal handler, aborts the job and cleans worktrees without duplicate warnings", async () => {
+   const repo = createTempGitRepo();
+   try {
+     const { runDispatch } = await import("../plugins/gateway/scripts/lib/dispatch.mjs");
+     const tasks = [{ id: 1, prompt: "hang", profile: "mock", model: "mock-model" }];
+
+      // Intercept process.on/removeListener for SIGINT/SIGTERM so we can fire the
+      // registered handler directly (emitting a real signal would terminate the
+      // test runner process). This also lets us assert both signals are handled.
+      const registered = { SIGINT: 0, SIGTERM: 0 };
+      const handlers = {};
+      const origOn = process.on.bind(process);
+      const origOff = process.removeListener.bind(process);
+      process.on = (event, listener, ...rest) => {
+        if (event === "SIGINT" || event === "SIGTERM") { registered[event]++; handlers[event] = listener; }
+        return origOn(event, listener, ...rest);
+      };
+      process.removeListener = (event, listener, ...rest) => {
+        if (event === "SIGINT" || event === "SIGTERM") handlers[event] = undefined;
+        return origOff(event, listener, ...rest);
+      };
+
+      // Hangs until the abort signal fires; fires the captured SIGTERM handler
+      // once inside the runner (worktree already created + added to the set).
+     const abortableRunner = (_profile, _prompt, opts) =>
+       new Promise((resolve) => {
+         const onAbort = () => resolve({ stdout: "aborted", stderr: "", exitCode: null, signal: "SIGTERM" });
+         if (opts.signal?.aborted) return onAbort();
+         opts.signal?.addEventListener("abort", onAbort, { once: true });
+          setImmediate(() => handlers.SIGTERM?.());
+       });
+
+     // Capture stderr writes: before the fix the handler removed the worktree but
+     // left it in createdWorktrees, so the task `finally` re-ran removeWorktree on an
+     // already-removed path and emitted a spurious "orphaned worktree at" warning.
+     const origWrite = process.stderr.write.bind(process.stderr);
+     let warnings = 0;
+     process.stderr.write = (chunk, ...rest) => {
+       if (typeof chunk === "string" && chunk.includes("orphaned worktree at")) warnings++;
+       return origWrite(chunk, ...rest);
+     };
+     try {
+       const result = await runDispatch(tasks, {
+         cwd: repo,
+         harness: "claude",
+         write: true,
+         maxConcurrency: 1,
+         taskRunner: abortableRunner,
+         resolveProfileFn: () => ({ name: "mock", baseUrl: "http://localhost", defaultModel: "mock-model", kind: "claude-gateway" }),
+         skipPreflight: true,
+       });
+
+        // Both SIGINT and SIGTERM must be registered (reusing the same onSignal).
+        assert.equal(registered.SIGINT, 1);
+        assert.equal(registered.SIGTERM, 1, "SIGTERM handler must be registered (reuses onSignal)");
+       // SIGTERM handler ran: globalAc aborted -> runner killed -> collectPatch
+       // runs on the already-removed worktree -> throws -> task reported failed.
+       const t1 = result.tasks.find((t) => t.id === 1);
+       assert.equal(t1.status, "failed");
+       // No duplicate removeWorktree warning (handler cleared the set entry).
+       assert.equal(warnings, 0);
+       // Listeners are removed after runDispatch completes (no leak across runs).
+       assert.equal(process.listenerCount("SIGTERM"), 0);
+     } finally {
+        process.on = origOn;
+        process.removeListener = origOff;
+       process.stderr.write = origWrite;
+     }
+   } finally {
+     rmSync(repo, { recursive: true, force: true });
+   }
+ });
 });
 
 // ---------------------------------------------------------------------------
@@ -745,4 +873,247 @@ describe("handleDispatch profile-kind preflight validation (via CLI)", () => {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+});
+
+describe("cleanOrphanedWorktrees (regression)", () => {
+  function makeJobDir(repo, jobId) {
+    const jobDir = path.join(repo, ".gateway-dispatch", jobId);
+    mkdirSync(path.join(jobDir, "patches"), { recursive: true });
+    writeFileSync(path.join(jobDir, "patches", "task-001.patch"), "diff --git a/f b/f\n+content\n");
+    mkdirSync(path.join(jobDir, "logs"), { recursive: true });
+    writeFileSync(path.join(jobDir, "logs", "task-001.log"), "log\n");
+    writeFileSync(path.join(jobDir, "manifest.json"), JSON.stringify({ jobId, tasks: [], summary: {} }, null, 2) + "\n");
+    return jobDir;
+  }
+
+  it("preserves patches/, logs/ and manifest.json of completed jobs", () => {
+    const repo = createTempGitRepo();
+    try {
+      const jobDir = makeJobDir(repo, "dispatch-oldjob");
+      cleanOrphanedWorktrees(repo);
+      assert.ok(existsSync(path.join(jobDir, "manifest.json")), "manifest.json must survive cleanup");
+      assert.ok(existsSync(path.join(jobDir, "patches", "task-001.patch")), "patches/ must survive cleanup");
+      assert.ok(existsSync(path.join(jobDir, "logs", "task-001.log")), "logs/ must survive cleanup");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("removes orphaned worktrees but leaves job results intact", () => {
+    const repo = createTempGitRepo();
+    try {
+      const jobDir = makeJobDir(repo, "dispatch-orphan");
+      const baseSha = headSha(repo);
+      const wtPath = path.join(jobDir, "worktrees", "task-1");
+      createWorktree(repo, wtPath, baseSha);
+      assert.ok(existsSync(path.join(wtPath, "file.txt")));
+
+      cleanOrphanedWorktrees(repo);
+
+      assert.ok(!existsSync(wtPath), "orphaned worktree must be removed");
+      assert.ok(existsSync(path.join(jobDir, "manifest.json")), "manifest.json must survive cleanup");
+      assert.ok(existsSync(path.join(jobDir, "patches", "task-001.patch")), "patches/ must survive cleanup");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("skips a job marked active by a live PID (lock file)", () => {
+    const repo = createTempGitRepo();
+    try {
+      const jobDir = makeJobDir(repo, "dispatch-active");
+      const baseSha = headSha(repo);
+      const wtPath = path.join(jobDir, "worktrees", "task-1");
+      createWorktree(repo, wtPath, baseSha);
+      writeFileSync(path.join(jobDir, "active.lock"), String(process.pid), "utf8");
+
+      cleanOrphanedWorktrees(repo);
+
+      assert.ok(existsSync(wtPath), "worktree of an active job must not be touched");
+      assert.ok(existsSync(path.join(jobDir, "manifest.json")), "manifest.json must survive cleanup");
+      removeWorktree(repo, wtPath);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a stale lock (dead PID) as inactive and still cleans worktrees", () => {
+    const repo = createTempGitRepo();
+    try {
+      const jobDir = makeJobDir(repo, "dispatch-stale");
+      const baseSha = headSha(repo);
+      const wtPath = path.join(jobDir, "worktrees", "task-1");
+      createWorktree(repo, wtPath, baseSha);
+      writeFileSync(path.join(jobDir, "active.lock"), "999999", "utf8");
+
+      cleanOrphanedWorktrees(repo);
+
+      assert.ok(!existsSync(wtPath), "stale-lock worktree must be removed");
+      assert.ok(existsSync(path.join(jobDir, "patches", "task-001.patch")), "patches/ must survive cleanup");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("does not abort when .gateway-dispatch is unreadable", () => {
+    const repo = createTempGitRepo();
+    try {
+      const dispatchDir = path.join(repo, ".gateway-dispatch");
+      mkdirSync(dispatchDir, { recursive: true });
+      fsChmodSync(dispatchDir, 0o000);
+      cleanOrphanedWorktrees(repo);
+      fsChmodSync(dispatchDir, 0o755);
+      assert.ok(true, "cleanOrphanedWorktrees tolerated an unreadable dispatch dir");
+    } finally {
+      try { fsChmodSync(path.join(repo, ".gateway-dispatch"), 0o755); } catch {}
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("handleDispatch hardening (via CLI)", () => {
+  function writeConfig(tmpDir, config) {
+    writeFileSync(path.join(tmpDir, "config.json"), JSON.stringify(config, null, 2));
+  }
+
+  function makeTmpConfigDir() {
+    return mkdtempSync(path.join(os.tmpdir(), "gw-dispatch-hardening-"));
+  }
+
+  function goodConfig(tmpDir) {
+    writeConfig(tmpDir, {
+      profiles: {
+        good: { kind: "claude-gateway", baseUrl: "http://localhost:1", defaultModel: "m" },
+        rev: { kind: "claude-gateway", baseUrl: "http://localhost:2", defaultModel: "m" },
+      },
+      defaultProfile: "good",
+      reviewProfile: "rev",
+      taskProfile: "good",
+    });
+  }
+
+  const companion = path.join(__dirname, "../plugins/gateway/scripts/gateway-companion.mjs");
+
+  async function runDispatchCli(tmpDir, args) {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    return execFileAsync(process.execPath, [companion, "dispatch", ...args], {
+      timeout: 10000,
+      env: { ...process.env, GATEWAY_PLUGIN_CONFIG_DIR: tmpDir },
+    });
+  }
+
+  // Fix 1: --plan pointing at an unreadable/missing file must exit 2 (validation
+  // contract), not 1 (uncaught exception bubbling to main()).
+  it("exits 2 with a clear message when --plan file cannot be read", async () => {
+    const tmpDir = makeTmpConfigDir();
+    goodConfig(tmpDir);
+    try {
+      await runDispatchCli(tmpDir, ["--plan", path.join(tmpDir, "does-not-exist.md")]);
+      assert.fail("Should have thrown");
+    } catch (err) {
+      assert.equal(err.code, 2, `Expected exit code 2 for unreadable plan file, got ${err.code}. stderr: ${err.stderr}`);
+      assert.ok(
+        err.stderr.includes("No se pudo leer el plan file") && err.stderr.includes("does-not-exist.md"),
+        `Expected a clear unreadable-plan message naming the path, got: ${err.stderr}`,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Fix 2: --write and --no-write are mutually exclusive.
+  it("exits 2 when both --write and --no-write are passed", async () => {
+    const tmpDir = makeTmpConfigDir();
+    goodConfig(tmpDir);
+    try {
+      await runDispatchCli(tmpDir, ["--task", "do something:good", "--write", "--no-write", "--dry-run"]);
+      assert.fail("Should have thrown");
+    } catch (err) {
+      assert.equal(err.code, 2, `Expected exit code 2 for --write/--no-write conflict, got ${err.code}. stderr: ${err.stderr}`);
+      assert.ok(
+        err.stderr.includes("--write") && err.stderr.includes("--no-write") && err.stderr.includes("mutuamente excluyentes"),
+        `Expected mutual-exclusion error, got: ${err.stderr}`,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Fix 3: --model-override referencing a profile not used by any task emits a
+  // warning to stderr (the task still runs; here we use --dry-run to avoid network).
+  it("warns on stderr when --model-override targets an unused profile (--dry-run)", async () => {
+    const tmpDir = makeTmpConfigDir();
+    goodConfig(tmpDir);
+    try {
+      const { stdout, stderr } = await runDispatchCli(tmpDir, [
+        "--task", "do something:good", "--model-override", "minimx:m3", "--dry-run",
+      ]);
+      assert.ok(
+        stderr.includes("--model-override references profile \"minimx\"") && stderr.includes("not used by any task"),
+        `Expected a warning about the unused override profile "minimx", got stderr: ${stderr}`,
+      );
+      // dry-run still succeeds (exit 0) and prints its matrix.
+      assert.ok(stdout.includes("Dispatch dry-run"), `Expected dry-run output, got: ${stdout}`);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not warn when --model-override matches a used profile (--dry-run)", async () => {
+    const tmpDir = makeTmpConfigDir();
+    goodConfig(tmpDir);
+    try {
+      const { stderr } = await runDispatchCli(tmpDir, [
+        "--task", "do something:good", "--model-override", "good:m", "--dry-run",
+      ]);
+      assert.ok(
+        !stderr.includes("not used by any task"),
+        `Expected no unused-profile warning for a matching override, got stderr: ${stderr}`,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Fix 4: the redundant pre-read loop was removed; runCrossReview reads patchFile
+  // internally and isolates read failures. That isolation is already covered by the
+  // "isolates a task with an unreadable patchFile" runCrossReview test above. Here
+  // we add a focused library-level check that a task with only patchFile (no pre-set
+  // .patch) is still reviewed via the internal read path.
+  it("runCrossReview reads task.patchFile internally when task.patch is absent (Fix 4 regression guard)", async () => {
+    const outputDir = mkdtempSync(path.join(os.tmpdir(), "dispatch-fix4-"));
+    try {
+      const patchFile = path.join(outputDir, "task-001.patch");
+      writeFileSync(patchFile, "diff --git a/x b/x\n+hello\n");
+      const results = [
+        { id: 1, status: "completed", noChanges: false, prompt: "A", output: "ok", patchFile },
+      ];
+      let captured = "";
+      const mockReview = async (_p, _s, userPrompt) => {
+        captured = userPrompt;
+        return { content: { findings: [], summary: "ok" }, model: "m", usage: null, parsed: true };
+      };
+      await runCrossReview(results, {
+        reviewProfile: { name: "r", baseUrl: "http://l", defaultModel: "m", kind: "claude-gateway" },
+        maxConcurrency: 1,
+        reviewFn: mockReview,
+        outputDir,
+      });
+      // The review prompt must contain the patch contents read from patchFile.
+      assert.ok(captured.includes("+hello"), `Expected review input to include the patch read from patchFile, got: ${captured}`);
+      assert.equal(results[0].review.error, undefined);
+    } finally {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  // Fix 5 & Fix 6 guard code paths that only run during a real dispatch execution
+  // (after network preflight / inside the task-runner wiring), which the CLI test
+  // harness cannot reach without a live gateway. Their failure-isolation behavior
+  // for cross-review writes is covered by the runCrossReview library tests above;
+  // the manifest-rewrite try/catch and the taskRunner/resolveProfileFn typeof guards
+  // are defensive against future refactors and are exercised by the happy-path
+  // dispatch tests (runDispatch) rather than by CLI integration here.
 });

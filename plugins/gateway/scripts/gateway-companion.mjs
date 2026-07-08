@@ -586,8 +586,9 @@ async function handleSetup(argv) {
           "--api-key-env", "GATEWAY_API_KEY",
           "--json"
         ], { encoding: "utf8", timeout: 30000 });
-        if (r.status !== 0) {
-          console.error(`zero setup failed (exit ${r.status}): ${(r.stderr || r.stdout || "").trim()}`);
+        if (r.error || r.status !== 0) {
+          const detail = r.error ? r.error.message : (r.stderr || r.stdout || "").trim();
+          console.error(`zero setup failed (${r.error ? "spawn error" : `exit ${r.status}`}): ${detail}`);
           process.exitCode = 1;
           break;
         }

@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
 import process from "node:process";
-import { pickEnv, terminateProcessTree } from "./subprocess-utils.mjs";
+import { pickEnv, sanitizeSubprocessEnv, terminateProcessTree } from "./subprocess-utils.mjs";
 
 export function buildSubprocessEnv(profile) {
   const env = pickEnv(process.env);
   if (profile.subprocessEnv) {
-    Object.assign(env, profile.subprocessEnv);
+    Object.assign(env, sanitizeSubprocessEnv(profile.subprocessEnv));
   }
   env.ANTHROPIC_BASE_URL = profile.baseUrl;
   env.ANTHROPIC_API_KEY = profile.apiKey || profile.authToken || "";

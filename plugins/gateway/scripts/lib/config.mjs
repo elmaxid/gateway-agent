@@ -68,7 +68,19 @@ export function validateProfile(profile) {
   if (!["claude-gateway", "openai-chat"].includes(profile.kind)) {
     errors.push(`Invalid kind "${profile.kind}". Must be "claude-gateway" or "openai-chat".`);
   }
-  if (!profile.baseUrl) errors.push("baseUrl is required.");
+  if (!profile.baseUrl) {
+    errors.push("baseUrl is required.");
+  } else {
+    let parsed;
+    try {
+      parsed = new URL(profile.baseUrl);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || !["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) {
+      errors.push(`baseUrl must be a valid http:// or https:// URL with a host (got "${profile.baseUrl}").`);
+    }
+  }
   if (!profile.defaultModel) errors.push("defaultModel is required.");
   return { valid: errors.length === 0, errors };
 }

@@ -293,8 +293,8 @@ export async function runDispatch(tasks, opts) {
   ensureDispatchGitignore(repoRoot);
   cleanOrphanedWorktrees(repoRoot);
 
-  fs.mkdirSync(path.join(outputDir, "patches"), { recursive: true });
-  fs.mkdirSync(path.join(outputDir, "logs"), { recursive: true });
+  fs.mkdirSync(path.join(outputDir, "patches"), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(outputDir, "logs"), { recursive: true, mode: 0o700 });
 
   // Mark this job as active so a concurrent dispatch running
   // cleanOrphanedWorktrees doesn't touch our worktrees while we work. If
@@ -385,7 +385,7 @@ export async function runDispatch(tasks, opts) {
         if (timedOut) {
           failedCount++;
           const result = { ...task, model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: rawOutput, error: "timeout" };
-          fs.writeFileSync(logFile, logOutput + "\n" + (runnerResult.stderr || ""), "utf8");
+          fs.writeFileSync(logFile, logOutput + "\n" + (runnerResult.stderr || ""), { encoding: "utf8", mode: 0o600 });
           results.push(result);
           return result;
         }
@@ -395,7 +395,7 @@ export async function runDispatch(tasks, opts) {
         if (exitCode !== 0) {
           failedCount++;
           const result = { ...task, model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: rawOutput, error: runnerResult.stderr || `exit ${exitCode}` };
-          fs.writeFileSync(logFile, logOutput + "\n" + (runnerResult.stderr || ""), "utf8");
+          fs.writeFileSync(logFile, logOutput + "\n" + (runnerResult.stderr || ""), { encoding: "utf8", mode: 0o600 });
           results.push(result);
           return result;
         }
@@ -404,9 +404,9 @@ export async function runDispatch(tasks, opts) {
         const noChanges = !patch.trim();
         const patchFile = noChanges ? null : path.join(outputDir, "patches", `task-${taskPad}.patch`);
         if (patchFile) {
-          fs.writeFileSync(patchFile, patch, "utf8");
+          fs.writeFileSync(patchFile, patch, { encoding: "utf8", mode: 0o600 });
         }
-        fs.writeFileSync(logFile, logOutput, "utf8");
+        fs.writeFileSync(logFile, logOutput, { encoding: "utf8", mode: 0o600 });
 
         const status = noChanges ? "completed_no_changes" : "completed";
         const result = { ...task, model, status, noChanges, duration: Date.now() - start, patchFile, output: rawOutput, error: null };
@@ -444,7 +444,7 @@ export async function runDispatch(tasks, opts) {
     summary: { total: tasks.length, completed, completedNoChanges, failed },
   };
 
-  fs.writeFileSync(path.join(outputDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", "utf8");
+  fs.writeFileSync(path.join(outputDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
 
   // Job completed — release the active marker so future cleanups can sweep
   // any leftover worktrees without waiting for our PID to disappear.
@@ -477,7 +477,7 @@ export async function runCrossReview(results, opts) {
   const sem = new Semaphore(maxConcurrency);
 
   if (outputDir) {
-    fs.mkdirSync(path.join(outputDir, "reviews"), { recursive: true });
+    fs.mkdirSync(path.join(outputDir, "reviews"), { recursive: true, mode: 0o700 });
   }
 
   await Promise.all(reviewable.map((task) => sem.run(async () => {
@@ -521,7 +521,7 @@ export async function runCrossReview(results, opts) {
         const taskPad = padTaskId(task.id);
         const reviewFile = path.join(outputDir, "reviews", `task-${taskPad}-review.md`);
         const reviewContent = task.review.raw ?? JSON.stringify(task.review, null, 2);
-        fs.writeFileSync(reviewFile, reviewContent + "\n", "utf8");
+        fs.writeFileSync(reviewFile, reviewContent + "\n", { encoding: "utf8", mode: 0o600 });
         task.review.reviewFile = reviewFile;
       } catch (err) {
         task.review.reviewFileError = err.message;

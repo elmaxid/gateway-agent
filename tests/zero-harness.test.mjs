@@ -24,7 +24,7 @@ const PROFILE = {
   kind: "claude-gateway",
   baseUrl: "http://192.0.2.10:4000",
   defaultModel: "glm-5.2",
-  authToken: "real-token"
+  authToken: "test-token"
 };
 
 const savedEnv = { ...process.env };
@@ -123,12 +123,12 @@ describe("buildZeroEnv", () => {
       subprocessEnv: { GATEWAY_API_KEY: "evil-key" }
     };
     const env = buildZeroEnv(profile, null);
-    assert.equal(env.GATEWAY_API_KEY, "real-token");
+    assert.equal(env.GATEWAY_API_KEY, "test-token");
   });
 
   it("honors the provider's configured apiKeyEnv name", () => {
     const env = buildZeroEnv(PROFILE, { apiKeyEnv: "MY_ZERO_KEY" });
-    assert.equal(env.MY_ZERO_KEY, "real-token");
+    assert.equal(env.MY_ZERO_KEY, "test-token");
     assert.equal(env.GATEWAY_API_KEY, undefined);
   });
 
@@ -250,7 +250,7 @@ describe("zeroPreflightError", () => {
   it("URL mismatch → names both URLs", () => {
     const msg = zeroPreflightError(PROFILE, { name: "gw", baseURL: "http://other:9" });
     assert.match(msg, /http:\/\/other:9/);
-    assert.match(msg, /10\.50\.1\.67:4000/);
+    assert.match(msg, /192\.0\.2\.10:4000/);
   });
   it("aligned provider → null", () => {
     assert.equal(zeroPreflightError(PROFILE, { name: "gw", baseURL: "http://192.0.2.10:4000/" }), null);

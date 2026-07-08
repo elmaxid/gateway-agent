@@ -4,4 +4,6 @@ config.json
 .DS_Store
 docs/superpowers/
 .claude/worktrees/
+.claude/settings.json
+.gateway-dispatch/
 tasks/

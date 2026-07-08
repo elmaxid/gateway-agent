@@ -3,12 +3,12 @@
 // Falls back to claude subprocess if codex CLI not installed.
 import { spawn, execSync } from "node:child_process";
 import process from "node:process";
-import { pickEnv, terminateProcessTree } from "./subprocess-utils.mjs";
+import { pickEnv, sanitizeSubprocessEnv, terminateProcessTree } from "./subprocess-utils.mjs";
 
 export function buildCodexEnv(profile) {
   const env = pickEnv(process.env);
   if (profile.subprocessEnv) {
-    Object.assign(env, profile.subprocessEnv);
+    Object.assign(env, sanitizeSubprocessEnv(profile.subprocessEnv));
   }
   env.OPENAI_BASE_URL = profile.baseUrl;
   env.OPENAI_API_KEY = profile.apiKey || profile.authToken || "";

@@ -646,7 +646,7 @@ Los nombres son exactos — sin prefijos adicionales.
 ## Estructura del proyecto
 
 ```
-/opt/agent-plugin-cc/
+/path/to/agent-plugin-cc/
 ├── .claude-plugin/marketplace.json      # Manifiesto del marketplace
 ├── package.json
 ├── plugins/gateway/
@@ -730,7 +730,7 @@ Los nombres son exactos — sin prefijos adicionales.
 ## Tests
 
 ```bash
-cd /opt/agent-plugin-cc
+cd /path/to/agent-plugin-cc
 
 # Unit tests (sin red) — todos menos integration.test.mjs
 node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/zero-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs tests/args.test.mjs tests/agentic-review.test.mjs tests/agentic-review-malformed-output.test.mjs tests/agentic-review-maxtime.test.mjs tests/cli-timeout.test.mjs tests/dispatch.test.mjs
@@ -862,9 +862,9 @@ rm ~/.gateway-plugin/config.json
 
 ## Licencia
 
-UNLICENSED — código privado, todos los derechos reservados al autor.
+MIT — ver [LICENSE](LICENSE).
 
-**Versión actual:** v0.4.1
+**Versión actual:** v0.5.0
 
 ## Créditos
 

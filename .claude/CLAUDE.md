@@ -10,14 +10,14 @@ claude plugin install /path/to/agent-plugin-cc
 ### 2. Configurar perfiles del gateway
 ```bash
 node plugins/gateway/scripts/gateway-companion.mjs setup add \
-  --profile ollama-minimax --url <GATEWAY_URL> --model minimax-agentic \
+  --profile profile-a --url <GATEWAY_URL> --model model-a \
   --kind claude-gateway --api-key <API_KEY>
 
 node plugins/gateway/scripts/gateway-companion.mjs setup add \
-  --profile ollama-deepseek --url <GATEWAY_URL> --model deepseek-research \
+  --profile profile-b --url <GATEWAY_URL> --model model-b \
   --kind claude-gateway --api-key <API_KEY>
 
-node plugins/gateway/scripts/gateway-companion.mjs setup set-default --profile ollama-minimax
+node plugins/gateway/scripts/gateway-companion.mjs setup set-default --profile profile-a
 ```
 
 ### 2-bis. (Opcional) Configurar zero como tercer harness
@@ -32,8 +32,8 @@ node plugins/gateway/scripts/gateway-companion.mjs setup zero-init
 ### 3. Verificar conectividad
 ```bash
 node plugins/gateway/scripts/gateway-companion.mjs setup list
-node plugins/gateway/scripts/gateway-companion.mjs setup test --profile ollama-minimax
-node plugins/gateway/scripts/gateway-companion.mjs setup test --profile ollama-deepseek
+node plugins/gateway/scripts/gateway-companion.mjs setup test --profile profile-a
+node plugins/gateway/scripts/gateway-companion.mjs setup test --profile profile-b
 ```
 
 > La config de perfiles vive en `~/.gateway-plugin/config.json` — no se commitea.
@@ -60,12 +60,14 @@ node plugins/gateway/scripts/gateway-companion.mjs setup test --profile ollama-d
 
 ## Perfiles configurados
 
-- **ollama-minimax** (`minimax-agentic`) — análisis estructurado, reviews detallados, sintetizador de debates
-- **ollama-deepseek** (`deepseek-research`) — razonamiento profundo, debug, segunda opinión técnica
+> `profile-a`/`profile-b` y `model-a`/`model-b` son placeholders — reemplazar por tus nombres de perfil y modelo reales.
+
+- **profile-a** (`model-a`) — análisis estructurado, reviews detallados, sintetizador de debates
+- **profile-b** (`model-b`) — razonamiento profundo, debug, segunda opinión técnica
 
 Para cambiar modelo sin recrear perfil:
 ```bash
-node plugins/gateway/scripts/gateway-companion.mjs setup set-model --profile ollama-minimax --model <MODEL>
+node plugins/gateway/scripts/gateway-companion.mjs setup set-model --profile profile-a --model <MODEL>
 ```
 
 ---

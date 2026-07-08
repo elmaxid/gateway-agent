@@ -81,7 +81,10 @@ on `task`, `task-worker`, and `dispatch`. Requires the zero CLI (`npm i -g @gitl
 and a one-time `setup zero-init` (bootstraps zero's provider from your default gateway
 profile; the API key is injected per spawn via `GATEWAY_API_KEY`, never duplicated on disk).
 Fail-loud: no fallback if zero is missing. Delegated tasks run with a fixed tool whitelist
-(no MCP/browser/swarm). Task logs keep zero's full JSONL event stream.
+(no MCP/browser/swarm). Task logs keep zero's full JSONL event stream. Write mode passes zero's
+`--skip-permissions-unsafe` (required for non-interactive delegation) — write-enabled zero tasks
+run whitelisted shell/file tools without per-action permission prompts, same trade-off as codex's
+sandbox bypass.
 
 ## Requisitos
 

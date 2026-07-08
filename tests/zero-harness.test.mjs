@@ -298,6 +298,12 @@ describe("shapeZeroResult", () => {
     assert.equal(r.stdout, "");
     assert.ok(!r.stderr.includes("no final message"));
   });
+
+  it("exit 0 with no final event is anomalous — never reads as success", () => {
+    const r = shapeZeroResult({ code: 0, signal: null, stdout: '{"type":"text","delta":"x"}', stderr: "" });
+    assert.equal(r.exitCode, 1);
+    assert.match(r.stderr, /no final message/);
+  });
 });
 
 // ---------------------------------------------------------------------------

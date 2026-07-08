@@ -156,7 +156,8 @@ export function shapeZeroResult({ code, signal, stdout, stderr }) {
     stdout: finalStdout,
     stderr: finalStderr,
     // null exit (signal kill) must never read as success — dispatch does `exitCode ?? 0`
-    exitCode: code ?? 1,
+    // exit 0 with no final event is an anomalous stream — never report success (fail-loud)
+    exitCode: code === 0 && !parsed.hasFinal ? 1 : (code ?? 1),
     signal: signal ?? null,
     rawJsonl: stdout,
     usage: parsed.usage

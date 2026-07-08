@@ -151,7 +151,7 @@ describe("task — zero harness", () => {
     } catch (err) {
       stdout = err.stdout ?? "";
       stderr = err.stderr ?? "";
-      // Non-zero exit is a failure but we still check output
+      // Non-zero exit fails the test immediately; stderr excerpt aids diagnosis
       assert.fail(`zero task exited with error. stderr: ${stderr.slice(0, 300)}`);
     }
 

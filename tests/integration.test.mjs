@@ -1,11 +1,13 @@
 /**
- * Integration tests — live gateway (set GATEWAY_BASE_URL env var to run).
+ * Integration tests — live gateway (requires profiles glm, minimax and
+ * deepseek-pro configured in ~/.gateway-plugin/config.json; no env vars).
  *
  * Covers:
  *   - Connectivity + model routing for glm-5.2, minimax-m3, deepseek-v4-pro
  *   - Direct HTTP review (api-client chatCompletion)
  *   - Task via claude harness (subprocess)
  *   - Task via codex harness
+ *   - Task via zero harness (glm profile only)
  *
  * Run: node --test --test-timeout=120000 tests/integration.test.mjs
  */

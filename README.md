@@ -86,6 +86,11 @@ Fail-loud: no fallback if zero is missing. Delegated tasks run with a fixed tool
 run whitelisted shell/file tools without per-action permission prompts, same trade-off as codex's
 sandbox bypass.
 
+Prompt convention for long analysis tasks (reviews, research): zero's `stdout` is the model's
+**final message only** — agentic models often close with a short meta remark ("the review above
+stands") and the real content stays in the stream. Ask explicitly: *"your final message must
+contain the complete output"*. The full stream survives either way in the task log (`rawJsonl`).
+
 ## Requisitos
 
 - **Node.js** ≥ 18.18.0
@@ -736,7 +741,7 @@ node --test --test-timeout=120000 tests/integration.test.mjs
 
 **Unit tests:** 191 tests — config (13), api-client (12), debate (9), args (10), agentic-review (8), agentic-review-maxtime (1), agentic-review-malformed-output (2), cli-timeout (6), claude-subprocess (9), codex-harness (6), zero-harness (35 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping), claude-session-transfer (9), session-lifecycle-hook (2), dispatch (69 — Semaphore/normalizeBaseUrl, parsers, worktree lifecycle, execution engine, cross-review, CLI). Sin red — todos usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real.
 
-**Integration tests:** 13 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness, task via codex harness, task via zero harness; para los 3 modelos principales (glm-5.2, minimax-m3, deepseek-v4-pro).
+**Integration tests:** 13 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness y task via codex harness (cada uno contra los 3 modelos principales: glm-5.2, minimax-m3, deepseek-v4-pro), más task via zero harness (solo glm-5.2).
 
 ## Hooks del ciclo de sesión
 

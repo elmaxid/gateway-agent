@@ -734,7 +734,7 @@ node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Unit tests:** 190 tests — config (13), api-client (12), debate (9), args (10), agentic-review (8), agentic-review-maxtime (1), agentic-review-malformed-output (2), cli-timeout (6), claude-subprocess (9), codex-harness (6), zero-harness (34 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping), claude-session-transfer (9), session-lifecycle-hook (2), dispatch (69 — Semaphore/normalizeBaseUrl, parsers, worktree lifecycle, execution engine, cross-review, CLI). Sin red — todos usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real.
+**Unit tests:** 191 tests — config (13), api-client (12), debate (9), args (10), agentic-review (8), agentic-review-maxtime (1), agentic-review-malformed-output (2), cli-timeout (6), claude-subprocess (9), codex-harness (6), zero-harness (35 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping), claude-session-transfer (9), session-lifecycle-hook (2), dispatch (69 — Semaphore/normalizeBaseUrl, parsers, worktree lifecycle, execution engine, cross-review, CLI). Sin red — todos usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real.
 
 **Integration tests:** 13 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness, task via codex harness, task via zero harness; para los 3 modelos principales (glm-5.2, minimax-m3, deepseek-v4-pro).
 

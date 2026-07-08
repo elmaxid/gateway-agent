@@ -11,7 +11,7 @@ import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJ
 import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
 import { runTask } from "./lib/codex-harness.mjs";
-import { runZeroTask, isZeroAvailable, getZeroProvider, zeroPreflightError } from "./lib/zero-harness.mjs";
+import { runZeroTask, isZeroAvailable, getZeroProvider, zeroPreflightError, urlsMatch } from "./lib/zero-harness.mjs";
 import { loadTranscript, parseTranscript, buildMessages } from "./lib/claude-session-transfer.mjs";
 import { runDebate, renderDebateOutput, preflightProfiles } from "./lib/debate.mjs";
 import {
@@ -86,7 +86,7 @@ function printUsage() {
   console.log(
     [
       "Usage:",
-      "  gateway-companion setup <add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model|doctor|models> [args]",
+      "  gateway-companion setup <add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model|doctor|models|zero-init> [args]",
       "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json]",
       "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json] [focus]",
       "  gateway-companion staged-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [intent]",
@@ -386,6 +386,26 @@ async function handleSetup(argv) {
       // spawnSync is synchronous — run sequentially, NOT in Promise.all
       const claudeCheck = checkBinary("claude");
       const codexCheck  = checkBinary("codex");
+      const zeroCheck = checkBinary("zero");
+      let zeroNote = null;
+      let zeroUpdateLine = null;
+      if (zeroCheck.ok) {
+        const zeroProvider = getZeroProvider({ refresh: true });
+        if (!zeroProvider) {
+          zeroNote = "no provider configured — run `setup zero-init`";
+        } else {
+          const claudeGwProfiles = profileNames.filter((n) => config.profiles[n]?.kind === "claude-gateway");
+          const misaligned = claudeGwProfiles.filter((n) => !urlsMatch(zeroProvider.baseURL, config.profiles[n].baseUrl));
+          if (misaligned.length > 0) {
+            zeroNote = `provider ${zeroProvider.baseURL} misaligned with profile(s): ${misaligned.join(", ")} — run \`setup zero-init\``;
+          }
+        }
+        // Drift check for a fast-moving upstream (spec §7). Network call — tolerate failure silently.
+        const upd = spawnSync("zero", ["update", "--check"], { encoding: "utf8", timeout: 10000 });
+        if (upd.status === 0 && upd.stdout) {
+          zeroUpdateLine = upd.stdout.trim().split("\n")[0];
+        }
+      }
       const profileResults = profileNames.length > 0
         ? await preflightProfiles(profileNames, config)
         : [];
@@ -416,6 +436,14 @@ async function handleSetup(argv) {
           codex: codexCheck.ok
             ? { ok: true, version: codexCheck.version }
             : { ok: false, warning: "not found — fallback to claude harness active" },
+          zero: zeroCheck.ok
+            ? {
+                ok: true,
+                version: zeroCheck.version,
+                ...(zeroNote && { warning: zeroNote }),
+                ...(zeroUpdateLine && { update: zeroUpdateLine }),
+              }
+            : { ok: false, warning: "not found — --harness zero unavailable" },
         };
         outputResult({ checks, profiles: profilesMap, roles }, true);
       } else {
@@ -425,6 +453,8 @@ async function handleSetup(argv) {
         lines.push("[harness]");
         lines.push(`  claude  ${claudeCheck.ok ? ok : fail}  ${claudeCheck.ok ? claudeCheck.version : claudeCheck.error}`);
         lines.push(`  codex   ${codexCheck.ok ? ok : warn}  ${codexCheck.ok ? codexCheck.version : "not found (fallback: claude harness active)"}`);
+        lines.push(`  zero    ${zeroCheck.ok ? (zeroNote ? warn : ok) : warn}  ${zeroCheck.ok ? zeroCheck.version + (zeroNote ? `  (${zeroNote})` : "") : "not found (--harness zero unavailable)"}`);
+        if (zeroUpdateLine) lines.push(`          ${zeroUpdateLine}`);
 
         lines.push("");
         lines.push("[profiles]");
@@ -506,8 +536,98 @@ async function handleSetup(argv) {
       break;
     }
 
+    case "zero-init": {
+      const { options } = parseArgs(rest, { valueOptions: ["profile"], booleanOptions: ["json", "force"] });
+
+      if (!isZeroAvailable()) {
+        console.error("zero CLI not found. Install: npm i -g @gitlawb/zero");
+        process.exitCode = 2;
+        break;
+      }
+
+      const config = loadConfig();
+      let profile;
+      try {
+        profile = options.profile
+          ? resolveProfile(options.profile, config)
+          : resolveTaskProfile(config);
+      } catch (err) {
+        console.error(`No profile to bootstrap zero from — add one first (setup add) or pass --profile NAME. (${err.message})`);
+        process.exitCode = 2;
+        break;
+      }
+
+      const isAligned = (p) => Boolean(p)
+        && urlsMatch(p.baseURL, profile.baseUrl)
+        && (p.model ?? "").toLowerCase() === (profile.defaultModel ?? "").toLowerCase()
+        && p.providerKind === "openai-compatible"
+        && (p.apiKeyStored || p.apiKeyEnv === "GATEWAY_API_KEY");
+
+      let provider = getZeroProvider({ refresh: true });
+      let status;
+      if (isAligned(provider)) {
+        status = "already-configured";
+      } else {
+        if (provider && !options.force) {
+          console.error(
+            `zero already has an active provider "${provider.name}" (${provider.baseURL}, model ${provider.model ?? "?"}, kind ${provider.providerKind ?? "?"}, keyEnv ${provider.apiKeyEnv ?? "(stored)"}) ` +
+            `that does not fully match profile "${profile.name}" (${profile.baseUrl}, model ${profile.defaultModel}, kind openai-compatible, keyEnv GATEWAY_API_KEY). ` +
+            `Re-run with --force to overwrite.`
+          );
+          process.exitCode = 2;
+          break;
+        }
+        const wasForced = Boolean(provider);
+        const r = spawnSync("zero", [
+          "setup", "ollama-cloud",
+          "--name", "gateway",
+          "--base-url", profile.baseUrl,
+          "--model", profile.defaultModel,
+          "--api-key-env", "GATEWAY_API_KEY",
+          "--json"
+        ], { encoding: "utf8", timeout: 30000 });
+        if (r.status !== 0) {
+          console.error(`zero setup failed (exit ${r.status}): ${(r.stderr || r.stdout || "").trim()}`);
+          process.exitCode = 1;
+          break;
+        }
+        // Trust but verify: re-read the active provider and confirm alignment.
+        provider = getZeroProvider({ refresh: true });
+        if (!isAligned(provider)) {
+          console.error(
+            `zero setup exited 0 but the active provider is ${provider ? `"${provider.name}" (${provider.baseURL})` : "absent"} — not aligned with profile "${profile.name}". Inspect zero's config manually.`
+          );
+          process.exitCode = 1;
+          break;
+        }
+        status = wasForced ? "forced" : "created";
+      }
+
+      // Connectivity: direct HTTP against the profile (NOT `zero setup --verify`,
+      // which is broken for env-key providers and exits 0 on failure — spec §1.3).
+      const conn = await testConnectivity(profile);
+      const connectivity = conn.ok ? "ok" : `failed: ${conn.error}`;
+
+      const payload = {
+        status,
+        provider: provider.name,
+        baseUrl: profile.baseUrl,
+        model: profile.defaultModel,
+        connectivity
+      };
+      if (options.json) {
+        outputResult(payload, true);
+      } else {
+        console.log(`zero provider: ${payload.status} (${payload.provider} → ${payload.baseUrl}, model ${payload.model})`);
+        console.log(`connectivity: ${connectivity}`);
+        console.log("Note: do not run zero-init while a dispatch with --harness zero is active.");
+      }
+      if (!conn.ok) process.exitCode = 1;
+      break;
+    }
+
     default:
-      throw new Error(`Unknown setup action: ${action}. Use add, remove, list, test, set-default, set-review-profile, set-task-profile, set-model, doctor, or models.`);
+      throw new Error(`Unknown setup action: ${action}. Use add, remove, list, test, set-default, set-review-profile, set-task-profile, set-model, doctor, models, or zero-init.`);
   }
 }
 

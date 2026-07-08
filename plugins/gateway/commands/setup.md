@@ -1,6 +1,6 @@
 ---
 description: Configure gateway endpoint profiles (add, remove, list, test, set-default, set-model, doctor, models)
-argument-hint: "<add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model|doctor|models> [--profile <name>] [--url <url>] [--model <model>] [--kind <claude-gateway|openai-chat>] [--api-key <key>] [--auth-token <token>] [--max-context <n>] [--max-output <n>] [--json]"
+argument-hint: "<add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model|doctor|models|zero-init> [--profile <name>] [--url <url>] [--model <model>] [--kind <claude-gateway|openai-chat>] [--api-key <key>] [--auth-token <token>] [--max-context <n>] [--max-output <n>] [--json]"
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---

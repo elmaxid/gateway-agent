@@ -20,6 +20,15 @@ node plugins/gateway/scripts/gateway-companion.mjs setup add \
 node plugins/gateway/scripts/gateway-companion.mjs setup set-default --profile ollama-minimax
 ```
 
+### 2-bis. (Opcional) Configurar zero como tercer harness
+```bash
+npm i -g @gitlawb/zero
+node plugins/gateway/scripts/gateway-companion.mjs setup zero-init
+```
+> Crea el provider de zero apuntando al gateway con la key referenciada por env var
+> (`GATEWAY_API_KEY`, inyectada por el harness en cada spawn — no se duplica en disco).
+> No correr `zero-init` mientras haya un dispatch `--harness zero` activo.
+
 ### 3. Verificar conectividad
 ```bash
 node plugins/gateway/scripts/gateway-companion.mjs setup list
@@ -43,6 +52,7 @@ node plugins/gateway/scripts/gateway-companion.mjs setup test --profile ollama-d
 | Debug / investigación de bug | `gateway:gateway-debugger` (codex harness) |
 | Exploración de código | `gateway:gateway-researcher` |
 | Window transfer a gateway model | `/gateway:transfer` |
+| Task con harness zero | `task --harness zero` / `dispatch --harness zero` |
 
 **Antes de cada commit**: correr adversarial review con `--include-diff` para validar cambios.
 

@@ -341,4 +341,46 @@ describe("runZeroTask preflight and guards", () => {
     assert.equal(result.exitCode, 1);
     assert.match(result.stderr, /elsewhere:9/);
   });
+
+  it("kills the spawned process tree immediately when the signal is already aborted", async () => {
+    // aligned provider — preflight passes and runZeroTask actually spawns `zero`
+    fs.mkdirSync(path.join(tmpDir, "zero"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "zero", "config.json"),
+      JSON.stringify({ activeProvider: "gw", providers: [{ name: "gw", baseURL: PROFILE.baseUrl }] })
+    );
+    _resetZeroProviderCache();
+
+    // fake `zero` binary that sleeps long enough to prove a real kill happened
+    const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "zero-harness-fakebin-"));
+    const fakeZeroPath = path.join(fakeBinDir, "zero");
+    fs.writeFileSync(fakeZeroPath, "#!/bin/sh\nsleep 30\n");
+    fs.chmodSync(fakeZeroPath, 0o755);
+
+    // buildZeroEnv -> pickEnv copies PATH from process.env, so prepending here reaches the child
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}${path.delimiter}${originalPath}`;
+
+    try {
+      const deadlineMs = 10000;
+      const deadline = new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`runZeroTask did not settle within ${deadlineMs}ms — already-aborted signal was ignored`)),
+          deadlineMs
+        )
+      );
+      const start = Date.now();
+      const result = await Promise.race([
+        runZeroTask(PROFILE, "hi", { signal: AbortSignal.abort() }),
+        deadline
+      ]);
+      const elapsed = Date.now() - start;
+      // terminateProcessTree blocks ~2s synchronously (SIGTERM grace) — expected, well under the deadline
+      assert.ok(elapsed < deadlineMs, `expected a fast settle, took ${elapsed}ms`);
+      assert.equal(result.exitCode, 1); // signal-kill normalizes null exit code -> 1
+      assert.ok(result.signal, `expected a non-null kill signal, got ${result.signal}`);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
 });

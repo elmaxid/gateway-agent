@@ -240,7 +240,10 @@ export async function runZeroTask(profile, prompt, opts = {}) {
   if (opts.signal) {
     // guarded: a throwing kill must not leave the promise unsettled
     onAbort = () => { try { terminateProcessTree(proc.pid); } catch { /* tree already gone */ } }; // blocks ~2s (SIGTERM grace) like the codex harness
-    opts.signal.addEventListener("abort", onAbort, { once: true });
+    // abort events don't replay for listeners attached after the fact — an already-aborted signal
+    // would otherwise never fire and the spawned process would run uncancelled
+    if (opts.signal.aborted) onAbort();
+    else opts.signal.addEventListener("abort", onAbort, { once: true });
   }
   const detachAbort = () => {
     if (onAbort) opts.signal.removeEventListener("abort", onAbort);

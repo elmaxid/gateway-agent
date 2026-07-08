@@ -171,3 +171,92 @@ export function zeroPreflightError(profile, provider) {
   }
   return null;
 }
+
+export async function runZeroTask(profile, prompt, opts = {}) {
+  if (opts.resume || opts.fork) {
+    throw new Error("zero harness does not support resume/fork in v0.5.0");
+  }
+
+  const provider = getZeroProvider();
+  const preflightFailure = zeroPreflightError(profile, provider);
+  if (preflightFailure) {
+    return { stdout: "", stderr: preflightFailure, exitCode: 1, signal: null, rawJsonl: "", usage: null };
+  }
+
+  const model = opts.model || profile.defaultModel;
+  const promptFile = path.join(
+    os.tmpdir(),
+    `gateway-zero-prompt-${process.pid}-${crypto.randomUUID()}.md`
+  );
+  fs.writeFileSync(promptFile, prompt, { encoding: "utf8", mode: 0o600 });
+  const removePromptFile = () => {
+    try { fs.unlinkSync(promptFile); } catch { /* already gone */ }
+  };
+
+  let proc;
+  try {
+    const args = buildZeroArgs(model, {
+      write: opts.write !== false,
+      cwd: opts.cwd ?? null,
+      promptFile
+    });
+    const env = buildZeroEnv(profile, provider);
+    proc = spawn("zero", args, {
+      cwd: opts.cwd || process.cwd(),
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
+    });
+  } catch (err) {
+    // sync spawn failure (e.g. EACCES) — the finally-equivalent for the pre-spawn window
+    removePromptFile();
+    throw err;
+  }
+
+  let stdout = "";
+  let stderr = "";
+  let stdoutBuf = "";
+
+  proc.stdout.setEncoding("utf8");
+  proc.stderr.setEncoding("utf8");
+
+  proc.stdout.on("data", (chunk) => {
+    stdout += chunk;
+    stdoutBuf += chunk;
+    let nl;
+    while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
+      const line = stdoutBuf.slice(0, nl);
+      stdoutBuf = stdoutBuf.slice(nl + 1);
+      if (opts.onStdout) opts.onStdout(line);
+    }
+  });
+
+  proc.stderr.on("data", (chunk) => {
+    stderr += chunk;
+    if (opts.onStderr) opts.onStderr(chunk);
+  });
+
+  let onAbort = null;
+  if (opts.signal) {
+    // guarded: a throwing kill must not leave the promise unsettled
+    onAbort = () => { try { terminateProcessTree(proc.pid); } catch { /* tree already gone */ } }; // blocks ~2s (SIGTERM grace) like the codex harness
+    opts.signal.addEventListener("abort", onAbort, { once: true });
+  }
+  const detachAbort = () => {
+    if (onAbort) opts.signal.removeEventListener("abort", onAbort);
+  };
+
+  return new Promise((resolve, reject) => {
+    proc.on("error", (err) => {
+      removePromptFile();
+      detachAbort();
+      reject(err);
+    });
+    proc.on("exit", (code, sig) => {
+      removePromptFile();
+      detachAbort();
+      if (stdoutBuf && opts.onStdout) opts.onStdout(stdoutBuf);
+      resolve(shapeZeroResult({ code, signal: sig, stdout, stderr }));
+    });
+  });
+}

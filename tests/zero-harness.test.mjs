@@ -15,7 +15,8 @@ import {
   urlsMatch,
   parseZeroJsonl,
   shapeZeroResult,
-  zeroPreflightError
+  zeroPreflightError,
+  runZeroTask
 } from "../plugins/gateway/scripts/lib/zero-harness.mjs";
 
 const PROFILE = {
@@ -295,5 +296,49 @@ describe("shapeZeroResult", () => {
     const r = shapeZeroResult({ code: 0, signal: null, stdout: '{"type":"final","text":""}', stderr: "" });
     assert.equal(r.stdout, "");
     assert.ok(!r.stderr.includes("no final message"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runZeroTask — preflight and guards
+// ---------------------------------------------------------------------------
+
+describe("runZeroTask preflight and guards", () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zero-harness-run-"));
+    process.env.XDG_CONFIG_HOME = tmpDir;
+    _resetZeroProviderCache();
+  });
+
+  it("rejects resume/fork with an explicit error", async () => {
+    await assert.rejects(
+      () => runZeroTask(PROFILE, "hi", { resume: true }),
+      /does not support resume\/fork/
+    );
+    await assert.rejects(
+      () => runZeroTask(PROFILE, "hi", { fork: "abc" }),
+      /does not support resume\/fork/
+    );
+  });
+
+  it("resolves exitCode 1 with remediation when no provider configured (no spawn)", async () => {
+    const result = await runZeroTask(PROFILE, "hi", {});
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /setup zero-init/);
+    assert.equal(result.rawJsonl, "");
+    assert.equal(result.usage, null);
+  });
+
+  it("resolves exitCode 1 on provider URL mismatch (no spawn)", async () => {
+    fs.mkdirSync(path.join(tmpDir, "zero"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "zero", "config.json"),
+      JSON.stringify({ activeProvider: "gw", providers: [{ name: "gw", baseURL: "http://elsewhere:9" }] })
+    );
+    const result = await runZeroTask(PROFILE, "hi", {});
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /elsewhere:9/);
   });
 });

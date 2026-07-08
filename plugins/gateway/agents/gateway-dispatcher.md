@@ -19,7 +19,7 @@ Forwarding rules:
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" dispatch ...`.
 - Do not prepend any preamble to the prompt — dispatching is a meta-task, not coding/review.
 - Forward all flags verbatim from the user's request.
-- Default to `--harness codex` unless the user specifies otherwise.
+- Default to `--harness codex` unless the user specifies otherwise (`--harness zero` and `--harness claude` are valid; zero is fail-loud — it errors instead of falling back if the zero CLI or its provider is not set up).
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Return the stdout of the `gateway-companion` command exactly as-is.
 - If the Bash call fails or the gateway cannot be invoked, return nothing.

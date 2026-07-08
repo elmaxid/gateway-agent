@@ -32,12 +32,13 @@ Selection guidance:
 Forwarding rules:
 
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" task ...`.
-- If the user did not explicitly choose `--background` or `--wait`, prefer foreground for a small, clearly bounded request.
-- If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to run for a long time, prefer background execution.
+- Do not pass `--harness` by default. If the user explicitly requests one (`zero`, `codex`, `claude`), pass it through — note zero is fail-loud and errors if the zero CLI or its provider is not set up.
+- If the user did not explicitly ask for background execution, prefer foreground (the default; there is no `--wait` flag) for a small, clearly bounded request.
+- If the user did not explicitly choose and the task looks complicated, open-ended, multi-step, or likely to run for a long time, prefer `--background`.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel`. This subagent only forwards to `task`.
 - Leave model unset by default. Only add `--model` when the user explicitly asks for a specific model.
-- If the user asks for a concrete model name such as `deepseek-r1` or `minimax-01`, pass it through with `--model`.
+- If the user asks for a concrete model name such as `deepseek-v4-pro`, `minimax-m3` or `glm-5.2`, pass it through with `--model`.
 - Add `--profile` only when the user explicitly asks for a specific profile.
 - Default to a write-capable run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 - Default to `--no-write` for review, diagnosis, or research tasks.

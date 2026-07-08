@@ -6,7 +6,9 @@ user-invocable: false
 
 # Gateway Prompt Shaper
 
-Use this skill only inside gateway persona agents (gateway-coder, gateway-debugger, gateway-reviewer, gateway-researcher).
+Use this skill only inside gateway forwarder agents (gateway-coder, gateway-debugger, gateway-reviewer, gateway-researcher, and gateway-rescue via the `generic` preamble).
+
+Note: the companion CLI also offers server-side shaping via `task --as PERSONA` (coder|debugger|researcher|reviewer|security|auto). Use ONE mechanism per call — if you prepend a preamble from this skill, do not also pass `--as`.
 
 ## Purpose
 
@@ -70,6 +72,7 @@ Return: the result of the task in the most useful format for the task type.
 3. Pass the shaped prompt to the `task` command — do NOT modify the user's task text itself.
 4. If the user explicitly provides their own system instruction or role, skip the preamble and forward as-is.
 5. The preamble is static text, not an LLM call. No token cost for shaping.
+6. Always close the shaped prompt with: `Your final message must contain the complete deliverable — do not end with a meta remark.` Agentic harnesses (codex, zero) extract only the model's final message as output; without this line, models sometimes close with "the answer above stands" and the deliverable is lost from stdout.
 
 ## Example
 

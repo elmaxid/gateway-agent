@@ -1,6 +1,6 @@
 ---
 description: Auto-route a task to the best gateway persona (coder, debugger, reviewer, researcher) based on task keywords
-argument-hint: "[--background|--wait] [--profile <name>] [--model <model>] [--harness <claude|codex>] [--write|--no-write] \"your task description\""
+argument-hint: "[--background|--wait] [--profile <name>] [--model <model>] [--harness <claude|codex|zero>] [--write|--no-write] \"your task description\""
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 

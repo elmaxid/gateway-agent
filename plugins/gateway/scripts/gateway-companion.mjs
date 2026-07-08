@@ -11,6 +11,7 @@ import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJ
 import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
 import { runTask } from "./lib/codex-harness.mjs";
+import { runZeroTask, isZeroAvailable } from "./lib/zero-harness.mjs";
 import { loadTranscript, parseTranscript, buildMessages } from "./lib/claude-session-transfer.mjs";
 import { runDebate, renderDebateOutput, preflightProfiles } from "./lib/debate.mjs";
 import {
@@ -89,9 +90,9 @@ function printUsage() {
       "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json]",
       "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json] [focus]",
       "  gateway-companion staged-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [intent]",
-      "  gateway-companion task [--profile NAME] [--model MODEL] [--harness claude|codex] [--as PERSONA] [--background] [--write|--no-write] [--prompt-file FILE] [prompt]",
+      "  gateway-companion task [--profile NAME] [--model MODEL] [--harness claude|codex|zero] [--as PERSONA] [--background] [--write|--no-write] [--prompt-file FILE] [prompt]",
   `                          PERSONA: ${getValidPersonas().join("|")}`,
-      "  gateway-companion task-worker --job-id ID [--profile NAME] [--model MODEL] [--harness claude|codex] [--write|--no-write] [prompt]",
+      "  gateway-companion task-worker --job-id ID [--profile NAME] [--model MODEL] [--harness claude|codex|zero] [--write|--no-write] [prompt]",
       "  gateway-companion debate [--models P1,P2,...] [--rounds N] [--synthesizer NAME] [--mode relaxed|strict]",
       "                           [--timeout MS] [--max-concurrency N] [--base REF] [--scope auto|working-tree|branch]",
       "                           [--include-diff] [--json] [question]",
@@ -814,11 +815,15 @@ async function executeTaskRun(request) {
   request.onProgress?.({ message: `Delegating task to ${profile.name} (${model})...`, phase: "starting" });
 
   const harness = request.harness || "claude";
-  const VALID_HARNESSES = new Set(["claude", "codex"]);
+  const VALID_HARNESSES = new Set(["claude", "codex", "zero"]);
   if (!VALID_HARNESSES.has(harness)) {
     throw new Error(`Unknown --harness "${harness}". Valid: ${[...VALID_HARNESSES].join(", ")}`);
   }
-  const taskRunner = harness === "codex" ? runTask : runClaudeTask;
+  // zero is fail-loud by design: no silent fallback to claude (spec rev 2).
+  if (harness === "zero" && !isZeroAvailable()) {
+    throw new Error("--harness zero requires the zero CLI. Install: npm i -g @gitlawb/zero");
+  }
+  const taskRunner = harness === "codex" ? runTask : harness === "zero" ? runZeroTask : runClaudeTask;
   const prompt = applyPersona(request.prompt, request.persona);
 
   const result = await taskRunner(profile, prompt, {
@@ -885,6 +890,13 @@ async function handleTask(argv) {
 
   const write = options["no-write"] ? false : (options.write !== undefined ? Boolean(options.write) : true);
   const harness = options.harness || "claude";
+  // Pre-queue check: a --background zero job must not report "queued" and then
+  // die in the detached worker — fail loud in the parent (spec: fail-loud).
+  if (harness === "zero" && !isZeroAvailable()) {
+    console.error("--harness zero requires the zero CLI. Install: npm i -g @gitlawb/zero");
+    process.exitCode = 2;
+    return;
+  }
   const taskTitle = "Gateway Task";
   const taskSummary = shorten(prompt);
 

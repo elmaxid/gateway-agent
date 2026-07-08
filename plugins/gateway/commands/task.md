@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, fix, or task to an alternative LLM via Claude subprocess
-argument-hint: "[--background|--wait] [--profile <name>] [--model <model>] [--harness claude|codex] [--as persona] [--write|--no-write] [--prompt-file <path>] [what the model should do]"
+argument-hint: "[--background|--wait] [--profile <name>] [--model <model>] [--harness claude|codex|zero] [--as persona] [--write|--no-write] [--prompt-file <path>] [what the model should do]"
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
@@ -18,7 +18,7 @@ Execution mode:
 - If neither flag is present, default to foreground.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
 - `--profile`, `--model`, `--write`, `--no-write`, `--harness`, `--as`, and `--prompt-file` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
-- `--harness claude|codex` selects the execution harness (default: `claude`). `--as` selects a persona (`debugger`, `reviewer`, `security`, `researcher`, `coder`). `--prompt-file <path>` reads the task prompt from a file instead of the natural-language text.
+- `--harness claude|codex|zero` selects the execution harness (default: `claude`). `--as` selects a persona (`debugger`, `reviewer`, `security`, `researcher`, `coder`). `--prompt-file <path>` reads the task prompt from a file instead of the natural-language text.
 
 Operating rules:
 

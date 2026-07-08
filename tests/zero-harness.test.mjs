@@ -283,12 +283,13 @@ describe("shapeZeroResult", () => {
     assert.match(r.stderr, /\[zero error provider_error\] boom/);
   });
 
-  it("no final → raw stdout returned + loud stderr note", () => {
+  it("no final → empty stdout, extracted error + loud note on stderr, rawJsonl keeps the stream", () => {
     const raw = '{"type":"error","code":"provider_error","message":"no key"}';
     const r = shapeZeroResult({ code: 3, signal: null, stdout: raw, stderr: "" });
-    assert.equal(r.stdout, raw);
-    assert.match(r.stderr, /provider_error/);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /\[zero error provider_error\]/);
     assert.match(r.stderr, /no final message/);
+    assert.equal(r.rawJsonl, raw);
     assert.equal(r.exitCode, 3);
   });
 

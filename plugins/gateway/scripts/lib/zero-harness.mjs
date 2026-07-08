@@ -145,8 +145,11 @@ export function shapeZeroResult({ code, signal, stdout, stderr }) {
   if (parsed.hasFinal) {
     finalStdout = parsed.finalText;
   } else {
-    finalStdout = stdout;
-    finalStderr = appendLine(finalStderr, "zero exec produced no final message — raw JSONL returned");
+    // No final event: don't surface the raw JSONL as stdout (renderTaskResult prefers
+    // non-empty stdout over the failure message). The full stream is still available
+    // via the returned rawJsonl field (dispatch task logs use it).
+    finalStdout = "";
+    finalStderr = appendLine(finalStderr, "zero exec produced no final message — raw JSONL preserved in rawJsonl/task log");
   }
 
   return {

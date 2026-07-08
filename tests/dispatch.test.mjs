@@ -322,7 +322,7 @@ describe("buildTaskList", () => {
 // ---------------------------------------------------------------------------
 
 import { execSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, chmodSync as fsChmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync, chmodSync as fsChmodSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -672,6 +672,39 @@ describe("runDispatch", () => {
      rmSync(repo, { recursive: true, force: true });
    }
  });
+
+  it("task log file keeps the zero rawJsonl stream when the runner provides it", async () => {
+    const repo = createTempGitRepo();
+    try {
+      const { runDispatch } = await import("../plugins/gateway/scripts/lib/dispatch.mjs");
+      const tasks = [{ id: 1, prompt: "noop", profile: "mock", model: "mock-model" }];
+      const RAW = '{"type":"final","text":"done"}\n{"type":"done","exit_code":0}';
+
+      const mockRunner = async () => ({
+        stdout: "done", stderr: "", exitCode: 0, rawJsonl: RAW,
+      });
+
+      const result = await runDispatch(tasks, {
+        cwd: repo,
+        harness: "zero",
+        write: true,
+        maxConcurrency: 1,
+        taskRunner: mockRunner,
+        resolveProfileFn: () => ({ name: "mock", baseUrl: "http://localhost", defaultModel: "mock-model", kind: "claude-gateway" }),
+        skipPreflight: true,
+      });
+
+      assert.equal(result.tasks[0].status, "completed_no_changes");
+      // clean final text stays on the result object for cross-review/rendering
+      assert.equal(result.tasks[0].output, "done");
+      // ...but the log file preserves the full event stream
+      const logsDir = path.join(repo, ".gateway-dispatch", result.jobId, "logs");
+      const [logName] = readdirSync(logsDir);
+      assert.equal(readFileSync(path.join(logsDir, logName), "utf8"), RAW);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

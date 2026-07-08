@@ -371,6 +371,11 @@ export async function runDispatch(tasks, opts) {
 
         const rawOutput = runnerResult.stdout || "";
 
+        // zero returns the extracted final text in stdout; the full event stream
+        // lives in rawJsonl. Logs keep the stream for debugging; claude/codex
+        // results have no rawJsonl (undefined) and fall through unchanged.
+        const logOutput = runnerResult.rawJsonl ?? rawOutput;
+
         // A --timeout-driven taskAc.abort() kills the subprocess tree, and the runner
         // resolves with exitCode: null (killed by signal, not a clean exit). `null ?? 0`
         // would misclassify that as a success and fall through to collectPatch/completed,
@@ -380,7 +385,7 @@ export async function runDispatch(tasks, opts) {
         if (timedOut) {
           failedCount++;
           const result = { ...task, model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: rawOutput, error: "timeout" };
-          fs.writeFileSync(logFile, rawOutput + "\n" + (runnerResult.stderr || ""), "utf8");
+          fs.writeFileSync(logFile, logOutput + "\n" + (runnerResult.stderr || ""), "utf8");
           results.push(result);
           return result;
         }
@@ -390,7 +395,7 @@ export async function runDispatch(tasks, opts) {
         if (exitCode !== 0) {
           failedCount++;
           const result = { ...task, model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: rawOutput, error: runnerResult.stderr || `exit ${exitCode}` };
-          fs.writeFileSync(logFile, rawOutput + "\n" + (runnerResult.stderr || ""), "utf8");
+          fs.writeFileSync(logFile, logOutput + "\n" + (runnerResult.stderr || ""), "utf8");
           results.push(result);
           return result;
         }
@@ -401,7 +406,7 @@ export async function runDispatch(tasks, opts) {
         if (patchFile) {
           fs.writeFileSync(patchFile, patch, "utf8");
         }
-        fs.writeFileSync(logFile, rawOutput, "utf8");
+        fs.writeFileSync(logFile, logOutput, "utf8");
 
         const status = noChanges ? "completed_no_changes" : "completed";
         const result = { ...task, model, status, noChanges, duration: Date.now() - start, patchFile, output: rawOutput, error: null };

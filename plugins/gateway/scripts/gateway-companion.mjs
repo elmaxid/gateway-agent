@@ -11,7 +11,7 @@ import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJ
 import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
 import { runTask } from "./lib/codex-harness.mjs";
-import { runZeroTask, isZeroAvailable } from "./lib/zero-harness.mjs";
+import { runZeroTask, isZeroAvailable, getZeroProvider, zeroPreflightError } from "./lib/zero-harness.mjs";
 import { loadTranscript, parseTranscript, buildMessages } from "./lib/claude-session-transfer.mjs";
 import { runDebate, renderDebateOutput, preflightProfiles } from "./lib/debate.mjs";
 import {
@@ -97,7 +97,7 @@ function printUsage() {
       "                           [--timeout MS] [--max-concurrency N] [--base REF] [--scope auto|working-tree|branch]",
       "                           [--include-diff] [--json] [question]",
       "  gateway-companion dispatch [--plan FILE|--task PROMPT:PROFILE...] [--assign RANGES] [--model-override PROF:MODEL...]",
-      "                             [--max-concurrency N] [--timeout MS] [--harness claude|codex] [--write|--no-write]",
+      "                             [--max-concurrency N] [--timeout MS] [--harness claude|codex|zero] [--write|--no-write]",
       "                             [--cross-review PROFILE] [--cross-review-model MODEL] [--fail-fast] [--dry-run] [--json]",
       "                             [--background (not yet implemented)]",
       "  gateway-companion transfer [--profile NAME] [--turns N] [prompt]",
@@ -1359,8 +1359,8 @@ async function handleDispatch(argv) {
   }
 
   const harness = options.harness || "codex";
-  if (!["claude", "codex"].includes(harness)) {
-    validationError(`Unknown --harness "${harness}". Valid: claude, codex.`);
+  if (!["claude", "codex", "zero"].includes(harness)) {
+    validationError(`Unknown --harness "${harness}". Valid: claude, codex, zero.`);
   }
 
   if (options.write && options["no-write"]) validationError("--write y --no-write son mutuamente excluyentes.");
@@ -1426,6 +1426,29 @@ async function handleDispatch(argv) {
     }
   }
 
+  if (harness === "zero") {
+    if (!isZeroAvailable()) {
+      process.exitCode = 2;
+      throw new Error("--harness zero requires the zero CLI. Install: npm i -g @gitlawb/zero");
+    }
+    // Zero's provider is global per machine: validate every TASK profile against
+    // it ONCE, pre-dispatch. Mixed-URL dispatches can never work with zero.
+    // The cross-review profile is deliberately excluded — cross-review runs over
+    // HTTP (runDirectReview), never through the zero harness.
+    const zeroProvider = getZeroProvider({ refresh: true });
+    const taskProfileNames = [...new Set(tasks.map((t) => t.profile).filter(Boolean))];
+    const offenders = [];
+    for (const name of taskProfileNames) {
+      const profile = resolveProfile(name, config);
+      const failure = zeroPreflightError(profile, zeroProvider);
+      if (failure) offenders.push(`${name}: ${failure}`);
+    }
+    if (offenders.length > 0) {
+      process.exitCode = 2;
+      throw new Error(`--harness zero provider preflight failed:\n  ${offenders.join("\n  ")}`);
+    }
+  }
+
   // --- Dry run ---
   if (options["dry-run"]) {
     const matrix = tasks.map((t) => ({ id: t.id, prompt: shorten(t.prompt, 80), profile: t.profile, model: t.model || "(default)" }));
@@ -1469,7 +1492,7 @@ async function handleDispatch(argv) {
   if (!options.json) console.error(`[dispatch] Starting ${tasks.length} tasks across ${new Set(tasks.map((t) => t.profile)).size} profiles (max-concurrency: ${maxConcurrency}/endpoint)`);
 
   const resolveProfileFn = (name) => resolveProfile(name, config);
-  const taskRunnerFn = harness === "codex" ? runTask : runClaudeTask;
+  const taskRunnerFn = harness === "codex" ? runTask : harness === "zero" ? runZeroTask : runClaudeTask;
   if (typeof resolveProfileFn !== "function") throw new Error("Internal error: resolveProfileFn is not a function.");
   if (typeof taskRunnerFn !== "function") throw new Error(`Internal error: no task runner available for harness "${harness}".`);
 

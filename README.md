@@ -10,7 +10,7 @@ Agrega 12 comandos `/gateway:*` a Claude Code. Siete operaciones principales:
 |-----------|---------|-------------|
 | **Review** | HTTP + agentic loop (tool-use multi-turn) | Revisar código; modelo explora repo con git/fs tools |
 | **Staged Review** | HTTP directo 2-fases | Fase 1: spec compliance, Fase 2: code quality adversarial |
-| **Task** | Subprocess `claude -p` o `codex exec` (dual-harness) | Delegación completa con herramientas |
+| **Task** | Subprocess `claude -p`, `codex exec` o `zero` (triple-harness) | Delegación completa con herramientas |
 | **Dispatch** | Worktrees git paralelas, un task runner (claude/codex) por tarea | Distribuir varias tareas de un plan across modelos en paralelo, con cross-review opcional |
 | **Work** | Auto-routing → persona especializada | Detecta tipo de tarea por keywords |
 | **Debate** | HTTP paralelo multi-modelo con preflight + quorum | Posiciones independientes + crítica cruzada + síntesis |
@@ -64,14 +64,24 @@ De acá en adelante, cada comando tiene su propia sección más abajo con flags 
 
 Las personas están definidas en archivos `personas/*.md` con frontmatter YAML. Cada archivo declara `name`, `description`, `activation_keywords` y el cuerpo del system prompt. Para agregar una nueva persona basta con crear un archivo `.md` nuevo — no requiere cambios en código.
 
-### Dual-harness
+### Triple-harness
 
 | Harness | Comando | Ventaja |
 |---------|---------|---------|
 | **claude** | `claude -p --bare` | Stateless, rápido, 0 overhead |
 | **codex** | `codex exec --json` | Threads persistentes, reasoning traces, sandbox real |
+| **zero** | `zero` (one-shot) | Tool whitelist fijo, fail-loud (sin fallback) |
 
-Si codex no está instalado, fallback automático a claude.
+Si codex no está instalado, fallback automático a claude. Zero no tiene fallback: si falta, falla explícito.
+
+### Zero harness
+
+[Zero](https://github.com/Gitlawb/zero) as a third one-shot harness: `--harness zero`
+on `task`, `task-worker`, and `dispatch`. Requires the zero CLI (`npm i -g @gitlawb/zero`)
+and a one-time `setup zero-init` (bootstraps zero's provider from your default gateway
+profile; the API key is injected per spawn via `GATEWAY_API_KEY`, never duplicated on disk).
+Fail-loud: no fallback if zero is missing. Delegated tasks run with a fixed tool whitelist
+(no MCP/browser/swarm). Task logs keep zero's full JSONL event stream.
 
 ## Requisitos
 
@@ -80,6 +90,7 @@ Si codex no está instalado, fallback automático a claude.
 - Al menos un endpoint compatible con OpenAI (Ollama, gateway custom, etc.)
 - **Opcional:** [Codex CLI](https://github.com/openai/codex) para el harness codex (si no está, usa claude subprocess como fallback)
   > ⚠️ **Nota:** Codex requiere que el directorio de trabajo sea un repositorio git. Si no lo es, ejecutar `git init` antes de usar harness codex.
+- **Opcional:** [Zero CLI](https://github.com/Gitlawb/zero) (`npm i -g @gitlawb/zero`) para el harness zero (sin fallback: fail-loud si no está instalado)
 
 ## Instalación
 
@@ -305,7 +316,7 @@ Review de 2 fases: Fase 1 evalúa spec compliance (¿el código hace lo que dice
 
 ### `/gateway:task`
 
-Delega una tarea al LLM via subprocess. Soporta dual-harness (claude o codex).
+Delega una tarea al LLM via subprocess. Soporta triple-harness (claude, codex o zero).
 
 ```
 /gateway:task "explica qué hace este proyecto"
@@ -313,6 +324,7 @@ Delega una tarea al LLM via subprocess. Soporta dual-harness (claude o codex).
 /gateway:task --profile deepseek-pro "implementa tests para api-client.mjs"
 /gateway:task --no-write "analiza la arquitectura sin hacer cambios"
 /gateway:task --harness codex "debug este test que falla"
+/gateway:task --harness zero "resume los cambios de este PR"
 ```
 
 **Flags:**
@@ -320,7 +332,7 @@ Delega una tarea al LLM via subprocess. Soporta dual-harness (claude o codex).
 - `--wait` — foreground bloqueante (default)
 - `--profile NAME` — perfil a usar (debe ser `claude-gateway`)
 - `--model MODEL` — override del modelo
-- `--harness claude|codex` — harness de ejecución (default: claude). Codex ofrece threads persistentes y sandbox real
+- `--harness claude|codex|zero` — harness de ejecución (default: claude). Codex ofrece threads persistentes y sandbox real; zero es one-shot fail-loud (sin fallback)
 - `--as PERSONA` — inyecta system prompt de una persona antes de la tarea (`reviewer`, `debugger`, `security`, `researcher`, `coder`). Si no se especifica, se intenta auto-match: el prompt se compara contra `activation_keywords` de cada persona y se selecciona la de mayor score (vía `matchPersona()`). Usar `--as` explícito para forzar una persona concreta.
 - `--write` — permite escritura de archivos (default)
 - `--no-write` — modo lectura, sin edits
@@ -349,7 +361,7 @@ Distribuye varias tareas de implementación across múltiples modelos gateway en
 - `--assign RANGES` — asigna rangos de task IDs a perfiles, ej. `1-3:minimax,4-6:glm`. Solo válido con `--plan`
 - `--model-override PROF:MODEL` — override de modelo para un perfil (repetible)
 - `--max-concurrency N` — máximo de tareas concurrentes por endpoint (1-16, default 3)
-- `--harness claude|codex` — harness de ejecución por tarea (default `codex`; codex requiere el CLI instalado)
+- `--harness claude|codex|zero` — harness de ejecución por tarea (default `codex`; codex y zero requieren su CLI instalado)
 - `--timeout MS` — timeout por tarea en ms. Si expira, esa tarea se marca `FAILED (timeout)` (no aborta las demás)
 - `--cross-review PROFILE` — tras completar, revisa el diff de cada tarea con este perfil y agrega los findings al manifest
 - `--cross-review-model MODEL` — override de modelo para el cross-review
@@ -431,7 +443,7 @@ Distribuye varias tareas de implementación across múltiples modelos gateway en
 - `--plan` y `--task` juntos, o ninguno de los dos → son mutuamente excluyentes, uno es obligatorio.
 - `--assign` sin `--plan` → solo tiene sentido con un plan file.
 - `--write` y `--no-write` juntos → mutuamente excluyentes.
-- `--max-concurrency` fuera de 1-16, o `--harness` que no sea `claude`/`codex`.
+- `--max-concurrency` fuera de 1-16, o `--harness` que no sea `claude`/`codex`/`zero`.
 - Un perfil (de `--task`, `--assign`, `--model-override` o `--cross-review`) no existe en config, o existe pero no es `kind: claude-gateway`.
 - El archivo de `--plan` no se puede leer.
 - `--model-override` referencia un perfil que ninguna tarea usa realmente → no es error fatal, pero avisa por stderr (`Warning: --model-override references profile "X" which is not used by any task`) — típico de un typo en el nombre del perfil.
@@ -713,15 +725,15 @@ Los nombres son exactos — sin prefijos adicionales.
 cd /opt/agent-plugin-cc
 
 # Unit tests (sin red) — todos menos integration.test.mjs
-node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs tests/args.test.mjs tests/agentic-review.test.mjs tests/agentic-review-malformed-output.test.mjs tests/agentic-review-maxtime.test.mjs tests/cli-timeout.test.mjs tests/dispatch.test.mjs
+node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/zero-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs tests/args.test.mjs tests/agentic-review.test.mjs tests/agentic-review-malformed-output.test.mjs tests/agentic-review-maxtime.test.mjs tests/cli-timeout.test.mjs tests/dispatch.test.mjs
 
 # Integration tests (requiere gateway activo)
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Unit tests:** 130 tests — config (13), api-client (12), debate (9), args (10), agentic-review (8), agentic-review-maxtime (1), agentic-review-malformed-output (2), cli-timeout (6), claude-subprocess (9), codex-harness (6), claude-session-transfer (9), session-lifecycle-hook (2), dispatch (43 — Semaphore/normalizeBaseUrl, parsers, worktree lifecycle, execution engine, cross-review, CLI). Sin red — todos usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real.
+**Unit tests:** 190 tests — config (13), api-client (12), debate (9), args (10), agentic-review (8), agentic-review-maxtime (1), agentic-review-malformed-output (2), cli-timeout (6), claude-subprocess (9), codex-harness (6), zero-harness (34 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping), claude-session-transfer (9), session-lifecycle-hook (2), dispatch (69 — Semaphore/normalizeBaseUrl, parsers, worktree lifecycle, execution engine, cross-review, CLI). Sin red — todos usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real.
 
-**Integration tests:** 12 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness, task via codex harness; para los 3 modelos principales (glm-5.2, minimax-m3, deepseek-v4-pro).
+**Integration tests:** 13 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness, task via codex harness, task via zero harness; para los 3 modelos principales (glm-5.2, minimax-m3, deepseek-v4-pro).
 
 ## Hooks del ciclo de sesión
 

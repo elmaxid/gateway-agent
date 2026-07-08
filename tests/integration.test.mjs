@@ -1,5 +1,5 @@
 /**
- * Integration tests — live gateway at 192.0.2.10:4000.
+ * Integration tests — live gateway (set GATEWAY_BASE_URL env var to run).
  *
  * Covers:
  *   - Connectivity + model routing for glm-5.2, minimax-m3, deepseek-v4-pro
@@ -124,4 +124,39 @@ describe("task — codex harness", () => {
         `${profileName} codex task produced no stdout`);
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Task via zero harness — via gateway-companion CLI
+// ---------------------------------------------------------------------------
+
+describe("task — zero harness", () => {
+  it("delegates one-shot task through zero and returns clean final text", async () => {
+    let stdout = "";
+    let stderr = "";
+    try {
+      const result = await execFileAsync(
+        "node",
+        [
+          COMPANION, "task",
+          "--harness", "zero",
+          "--no-write",
+          "--profile", "glm",
+          "Reply with exactly: INTEGRATION-ZERO-OK"
+        ],
+        { timeout: 90_000 }
+      );
+      stdout = result.stdout;
+      stderr = result.stderr;
+    } catch (err) {
+      stdout = err.stdout ?? "";
+      stderr = err.stderr ?? "";
+      // Non-zero exit is a failure but we still check output
+      assert.fail(`zero task exited with error. stderr: ${stderr.slice(0, 300)}`);
+    }
+
+    assert.match(stdout, /INTEGRATION-ZERO-OK/);
+    // clean text contract: the rendered output must not be raw JSONL
+    assert.ok(!stdout.includes('"type":"final"'));
+  });
 });

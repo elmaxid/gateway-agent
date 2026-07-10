@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { pickEnv, terminateProcessTree } from "./subprocess-utils.mjs";
+import { pickEnv, sanitizeSubprocessEnv, terminateProcessTree } from "./subprocess-utils.mjs";
 
 export const READ_TOOLS = [
   "glob", "grep", "read_file", "read_minified_file",
@@ -68,7 +68,7 @@ export function getZeroProvider({ refresh = false } = {}) {
 export function buildZeroEnv(profile, provider = null) {
   const env = pickEnv(process.env);
   if (profile.subprocessEnv) {
-    Object.assign(env, profile.subprocessEnv);
+    Object.assign(env, sanitizeSubprocessEnv(profile.subprocessEnv));
   }
   // Assigned AFTER subprocessEnv on purpose: the credential must always win.
   const keyVar = provider?.apiKeyEnv || "GATEWAY_API_KEY";
@@ -178,7 +178,7 @@ export function zeroPreflightError(profile, provider) {
 
 export async function runZeroTask(profile, prompt, opts = {}) {
   if (opts.resume || opts.fork) {
-    throw new Error("zero harness does not support resume/fork in v0.5.0");
+    throw new Error("zero harness does not support resume/fork");
   }
 
   const provider = getZeroProvider();

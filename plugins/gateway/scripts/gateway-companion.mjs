@@ -88,7 +88,7 @@ function printUsage() {
       "Usage:",
       "  gateway-companion setup <add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model|doctor|models|zero-init> [args]",
       "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json]",
-      "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json] [focus]",
+      "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [focus]",
       "  gateway-companion staged-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [intent]",
       "  gateway-companion task [--profile NAME] [--model MODEL] [--harness claude|codex|zero] [--as PERSONA] [--background] [--write|--no-write] [--prompt-file FILE] [prompt]",
   `                          PERSONA: ${getValidPersonas().join("|")}`,
@@ -236,6 +236,10 @@ async function handleSetup(argv) {
 
       if (!options.profile || !options.url || !options.model) {
         throw new Error("Required: --profile NAME --url URL --model MODEL");
+      }
+
+      if (options["api-key"] || options["auth-token"]) {
+        console.error("[gateway] Warning: secret passed via --api-key/--auth-token is visible in process listings (ps, /proc/<pid>/cmdline) for the life of this command. Prefer setting it interactively or via an env var where supported.");
       }
 
       const profileData = {
@@ -884,7 +888,7 @@ async function executeAdversarialReviewRun(request) {
 async function handleAdversarialReview(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["profile", "model", "base", "scope", "cwd", "timeout"],
-    booleanOptions: ["json", "include-diff", "no-tools"],
+    booleanOptions: ["json", "include-diff"],
     aliasMap: { m: "model", p: "profile" }
   });
 
@@ -984,6 +988,17 @@ async function executeTaskRun(request) {
   };
 }
 
+function resolveTaskPersona(as, prompt) {
+  if (as === "auto") {
+    const matched = matchPersona(prompt);
+    if (matched) {
+      process.stderr.write(`[task] auto-matched persona: ${matched}\n`);
+    }
+    return matched ?? undefined;
+  }
+  return as;
+}
+
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["profile", "model", "cwd", "prompt-file", "harness", "as"],
@@ -1022,6 +1037,7 @@ async function handleTask(argv) {
   const taskSummary = shorten(prompt);
 
   if (options.background) {
+    const persona = resolveTaskPersona(options.as, prompt);
     const job = createCompanionJob({
       prefix: "task",
       kind: "task",
@@ -1040,7 +1056,7 @@ async function handleTask(argv) {
       model: options.model,
       write,
       prompt,
-      persona: options.as,
+      persona,
       harness
     });
 
@@ -1056,7 +1072,7 @@ async function handleTask(argv) {
         model: options.model,
         write,
         prompt,
-        persona: options.as,
+        persona,
         harness
       }
     };
@@ -1098,16 +1114,7 @@ async function handleTask(argv) {
         prompt,
         write,
         harness,
-        persona: (() => {
-          if (options.as === "auto") {
-            const matched = matchPersona(prompt);
-            if (matched) {
-              process.stderr.write(`[task] auto-matched persona: ${matched}\n`);
-            }
-            return matched ?? undefined;
-          }
-          return options.as;
-        })(),
+        persona: resolveTaskPersona(options.as, prompt),
         jobId: job.id,
         jobTitle: taskTitle,
         onProgress: progress

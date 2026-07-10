@@ -167,15 +167,6 @@ export function listJobs(cwd) {
   return loadState(cwd).jobs;
 }
 
-export function setConfig(cwd, key, value) {
-  return updateState(cwd, (state) => {
-    state.config = {
-      ...state.config,
-      [key]: value
-    };
-  });
-}
-
 export function getConfig(cwd) {
   return loadState(cwd).config;
 }

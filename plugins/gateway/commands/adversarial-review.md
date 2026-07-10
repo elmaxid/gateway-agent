@@ -1,6 +1,6 @@
 ---
 description: Run a two-pass adversarial code review — first pass finds issues, second pass filters false positives
-argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--scope <auto|branch|working-tree>] [--json] [--include-diff] [--no-tools] [--timeout <ms>] [focus]"
+argument-hint: "[--profile <name>] [--model <model>] [--base <ref>] [--scope <auto|branch|working-tree>] [--json] [--include-diff] [--timeout <ms>] [focus]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
@@ -22,7 +22,7 @@ Argument handling:
 - `--model` overrides the model for this review. Do not add one if the user did not specify it.
 - `--base <ref>` diffs the working tree against that ref (branch mode). There is no `--head` flag — the review always compares against the current working tree/HEAD, never an arbitrary head ref.
 - `--scope <auto|branch|working-tree>` controls target selection when `--base` is absent, same as `/gateway:review`.
-- `--json` requests JSON-formatted output. `--no-tools` skips the agentic tool-use loop for a single direct HTTP call per pass instead.
+- `--json` requests JSON-formatted output. This command always uses a single direct HTTP call per pass — there is no agentic tool-use loop to opt out of (unlike `/gateway:review`, which supports `--no-tools`).
 - `--timeout` sets the per-request timeout in milliseconds (default: 60000). This command makes two sequential HTTP requests (pass 1 finds issues, pass 2 filters false positives), so worst-case total wait ≈ 2×the configured timeout. Raise this for slow local models or large backends under load.
 - Any remaining text after the flags is a description of what to focus the review on (the `[focus]` positional).
 

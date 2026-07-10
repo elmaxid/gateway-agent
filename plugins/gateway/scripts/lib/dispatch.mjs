@@ -573,8 +573,12 @@ export function renderDispatchOutput(result) {
   const reviewedTasks = tasks.filter((t) => t.review);
   if (reviewedTasks.length > 0) {
     const totalFindings = reviewedTasks.reduce((sum, t) => sum + (t.review.findings?.length ?? 0), 0);
+    const criticalFindings = reviewedTasks.reduce(
+      (sum, t) => sum + (t.review.findings?.filter((f) => String(f.severity).toLowerCase() === "critical").length ?? 0),
+      0
+    );
     lines.push("");
-    lines.push(`Review findings: ${totalFindings} total across ${reviewedTasks.length} reviewed tasks`);
+    lines.push(`Review findings: ${totalFindings} total (critical: ${criticalFindings}) across ${reviewedTasks.length} reviewed tasks`);
   }
 
   if (patchTasks.length > 0) {

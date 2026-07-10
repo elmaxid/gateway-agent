@@ -35,21 +35,6 @@ export function runCommandChecked(command, args = [], options = {}) {
   return result;
 }
 
-export function binaryAvailable(command, versionArgs = ["--version"], options = {}) {
-  const result = runCommand(command, versionArgs, options);
-  if (result.error && /** @type {NodeJS.ErrnoException} */ (result.error).code === "ENOENT") {
-    return { available: false, detail: "not found" };
-  }
-  if (result.error) {
-    return { available: false, detail: result.error.message };
-  }
-  if (result.status !== 0) {
-    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
-    return { available: false, detail };
-  }
-  return { available: true, detail: result.stdout.trim() || result.stderr.trim() || "ok" };
-}
-
 function looksLikeMissingProcessMessage(text) {
   return /not found|no running instance|cannot find|does not exist|no such process/i.test(text);
 }

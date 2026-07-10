@@ -84,28 +84,6 @@ function validateReviewResultShape(data) {
 }
 
 // ---------------------------------------------------------------------------
-// Duration / timestamp helpers
-// ---------------------------------------------------------------------------
-
-export function formatDuration(ms) {
-  if (!Number.isFinite(ms) || ms < 0) return "0s";
-  const totalSeconds = Math.max(0, Math.round(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
-}
-
-export function formatTimestamp(isoString) {
-  if (!isoString) return "";
-  const date = new Date(isoString);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString();
-}
-
-// ---------------------------------------------------------------------------
 // Job status formatting
 // ---------------------------------------------------------------------------
 
@@ -118,13 +96,6 @@ function formatJobLine(job) {
     parts.push(job.title);
   }
   return parts.join(" | ");
-}
-
-export function formatJobStatus(job) {
-  const parts = [`${job.id}: ${job.status ?? "unknown"}`];
-  if (job.title) parts.push(job.title);
-  if (job.phase && job.phase !== job.status) parts.push(`(${job.phase})`);
-  return parts.join(" - ");
 }
 
 function pushJobDetails(lines, job, options = {}) {
@@ -376,25 +347,6 @@ export function renderJobStatusReport(job) {
     showResultHint: true,
     showReviewHint: true
   });
-  return `${lines.join("\n").trimEnd()}\n`;
-}
-
-export function renderStatusTable(jobs) {
-  if (jobs.length === 0) {
-    return "No jobs.\n";
-  }
-
-  const lines = [
-    "| Job | Status | Kind | Summary |",
-    "| --- | --- | --- | --- |"
-  ];
-
-  for (const job of jobs) {
-    lines.push(
-      `| ${escapeMarkdownCell(job.id)} | ${escapeMarkdownCell(job.status)} | ${escapeMarkdownCell(job.kindLabel ?? job.kind ?? "")} | ${escapeMarkdownCell(job.summary ?? "")} |`
-    );
-  }
-
   return `${lines.join("\n").trimEnd()}\n`;
 }
 

@@ -23,6 +23,41 @@ function buildHeaders(profile) {
   };
 }
 
+const MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
+
+async function readCappedRaw(res, maxBytes) {
+  const reader = res.body?.getReader?.();
+  if (!reader) return null;
+  const decoder = new TextDecoder();
+  let result = "";
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (total + value.byteLength > maxBytes) {
+      reader.cancel().catch(() => {});
+      throw new Error(`Response body exceeded ${maxBytes} byte limit`);
+    }
+    total += value.byteLength;
+    result += decoder.decode(value, { stream: true });
+  }
+  result += decoder.decode();
+  return result;
+}
+
+// Falls back to res.text()/res.json() when there's no readable stream body to
+// cap (e.g. minimal fetch mocks in tests) — real fetch() responses always
+// have a streamable body, so the cap applies in production.
+async function readCappedText(res, maxBytes = MAX_RESPONSE_BYTES) {
+  const raw = await readCappedRaw(res, maxBytes);
+  return raw !== null ? raw : res.text();
+}
+
+async function readCappedJson(res, maxBytes = MAX_RESPONSE_BYTES) {
+  const raw = await readCappedRaw(res, maxBytes);
+  return raw !== null ? JSON.parse(raw) : res.json();
+}
+
 export function sanitizeError(error) {
   // Strip anything that could leak auth tokens from error messages
   const msg = error instanceof Error ? error.message : String(error);
@@ -142,17 +177,18 @@ export async function chatCompletion(profile, messages, opts = {}) {
       headers: buildHeaders(profile),
       body: JSON.stringify(body),
       signal,
+      redirect: "manual",
     });
 
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
+      const text = await readCappedText(res).catch(() => "");
       const err = new Error(`Chat completion failed (${res.status}): ${text}`);
       err.status = res.status;
       err.headers = res.headers;
       throw err;
     }
 
-    return res.json();
+    return readCappedJson(res);
   }, opts.signal, { timeoutMs: opts.timeoutMs });
 }
 
@@ -195,10 +231,11 @@ export async function* chatCompletionStream(profile, messages, opts = {}) {
     headers: buildHeaders(profile),
     body: JSON.stringify(body),
     signal: controller.signal,
+    redirect: "manual",
   });
 
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await readCappedText(res).catch(() => "");
     throw new Error(`Stream request failed (${res.status}): ${text}`);
   }
 
@@ -339,13 +376,14 @@ export async function listModels(profile) {
   const res = await globalThis.fetch(url, {
     method: "GET",
     headers: buildHeaders(profile),
+    redirect: "manual",
   });
 
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await readCappedText(res).catch(() => "");
     throw new Error(`List models failed (${res.status}): ${text}`);
   }
 
-  const body = await res.json();
+  const body = await readCappedJson(res);
   return (body.data || []).map((m) => m.id);
 }

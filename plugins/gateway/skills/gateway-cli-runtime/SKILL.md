@@ -49,6 +49,7 @@ Zero harness prompt convention:
 Dispatch invocation (dispatcher agent only):
 - `node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" dispatch [--plan FILE | --task PROMPT:PROFILE ...] [--harness claude|codex|zero] [--max-concurrency N] [--timeout MS] [--write|--no-write] [--cross-review PROFILE] [--fail-fast] [--dry-run] [--json]`
 - With `--harness zero`, every task profile must point at the URL of zero's single global provider; misaligned profiles are rejected pre-dispatch (exit 2), before dry-run and before any HTTP probe.
+- With `--harness codex`, dispatch does NOT fall back to claude if codex is missing — it preflight-fails (exit 2), unlike `task --harness codex`, which does fall back to claude for `claude-gateway` profiles. Fail-loud in dispatch applies to both codex and zero, not just zero.
 
 Status check:
 - `node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" status [job-id] [--all] [--json]`

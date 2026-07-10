@@ -678,9 +678,6 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── gateway-researcher.md        # Research/exploración (claude harness, read-only)
 │   │   └── gateway-dispatcher.md        # Forwarder de dispatch (thin, sin prompt-shaping)
 │   ├── hooks/hooks.json                 # SessionStart / SessionEnd / Stop
-│   ├── prompts/
-│   │   ├── adversarial-review.md        # Template prompt segunda pasada
-│   │   └── stop-review-gate.md
 │   ├── skills/
 │   │   ├── gateway-cli-runtime/SKILL.md # Contrato de runtime para gateway-rescue (cómo invocar gateway-companion.mjs)
 │   │   └── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio para agentes gateway-coder/debugger/reviewer/researcher
@@ -864,7 +861,7 @@ rm ~/.gateway-plugin/config.json
 
 MIT — ver [LICENSE](LICENSE).
 
-**Versión actual:** v0.5.0
+**Versión actual:** v0.5.1
 
 ## Créditos
 

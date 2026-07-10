@@ -19,8 +19,14 @@ export function loadConfig() {
 }
 
 export function saveConfig(config) {
-  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+  const dir = path.dirname(CONFIG_PATH);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // mkdirSync's mode only applies to newly-created dirs — chmod explicitly so
+  // installs upgrading from a version that created this dir with looser
+  // permissions get tightened too.
+  fs.chmodSync(dir, 0o700);
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  fs.chmodSync(CONFIG_PATH, 0o600);
 }
 
 export function resolveProfile(name, config) {
@@ -70,6 +76,8 @@ export function validateProfile(profile) {
   }
   if (!profile.baseUrl) {
     errors.push("baseUrl is required.");
+  } else if (/["'`\r\n\0]/.test(profile.baseUrl)) {
+    errors.push(`baseUrl must not contain quotes, backticks, newlines, or null bytes (got "${profile.baseUrl}").`);
   } else {
     let parsed;
     try {

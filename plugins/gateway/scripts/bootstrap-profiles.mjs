@@ -44,6 +44,10 @@ if (!url || !apiKey) {
   process.exit(1);
 }
 
+if (args.apiKey) {
+  console.error("[gateway] Warning: --api-key is visible in process listings (ps, /proc/<pid>/cmdline) for the life of this command. Prefer GATEWAY_API_KEY=... instead.");
+}
+
 const PROFILES = [
   { name: "minimax",       defaultModel: "minimax-m3" },
   { name: "deepseek-pro",  defaultModel: "deepseek-v4-pro" },

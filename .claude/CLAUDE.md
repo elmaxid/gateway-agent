@@ -44,11 +44,12 @@ node plugins/gateway/scripts/gateway-companion.mjs setup test --profile profile-
 
 | Tarea | Herramienta |
 |-------|-------------|
+| Research / investigación / spec / planes | `Task(research-planner)` — model Opus fijo, no gastar tokens de gateway ahí |
 | Code review antes de commit | `/gateway:review --include-diff` |
 | Review 2-fases (spec + adversarial) | `/gateway:staged-review --include-diff` |
 | Debate arquitectura / decisión técnica | `/gateway:debate --include-diff` |
 | Revisión adversarial (2-pass false-positive filter) | `/gateway:adversarial-review --include-diff` |
-| Implementación / feature nueva | `gateway:gateway-coder` (codex harness) |
+| Implementación / feature nueva (spec ya cerrado) | `gateway:gateway-coder` (codex harness) |
 | Debug / investigación de bug | `gateway:gateway-debugger` (codex harness) |
 | Exploración de código | `gateway:gateway-researcher` |
 | Window transfer a gateway model | `/gateway:transfer` |

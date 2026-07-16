@@ -77,6 +77,7 @@ import {
   runCrossReview,
   renderDispatchOutput,
 } from "./lib/dispatch.mjs";
+import { getVersionInfo } from "./lib/version-info.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -105,7 +106,8 @@ function printUsage() {
       "  gateway-companion transfer [--profile NAME] [--turns N] [prompt]",
       "  gateway-companion status [job-id] [--all] [--json]",
       "  gateway-companion result [job-id] [--json]",
-      "  gateway-companion cancel [job-id] [--json]"
+      "  gateway-companion cancel [job-id] [--json]",
+      "  gateway-companion version [--json]"
     ].join("\n")
   );
 }
@@ -213,6 +215,28 @@ function extractRepeatableFlags(argv) {
 // Setup subcommand
 // ---------------------------------------------------------------------------
 
+// Static warning (plan §13.1): resolveTaskProfile() already throws at
+// task/dispatch time for kind "openai-chat", but nothing said so at
+// configure time. Checks the FULL resulting config (not just the profile
+// just touched) so a pre-existing misconfigured role also gets flagged.
+function warnIncompatibleTaskKinds(config) {
+  const roles = [
+    ["defaultProfile", config.defaultProfile],
+    ["taskProfile", config.taskProfile]
+  ];
+  const warned = new Set();
+  for (const [, profileName] of roles) {
+    if (!profileName || warned.has(profileName)) continue;
+    const profile = config.profiles[profileName];
+    if (profile && profile.kind === "openai-chat") {
+      warned.add(profileName);
+      console.error(
+        `Warning: profile "${profileName}" (kind openai-chat) will be rejected by task/dispatch in v0.5.x; review works. See setup set-task-profile.`
+      );
+    }
+  }
+}
+
 async function handleSetup(argv) {
   const [action, ...rest] = argv;
 
@@ -266,6 +290,7 @@ async function handleSetup(argv) {
       }
       saveConfig(config);
       console.log(`Profile "${options.profile}" added.`);
+      warnIncompatibleTaskKinds(config);
       break;
     }
 
@@ -324,6 +349,7 @@ async function handleSetup(argv) {
       config.defaultProfile = options.profile;
       saveConfig(config);
       console.log(`Default profile set to "${options.profile}".`);
+      warnIncompatibleTaskKinds(config);
       break;
     }
 
@@ -1818,6 +1844,41 @@ async function handleTransfer(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// Version subcommand
+// ---------------------------------------------------------------------------
+
+// pluginRoot is injectable (defaults to ROOT_DIR, the real plugin dir
+// resolved from import.meta.url) so tests can point it at a fixture without
+// spawning a subprocess — see tests/version.test.mjs.
+export function executeVersion({ pluginRoot = ROOT_DIR } = {}) {
+  const info = getVersionInfo({ pluginRoot });
+  if (info.commitSource === "unknown") {
+    console.error(
+      `[gateway] Warning: could not determine build commit (no build-info.json, and pluginRoot is not a git checkout). Reporting commit as "unknown".`
+    );
+  }
+  return info;
+}
+
+async function handleVersion(argv) {
+  const { options } = parseArgs(argv, { booleanOptions: ["json"] });
+  const info = executeVersion();
+  if (options.json) {
+    outputResult(info, true);
+  } else {
+    console.log(
+      [
+        `pluginVersion: ${info.pluginVersion}`,
+        `commit: ${info.commit}`,
+        `commitSource: ${info.commitSource}`,
+        `pluginRoot: ${info.pluginRoot}`,
+        `node: ${info.node}`
+      ].join("\n")
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Job infrastructure helpers
 // ---------------------------------------------------------------------------
 
@@ -1908,7 +1969,8 @@ const SUBCOMMANDS = {
   transfer: handleTransfer,
   status: handleStatus,
   result: handleResult,
-  cancel: handleCancel
+  cancel: handleCancel,
+  version: handleVersion
 };
 
 async function main() {

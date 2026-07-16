@@ -9,6 +9,9 @@
   "bin": {
     "gateway-companion": "plugins/gateway/scripts/gateway-companion.mjs"
   },
+  "scripts": {
+    "build-info": "node scripts/make-build-info.mjs"
+  },
   "keywords": [
     "claude-code",
     "plugin",

@@ -32,6 +32,7 @@ import {
   sanitizeBaseUrl,
   getPluginVersionInfo,
   redactMatrixOutput,
+  resolveGatewayInvocation,
 } from "../scripts/baseline-capture.mjs";
 
 function mkTmp(prefix) {
@@ -216,5 +217,47 @@ describe("redactMatrixOutput", () => {
     assert.equal(lines.length, 21, "20 kept lines + 1 omitted-marker line");
     assert.equal(lines[19], "line 20");
     assert.equal(lines[20], "[... 20 lines omitted]");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. --run-matrix invocation prefers the inventoried install's script (fix #5)
+// ---------------------------------------------------------------------------
+
+describe("resolveGatewayInvocation", () => {
+  it("prefers node <pluginRoot>/scripts/gateway-companion.mjs over a PATH bin", () => {
+    // On a workstation with several installs, PATH may resolve a DIFFERENT
+    // install than the one this capture inventoried — so the pinned pluginRoot
+    // script must win over the PATH bin regardless of PATH contents.
+    const tmp = mkTmp("baseline-invocation-");
+    try {
+      const scriptDir = path.join(tmp, "scripts");
+      fs.mkdirSync(scriptDir, { recursive: true });
+      const scriptPath = path.join(scriptDir, "gateway-companion.mjs");
+      fs.writeFileSync(scriptPath, "// fixture\n");
+
+      const invocation = resolveGatewayInvocation({ pluginRoot: tmp });
+      assert.equal(invocation.cmd, process.execPath, "must run the pinned script via node");
+      assert.deepEqual(invocation.baseArgs, [scriptPath], "must target the inventoried install's script");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when the pluginRoot has no script and no PATH bin is available", () => {
+    const tmp = mkTmp("baseline-invocation-none-");
+    try {
+      // No scripts/ dir under this pluginRoot. With gateway-companion almost
+      // certainly absent from PATH in the test env, resolution yields null.
+      const invocation = resolveGatewayInvocation({ pluginRoot: tmp });
+      if (invocation !== null) {
+        // gateway-companion happens to be installed on PATH in this env — the
+        // only acceptable non-null result is the PATH bin as a last resort.
+        assert.equal(invocation.cmd, "gateway-companion");
+        assert.deepEqual(invocation.baseArgs, []);
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

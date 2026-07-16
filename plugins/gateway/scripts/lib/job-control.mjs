@@ -98,6 +98,27 @@ function applyReconcilePatch(workspaceRoot, patch) {
   upsertJob(workspaceRoot, patch);
 }
 
+/**
+ * Reconcile dead/orphaned jobs on-demand (no daemon): compute the "failed"
+ * patches via the pure reconcileStaleJobs, persist each to disk, and return the
+ * in-memory job list with those patches applied. Shared by every read path
+ * (`status`, `status <id>`, `result <id>`) so a dead worker's job never reads
+ * as running/queued from any of them.
+ */
+function reconcileJobsOnRead(workspaceRoot, jobs, options = {}) {
+  const patches = reconcileStaleJobs(jobs, {
+    isPidAlive: options.isPidAlive,
+    now: options.now,
+    staleMs: options.staleMs
+  });
+  const patchById = new Map();
+  for (const patch of patches) {
+    applyReconcilePatch(workspaceRoot, patch);
+    patchById.set(patch.id, patch);
+  }
+  return jobs.map((job) => (patchById.has(job.id) ? { ...job, ...patchById.get(job.id) } : job));
+}
+
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
 }
@@ -307,18 +328,7 @@ export function buildStatusSnapshot(cwd, options = {}) {
   // Reconcile dead/orphaned background jobs on-demand (no daemon) so `status`
   // never reports a job as running/queued when its worker is gone. Runs over
   // all jobs (not just this session's) so cross-session cleanup happens too.
-  const allJobs = listJobs(workspaceRoot);
-  const patches = reconcileStaleJobs(allJobs, {
-    isPidAlive: options.isPidAlive,
-    now: options.now,
-    staleMs: options.staleMs
-  });
-  const patchById = new Map();
-  for (const patch of patches) {
-    applyReconcilePatch(workspaceRoot, patch);
-    patchById.set(patch.id, patch);
-  }
-  const reconciledJobs = allJobs.map((job) => (patchById.has(job.id) ? { ...job, ...patchById.get(job.id) } : job));
+  const reconciledJobs = reconcileJobsOnRead(workspaceRoot, listJobs(workspaceRoot), options);
   const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(reconciledJobs, options));
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
@@ -346,7 +356,10 @@ export function buildStatusSnapshot(cwd, options = {}) {
 
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  // Reconcile on-demand so `status <id>` reports a dead worker's job as failed
+  // instead of a stuck running/queued (parity with bare `status`).
+  const reconciledJobs = reconcileJobsOnRead(workspaceRoot, listJobs(workspaceRoot), options);
+  const jobs = sortJobsNewestFirst(reconciledJobs);
   const selected = matchJobReference(jobs, reference);
   if (!selected) {
     throw new Error(`No job found for "${reference}". Run /gateway:status to inspect known jobs.`);
@@ -358,9 +371,12 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   };
 }
 
-export function resolveResultJob(cwd, reference) {
+export function resolveResultJob(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot)));
+  // Reconcile on-demand so `result <id>` treats a dead worker's job as a
+  // finished (failed) result instead of throwing "still running" forever.
+  const reconciledJobs = reconcileJobsOnRead(workspaceRoot, listJobs(workspaceRoot), options);
+  const jobs = sortJobsNewestFirst(reference ? reconciledJobs : filterJobsForCurrentSession(reconciledJobs));
   const selected = matchJobReference(
     jobs,
     reference,

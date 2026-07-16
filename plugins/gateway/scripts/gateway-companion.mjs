@@ -826,7 +826,7 @@ async function handleReview(argv) {
         timeoutMs,
         onProgress: progress
       }),
-    { json: options.json }
+    { json: options.json, secrets: collectConfigSecrets(config) }
   );
 }
 
@@ -953,7 +953,7 @@ async function handleAdversarialReview(argv) {
         timeoutMs,
         onProgress: progress
       }),
-    { json: options.json }
+    { json: options.json, secrets: collectConfigSecrets(config) }
   );
 }
 
@@ -1163,7 +1163,7 @@ async function handleTask(argv) {
         jobTitle: taskTitle,
         onProgress: progress
       }),
-    { json: options.json }
+    { json: options.json, secrets: collectConfigSecrets(config) }
   );
 }
 
@@ -1294,7 +1294,7 @@ async function handleTaskWorker(argv) {
         jobTitle: storedJob.title || "Gateway Task",
         onProgress: progress
       }),
-    { logFile }
+    { logFile, secrets: collectConfigSecrets(config) }
   );
 }
 
@@ -1914,7 +1914,10 @@ async function runForegroundCommand(job, runner, options = {}) {
     logFile: options.logFile,
     stderr: !options.json
   });
-  const execution = await runTrackedJob(job, () => runner(progress), { logFile });
+  // Redact any credentialed material from a thrown error before it is persisted
+  // and surfaced by `result`. Foreground progress output stays byte-identical
+  // (createTrackedProgress is intentionally not given secrets here).
+  const execution = await runTrackedJob(job, () => runner(progress), { logFile, secrets: options.secrets });
   outputResult(options.json ? execution.payload : execution.rendered, options.json);
   if (execution.exitStatus !== 0) {
     process.exitCode = execution.exitStatus;

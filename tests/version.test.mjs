@@ -93,23 +93,31 @@ describe("getVersionInfo — build-info.json present", () => {
 // 2. no build-info.json, real git checkout
 // ---------------------------------------------------------------------------
 
-describe("getVersionInfo — no build-info.json, git checkout", () => {
-  it("falls back to `git rev-parse HEAD`, commitSource 'git'", () => {
-    // Uses the real plugins/gateway dir in THIS repo: a real plugin.json,
-    // no build-info.json (nothing in this task writes one there), inside a
-    // real git checkout with commits.
-    assert.ok(
-      !fs.existsSync(path.join(REAL_PLUGIN_ROOT, ".claude-plugin", "build-info.json")),
-      "precondition: no build-info.json should exist in the real plugin dir"
-    );
-
-    const expected = spawnSync("git", ["rev-parse", "HEAD"], { cwd: REAL_PLUGIN_ROOT, encoding: "utf8" });
-    assert.equal(expected.status, 0, "precondition: repo must be a git checkout with a HEAD commit");
+describe("getVersionInfo — real plugin root (git checkout or release build)", () => {
+  it("resolves a 40-hex commit from git rev-parse HEAD, or from build-info.json when a release build wrote one", () => {
+    // Uses the real plugins/gateway dir in THIS repo. It normally has no
+    // build-info.json (git fallback), but the release flow (`npm run
+    // build-info`) writes a gitignored one — so accept either resolution
+    // rather than depending on that file's absence.
+    const buildInfoPath = path.join(REAL_PLUGIN_ROOT, ".claude-plugin", "build-info.json");
 
     const info = getVersionInfo({ pluginRoot: REAL_PLUGIN_ROOT });
-    assert.equal(info.commit, expected.stdout.trim());
-    assert.equal(info.commitSource, "git");
     assert.match(info.commit, /^[0-9a-f]{40}$/);
+    assert.ok(
+      ["git", "build-info"].includes(info.commitSource),
+      `expected commitSource git|build-info, got ${info.commitSource}`
+    );
+
+    if (fs.existsSync(buildInfoPath)) {
+      const buildInfo = JSON.parse(fs.readFileSync(buildInfoPath, "utf8"));
+      assert.equal(info.commitSource, "build-info");
+      assert.equal(info.commit, buildInfo.commit);
+    } else {
+      const expected = spawnSync("git", ["rev-parse", "HEAD"], { cwd: REAL_PLUGIN_ROOT, encoding: "utf8" });
+      assert.equal(expected.status, 0, "precondition: repo must be a git checkout with a HEAD commit");
+      assert.equal(info.commitSource, "git");
+      assert.equal(info.commit, expected.stdout.trim());
+    }
 
     const pluginJson = JSON.parse(
       fs.readFileSync(path.join(REAL_PLUGIN_ROOT, ".claude-plugin", "plugin.json"), "utf8")
@@ -164,7 +172,7 @@ describe("executeVersion — stderr warning on unknown commit", () => {
     }
   });
 
-  it("does NOT warn when commitSource is resolved (git)", () => {
+  it("does NOT warn when commitSource is resolved (git or build-info)", () => {
     const originalError = console.error;
     const captured = [];
     console.error = (...args) => captured.push(args.join(" "));
@@ -174,7 +182,10 @@ describe("executeVersion — stderr warning on unknown commit", () => {
     } finally {
       console.error = originalError;
     }
-    assert.equal(info.commitSource, "git");
+    assert.ok(
+      ["git", "build-info"].includes(info.commitSource),
+      `expected a resolved commitSource, got ${info.commitSource}`
+    );
     assert.equal(captured.length, 0, `expected no stderr warning, got: ${JSON.stringify(captured)}`);
   });
 });
@@ -362,7 +373,10 @@ describe("gateway-companion version (CLI)", () => {
       );
       assert.equal(payload.pluginVersion, pluginJson.version);
       assert.match(payload.commit, /^[0-9a-f]{40}$/);
-      assert.equal(payload.commitSource, "git");
+      assert.ok(
+        ["git", "build-info"].includes(payload.commitSource),
+        `expected commitSource git|build-info, got ${payload.commitSource}`
+      );
       assert.equal(payload.pluginRoot, REAL_PLUGIN_ROOT);
       assert.equal(payload.node, process.version);
     } finally {

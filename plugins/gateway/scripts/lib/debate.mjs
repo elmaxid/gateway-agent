@@ -1,6 +1,6 @@
 // Multi-model debate engine — HTTP-pure, no subprocesses.
 // Flow: parallel positions → cross-critique → synthesis.
-import { chatCompletion, sanitizeError, testConnectivity } from "./api-client.mjs";
+import { chatCompletion, sanitizeError, profileSecrets, testConnectivity } from "./api-client.mjs";
 import { loadConfig, resolveProfile } from "./config.mjs";
 import { Semaphore, normalizeBaseUrl } from "./concurrency.mjs";
 
@@ -14,7 +14,7 @@ async function safeCompletion(profile, messages, label, onProgress, callOpts = {
   try {
     return extractResponseText(await chatCompletion(profile, messages, { timeoutMs }));
   } catch (err) {
-    const msg = sanitizeError(err);
+    const msg = sanitizeError(err, profileSecrets(profile));
     console.error(`[debate] ${label} failed: ${msg}`);
     if (onProgress) onProgress({ type: "error", label, message: msg });
     return null;

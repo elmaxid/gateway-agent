@@ -41,6 +41,22 @@ describe("redactText", () => {
     const out = redactText("contact ops@example.com for access");
     assert.equal(out, "contact ops@example.com for access");
   });
+
+  it("does not garble non-URL '?' in prose/code (optional chaining, ternary, regex)", () => {
+    // The query rule must be anchored to URL context — a bare '?' in streamed
+    // model stdout (optional chaining, ternaries, regex literals) must survive
+    // untouched, or job logs / status previews become unreadable.
+    assert.equal(redactText("const v = foo?.bar;"), "const v = foo?.bar;");
+    assert.equal(redactText("result = x ? y : z"), "result = x ? y : z");
+    assert.equal(redactText("match against /regex?/ pattern"), "match against /regex?/ pattern");
+  });
+
+  it("still redacts a real URL query even amid prose with a bare '?'", () => {
+    const out = redactText("see https://host/v1/chat?api_key=xyz then foo?.bar next");
+    assert.ok(!out.includes("api_key=xyz"), "URL query must still be masked");
+    assert.match(out, /https:\/\/host\/v1\/chat\?\[REDACTED\]/);
+    assert.match(out, /foo\?\.bar/, "adjacent non-URL '?.' must survive");
+  });
 });
 
 describe("truncateOutput", () => {

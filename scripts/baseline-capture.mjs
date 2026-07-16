@@ -31,7 +31,12 @@
 //                   auto-discovering every installation on this workstation.
 //   --run-matrix    Additionally smoke-test the real gateway-companion review
 //                   and task commands against configured profiles. This
-//                   makes real network calls and consumes model tokens.
+//                   makes real network calls and consumes model tokens. The
+//                   matrix runs the inventoried install's own
+//                   scripts/gateway-companion.mjs (explicit --plugin-root, else
+//                   the discovered installation), falling back to a PATH bin
+//                   only when that script is absent — so the smoke-tests and
+//                   the reported provenance always describe the same install.
 // ---------------------------------------------------------------------------
 
 import fs from "node:fs";
@@ -422,21 +427,25 @@ export function captureEnvironment() {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve how to invoke gateway-companion: prefer the `gateway-companion` bin
- * on PATH (package.json registers it there); fall back to
- * `node <pluginRoot>/scripts/gateway-companion.mjs` when a pluginRoot with
- * that script is known. Returns null if neither is available.
+ * Resolve how to invoke gateway-companion. Prefer `node
+ * <pluginRoot>/scripts/gateway-companion.mjs` for the pluginRoot this capture
+ * inventoried (an explicit --plugin-root, else the discovered installation) so
+ * the smoke-tests exercise the SAME install whose provenance is reported. Fall
+ * back to a `gateway-companion` bin on PATH only as a last resort — on a
+ * workstation with multiple installs PATH may point at a different one than we
+ * inventoried, which would make the matrix results and the reported provenance
+ * disagree. Returns null if neither is available.
  */
 export function resolveGatewayInvocation({ pluginRoot } = {}) {
-  const probe = spawnSync("gateway-companion", ["--help"], { encoding: "utf8", timeout: BINARY_PROBE_TIMEOUT_MS });
-  if (!(probe.error && probe.error.code === "ENOENT")) {
-    return { cmd: "gateway-companion", baseArgs: [] };
-  }
   if (pluginRoot) {
     const scriptPath = path.join(pluginRoot, "scripts", "gateway-companion.mjs");
     if (fs.existsSync(scriptPath)) {
       return { cmd: process.execPath, baseArgs: [scriptPath] };
     }
+  }
+  const probe = spawnSync("gateway-companion", ["--help"], { encoding: "utf8", timeout: BINARY_PROBE_TIMEOUT_MS });
+  if (!(probe.error && probe.error.code === "ENOENT")) {
+    return { cmd: "gateway-companion", baseArgs: [] };
   }
   return null;
 }

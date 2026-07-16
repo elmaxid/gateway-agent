@@ -2,7 +2,7 @@ import fs from "node:fs";
 import process from "node:process";
 
 import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
-import { redactText } from "./redaction.mjs";
+import { redactText, truncateOutput } from "./redaction.mjs";
 
 export const SESSION_ID_ENV = "GATEWAY_COMPANION_SESSION_ID";
 
@@ -201,7 +201,13 @@ export async function runTrackedJob(job, runner, options = {}) {
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
     return execution;
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    // A thrown provider error can carry a credentialed URL or key. This message
+    // is persisted to the job file/index and surfaced agent-visible by `result`,
+    // so redact+truncate it here — the redaction layer isn't otherwise on this
+    // path. redactText with `secrets ?? []` still applies the Bearer/URL/query
+    // rules even when no config secrets are threaded in.
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = truncateOutput(redactText(rawMessage, options.secrets ?? []));
     const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
     const completedAt = nowIso();
     writeJobFile(job.workspaceRoot, job.id, {

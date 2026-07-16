@@ -80,6 +80,50 @@ describe("testConnectivity error wrapping", () => {
 });
 
 // ---------------------------------------------------------------------------
+// sanitizeError - masks literal profile secrets when passed (fix #4)
+// ---------------------------------------------------------------------------
+
+describe("sanitizeError with profile secrets", () => {
+  it("masks a literal secret with no Bearer prefix when secrets are provided", () => {
+    const secret = "sk-plant-no-bearer-42";
+    const masked = apiClient.sanitizeError(new Error(`401 Unauthorized: ${secret}`), [secret]);
+    assert.ok(!masked.includes(secret), "literal secret must be scrubbed");
+    assert.match(masked, /\[REDACTED\]/);
+  });
+
+  it("is backward compatible with a single argument (Bearer still masked)", () => {
+    const out = apiClient.sanitizeError(new Error("Authorization: Bearer sk-abc-legacy"));
+    assert.ok(!out.includes("sk-abc-legacy"));
+    assert.match(out, /Bearer \[REDACTED\]/);
+  });
+});
+
+describe("testConnectivity masks the profile secret in an error body", () => {
+  it("masks a profile secret echoed verbatim in a 401 body (no Bearer prefix)", async () => {
+    const secret = "sk-echo-plant-999";
+    const server = http.createServer((req, res) => {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `invalid api key: ${secret}` }));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    const profile = {
+      baseUrl: `http://127.0.0.1:${port}`,
+      defaultModel: "test-model",
+      apiKey: secret,
+    };
+    try {
+      const result = await apiClient.testConnectivity(profile, { timeoutMs: 2000 });
+      assert.strictEqual(result.ok, false);
+      assert.ok(!result.error.includes(secret),
+        `profile secret must not leak in the connectivity error, got: ${result.error}`);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // runDirectReview - validates message structure (fails on network, not shape)
 // ---------------------------------------------------------------------------
 

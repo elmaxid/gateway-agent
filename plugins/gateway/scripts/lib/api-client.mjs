@@ -60,12 +60,25 @@ async function readCappedJson(res, maxBytes = MAX_RESPONSE_BYTES) {
   return raw !== null ? JSON.parse(raw) : res.json();
 }
 
-export function sanitizeError(error) {
+/**
+ * Collect a single profile's literal secret values (apiKey/authToken) for
+ * scrubbing. A 401/403 body can echo the raw key with no `Bearer` prefix, so
+ * the generic Bearer/URL rules alone can't mask it — the caller must pass the
+ * profile's own secrets to sanitizeError.
+ * @param {{apiKey?: string, authToken?: string}} [profile]
+ * @returns {string[]}
+ */
+export function profileSecrets(profile) {
+  return [profile?.apiKey, profile?.authToken].filter((s) => typeof s === "string" && s.length > 0);
+}
+
+export function sanitizeError(error, secrets = []) {
   // Strip anything that could leak auth tokens/credentials from error messages.
-  // Delegates to the shared redactor. No config secrets here — this lib has no
-  // access to them; callers that do can route through redaction.mjs directly.
+  // Delegates to the shared redactor. Callers with access to profile secrets
+  // pass them so a literal key echoed in a response body (no `Bearer` prefix)
+  // is masked too; with no secrets, the Bearer/URL/query rules still apply.
   const msg = error instanceof Error ? error.message : String(error);
-  return redactText(msg);
+  return redactText(msg, secrets);
 }
 
 export function extractJson(content) {
@@ -366,7 +379,7 @@ export async function testConnectivity(profile, opts = {}) {
       ok: false,
       latencyMs: Date.now() - start,
       model: null,
-      error: sanitizeError(err),
+      error: sanitizeError(err, profileSecrets(profile)),
     };
   }
 }

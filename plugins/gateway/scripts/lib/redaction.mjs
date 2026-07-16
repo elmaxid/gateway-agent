@@ -48,8 +48,11 @@ function escapeRegExp(str) {
  *  - `Bearer <token>` headers (preserves prior sanitizeError behavior).
  *  - Each literal config secret (regex-escaped) → `[REDACTED]`.
  *  - Credentials embedded in URLs: `scheme://user:pass@host` → `scheme://[REDACTED]@host`.
- *  - URL query strings: `?anything` → `?[REDACTED]` (gateway endpoints never
- *    need the query for diagnosis).
+ *  - URL query strings: the `?query` of a `scheme://host[/path]?query` token →
+ *    `?[REDACTED]` (gateway endpoints never need the query for diagnosis). The
+ *    rule is anchored to URL context so a bare `?` in prose/code — optional
+ *    chaining (`foo?.bar`), ternaries (`x ? y : z`), regex literals — is left
+ *    intact, keeping streamed model output readable in job logs / status.
  * @param {string} text
  * @param {string[]} [secrets] literal secrets to scrub (e.g. collectConfigSecrets)
  * @returns {string}
@@ -64,7 +67,9 @@ export function redactText(text, secrets = []) {
     out = out.replace(new RegExp(escapeRegExp(secret), "g"), "[REDACTED]");
   }
   out = out.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/\s@]+@/g, "$1[REDACTED]@");
-  out = out.replace(/\?[^\s#]+/g, "?[REDACTED]");
+  // Only redact a query string that belongs to a URL (scheme://host[/path]?query),
+  // not any stray `?` in prose/code.
+  out = out.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s?#]+)\?[^\s#]+/g, "$1?[REDACTED]");
   return out;
 }
 

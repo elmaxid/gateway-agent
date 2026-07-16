@@ -32,10 +32,12 @@ import {
   reconcileStaleJobs,
   DEFAULT_STALE_JOB_MS,
   readStoredJob,
-  buildStatusSnapshot
+  buildStatusSnapshot,
+  buildSingleJobSnapshot,
+  resolveResultJob
 } from "../plugins/gateway/scripts/lib/job-control.mjs";
 import { launchBackgroundTaskWorker } from "../plugins/gateway/scripts/lib/background-launch.mjs";
-import { createProgressReporter, nowIso } from "../plugins/gateway/scripts/lib/tracked-jobs.mjs";
+import { createProgressReporter, nowIso, runTrackedJob } from "../plugins/gateway/scripts/lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "../plugins/gateway/scripts/lib/workspace.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -350,6 +352,96 @@ describe("reconcileStaleJobs", () => {
         "reaped job should no longer be reported as running"
       );
     });
+  });
+});
+
+// --------------------------------------------------------------------------
+// 5b: single-job status / result reconcile a dead-pid job (fix #2)
+// --------------------------------------------------------------------------
+
+describe("single-job status/result reconciliation (fix #2)", () => {
+  function seedDeadRunningJob(workspaceRoot, id) {
+    const rec = {
+      id,
+      status: "running",
+      phase: "running",
+      pid: 999999,
+      title: "Gateway Task",
+      jobClass: "task",
+      kind: "task",
+      logFile: null,
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
+    writeJobFile(workspaceRoot, id, rec);
+    upsertJob(workspaceRoot, rec);
+  }
+
+  it("buildSingleJobSnapshot reaps a dead running job to 'failed' (was stuck running)", () => {
+    withTempState(({ workspaceRoot, wsDir }) => {
+      const id = "single-dead-running";
+      seedDeadRunningJob(workspaceRoot, id);
+
+      const snapshot = buildSingleJobSnapshot(wsDir, id, { isPidAlive: () => false });
+      assert.equal(snapshot.job.status, "failed", "single-job snapshot must reconcile the dead job");
+      assert.ok(snapshot.job.errorMessage && snapshot.job.errorMessage.length > 0);
+
+      const stored = readStoredJob(workspaceRoot, id);
+      assert.equal(stored.status, "failed", "reconcile patch must be applied to disk");
+    });
+  });
+
+  it("resolveResultJob treats a dead running job as finished ('failed'), not still-running", () => {
+    withTempState(({ workspaceRoot, wsDir }) => {
+      const id = "result-dead-running";
+      seedDeadRunningJob(workspaceRoot, id);
+
+      // Before the fix this threw "Job ... is still running"; after, the job is
+      // reconciled to failed and returned as a finished result.
+      const { job } = resolveResultJob(wsDir, id, { isPidAlive: () => false });
+      assert.equal(job.status, "failed");
+
+      const stored = readStoredJob(workspaceRoot, id);
+      assert.equal(stored.status, "failed", "reconcile patch must be applied to disk");
+    });
+  });
+});
+
+// --------------------------------------------------------------------------
+// 5c: runTrackedJob redacts the persisted errorMessage (fix #3)
+// --------------------------------------------------------------------------
+
+describe("runTrackedJob — persisted errorMessage redaction (fix #3)", () => {
+  it("redacts a planted secret from the job file errorMessage before persisting", async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-tj-data-"));
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-tj-ws-"));
+    const prev = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = dataDir;
+    const workspaceRoot = resolveWorkspaceRoot(wsDir);
+    try {
+      const job = makeJob(workspaceRoot, "task-throw-secret");
+      await assert.rejects(
+        runTrackedJob(
+          job,
+          () => {
+            throw new Error("provider error talking to Bearer sk-THROW-777 key=sk-THROW-777");
+          },
+          { secrets: ["sk-THROW-777"] }
+        ),
+        /THROW/ // the re-thrown error propagates as-is; only the PERSISTED copy is redacted
+      );
+
+      const stored = readStoredJob(workspaceRoot, job.id);
+      assert.equal(stored.status, "failed");
+      assert.ok(!stored.errorMessage.includes("sk-THROW-777"),
+        `secret must not reach the persisted job file, got: ${stored.errorMessage}`);
+      assert.match(stored.errorMessage, /\[REDACTED\]/);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+      else process.env.CLAUDE_PLUGIN_DATA = prev;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+      fs.rmSync(wsDir, { recursive: true, force: true });
+    }
   });
 });
 

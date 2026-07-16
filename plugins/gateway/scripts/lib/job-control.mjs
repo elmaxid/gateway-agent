@@ -1,11 +1,102 @@
 import fs from "node:fs";
 
-import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
+import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
+
+// A background worker that dies (crash, OOM-kill, host reboot) before writing a
+// terminal status leaves its job stuck in running/queued/starting. Reconciliation
+// detects those on-demand when the user runs `status` — there is no daemon.
+export const DEFAULT_STALE_JOB_MS = 5 * 60 * 1000;
+
+// Known limitation (accepted for this hotfix): kill(pid, 0) cannot tell a live
+// worker apart from an unrelated process that reused a recycled pid. A reused
+// pid can make a dead worker look alive (job left running) — the age threshold
+// mitigates the no-pid case; a full fix (heartbeat) is deferred to v0.6.
+function defaultIsPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM = the process exists but we may not signal it → treat as alive.
+    return err && err.code === "EPERM";
+  }
+}
+
+function makeFailedPatch(job, reason, now) {
+  return {
+    id: job.id,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    errorMessage: reason,
+    completedAt: new Date(now).toISOString()
+  };
+}
+
+/**
+ * Pure: given the current jobs, return the list of "failed" patches for any job
+ * whose worker is gone. Never mutates its input or touches disk — the caller
+ * applies the patches.
+ *
+ * @param {object[]} jobs
+ * @param {{isPidAlive?: (pid:number)=>boolean, now?: number, staleMs?: number}} [opts]
+ * @returns {Array<{id:string,status:"failed",phase:"failed",pid:null,errorMessage:string,completedAt:string}>}
+ */
+export function reconcileStaleJobs(jobs, opts = {}) {
+  const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const staleMs = Number.isFinite(opts.staleMs) ? opts.staleMs : DEFAULT_STALE_JOB_MS;
+
+  const patches = [];
+  for (const job of jobs ?? []) {
+    if (!job || typeof job !== "object") {
+      continue;
+    }
+    const pid = Number(job.pid);
+    const hasPid = Number.isInteger(pid) && pid > 0;
+
+    if (job.status === "running") {
+      // runTrackedJob always records pid = process.pid, so a running job with a
+      // dead pid means the worker process is gone.
+      if (hasPid && !isPidAlive(pid)) {
+        patches.push(makeFailedPatch(job, `worker process died (pid ${pid} not found)`, now));
+      }
+      continue;
+    }
+
+    if (job.status === "starting" || job.status === "queued") {
+      if (hasPid) {
+        if (!isPidAlive(pid)) {
+          patches.push(makeFailedPatch(job, `worker process is gone before it started running (pid ${pid} not found)`, now));
+        }
+        continue;
+      }
+      // No pid recorded (spawn never confirmed): only reap once it is clearly
+      // stale, so we don't race a worker that is mid-launch.
+      const timestamp = Date.parse(job.updatedAt ?? job.createdAt ?? "");
+      if (Number.isFinite(timestamp) && now - timestamp > staleMs) {
+        const ageSeconds = Math.round((now - timestamp) / 1000);
+        patches.push(makeFailedPatch(job, `worker never started (no pid, stale for ${ageSeconds}s)`, now));
+      }
+    }
+  }
+  return patches;
+}
+
+function applyReconcilePatch(workspaceRoot, patch) {
+  const existing = readStoredJob(workspaceRoot, patch.id);
+  if (existing) {
+    writeJobFile(workspaceRoot, patch.id, { ...existing, ...patch });
+  }
+  upsertJob(workspaceRoot, patch);
+}
 
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
@@ -212,7 +303,23 @@ function matchJobReference(jobs, reference, predicate = () => true) {
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
-  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
+
+  // Reconcile dead/orphaned background jobs on-demand (no daemon) so `status`
+  // never reports a job as running/queued when its worker is gone. Runs over
+  // all jobs (not just this session's) so cross-session cleanup happens too.
+  const allJobs = listJobs(workspaceRoot);
+  const patches = reconcileStaleJobs(allJobs, {
+    isPidAlive: options.isPidAlive,
+    now: options.now,
+    staleMs: options.staleMs
+  });
+  const patchById = new Map();
+  for (const patch of patches) {
+    applyReconcilePatch(workspaceRoot, patch);
+    patchById.set(patch.id, patch);
+  }
+  const reconciledJobs = allJobs.map((job) => (patchById.has(job.id) ? { ...job, ...patchById.get(job.id) } : job));
+  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(reconciledJobs, options));
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import process from "node:process";
 
 import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import { redactText } from "./redaction.mjs";
 
 export const SESSION_ID_ENV = "GATEWAY_COMPANION_SESSION_ID";
 
@@ -127,19 +128,27 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
   };
 }
 
-export function createProgressReporter({ stderr = false, logFile = null, onEvent = null } = {}) {
+export function createProgressReporter({ stderr = false, logFile = null, onEvent = null, secrets = null } = {}) {
   if (!stderr && !logFile && !onEvent) {
     return null;
   }
 
+  // Harness progress (message/stderr/logBody) can carry credentials and flows
+  // straight into the job log — and from there into the `status` preview the
+  // agent reads. Redact it before it is persisted/echoed. Redaction is opt-in:
+  // background task paths pass a secrets array (even empty, which still scrubs
+  // Bearer tokens, URL credentials, and query strings); foreground callers pass
+  // nothing and keep byte-identical output.
+  const scrub = Array.isArray(secrets) ? (text) => redactText(text, secrets) : (text) => text;
+
   return (eventOrMessage) => {
     const event = normalizeProgressEvent(eventOrMessage);
-    const stderrMessage = event.stderrMessage ?? event.message;
+    const stderrMessage = scrub(event.stderrMessage ?? event.message);
     if (stderr && stderrMessage) {
       process.stderr.write(`[gateway] ${stderrMessage}\n`);
     }
-    appendLogLine(logFile, event.message);
-    appendLogBlock(logFile, event.logTitle, event.logBody);
+    appendLogLine(logFile, scrub(event.message));
+    appendLogBlock(logFile, event.logTitle, event.logBody == null ? event.logBody : scrub(event.logBody));
     onEvent?.(event);
   };
 }

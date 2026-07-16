@@ -53,6 +53,7 @@ import {
   runTrackedJob,
   SESSION_ID_ENV
 } from "./lib/tracked-jobs.mjs";
+import { launchBackgroundTaskWorker } from "./lib/background-launch.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { applyPersona, getValidPersonas, matchPersona } from "./lib/personas.mjs";
 import { buildStructuredError, collectConfigSecrets, redactText, truncateOutput } from "./lib/redaction.mjs";
@@ -1054,33 +1055,45 @@ async function handleTask(argv) {
     const { logFile } = createTrackedProgress(job);
     appendLogLine(logFile, "Queued for background execution.");
 
-    const child = spawnDetachedTaskWorker(cwd, job.id, {
+    const request = {
+      cwd,
       profile: profileResolved.name,
       model: options.model,
       write,
       prompt,
       persona,
       harness
-    });
-
-    const queuedRecord = {
-      ...job,
-      status: "queued",
-      phase: "queued",
-      pid: child.pid ?? null,
-      logFile,
-      request: {
-        cwd,
-        profile: profileResolved.name,
-        model: options.model,
-        write,
-        prompt,
-        persona,
-        harness
-      }
     };
-    writeJobFile(workspaceRoot, job.id, queuedRecord);
-    upsertJob(workspaceRoot, queuedRecord);
+
+    // Transactional launch: persist status:"starting" WITH the request BEFORE
+    // spawning, so the worker can never lose the race, and a spawn failure is
+    // recorded as "failed" instead of leaving the job "queued" forever.
+    const launch = launchBackgroundTaskWorker(
+      { job, workspaceRoot, request, logFile },
+      {
+        spawnFn: (jobId, req) => spawnDetachedTaskWorker(cwd, jobId, req),
+        secrets: collectConfigSecrets(config)
+      }
+    );
+
+    if (launch.status === "failed") {
+      // Fail loud: never report "queued" when the worker never launched.
+      const failedPayload = {
+        jobId: job.id,
+        status: "failed",
+        title: taskTitle,
+        summary: taskSummary,
+        logFile,
+        error: launch.errorMessage
+      };
+      outputCommandResult(
+        failedPayload,
+        `${taskTitle} failed to launch: ${launch.errorMessage}\n`,
+        options.json
+      );
+      process.exitCode = process.exitCode || 1;
+      return;
+    }
 
     const payload = {
       jobId: job.id,
@@ -1131,42 +1144,113 @@ async function handleTask(argv) {
 // Task worker (background)
 // ---------------------------------------------------------------------------
 
+// Persist a worker failure that happened BEFORE runTrackedJob took over. Such
+// failures would otherwise die silently under the worker's stdio:"ignore",
+// leaving the job stuck. Best-effort: never throws (the caller re-throws for a
+// truthful exit code). errorMessage is redacted via the Task A3 lib.
+function persistWorkerLaunchFailure(workspaceRoot, jobId, error) {
+  let secrets = [];
+  try {
+    secrets = collectConfigSecrets(loadConfig());
+  } catch {
+    secrets = [];
+  }
+  const structured = buildStructuredError(
+    { message: error instanceof Error ? error.message : String(error), context: "background task worker" },
+    { secrets }
+  );
+  const errorMessage = structured.userMessage;
+  const completedAt = nowIso();
+
+  let existing = {};
+  try {
+    existing = readStoredJob(workspaceRoot, jobId) ?? {};
+  } catch {
+    existing = {};
+  }
+
+  try {
+    writeJobFile(workspaceRoot, jobId, {
+      ...existing,
+      id: jobId,
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      errorMessage,
+      completedAt
+    });
+  } catch {
+    /* best-effort — the job file may not exist yet or be unwritable */
+  }
+  try {
+    upsertJob(workspaceRoot, { id: jobId, status: "failed", phase: "failed", pid: null, errorMessage, completedAt });
+  } catch {
+    /* best-effort */
+  }
+  try {
+    if (existing.logFile) {
+      appendLogLine(existing.logFile, `Worker failed before execution: ${errorMessage}`);
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
 async function handleTaskWorker(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["job-id", "profile", "model", "cwd", "harness"],
     booleanOptions: ["write", "no-write"]
   });
 
-  if (!options["job-id"]) {
+  const jobId = options["job-id"];
+  if (!jobId) {
     throw new Error("Missing required --job-id for task-worker.");
   }
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const storedJob = readStoredJob(workspaceRoot, options["job-id"]);
-  if (!storedJob) {
-    throw new Error(`No stored job found for ${options["job-id"]}.`);
+
+  let storedJob;
+  let request;
+  let config;
+  let profile;
+  let write;
+  let prompt;
+  let logFile;
+  let progress;
+
+  // Everything before runTrackedJob is the "silent death" gap: persist any
+  // throw here as a failed job so `status`/`result` surface it, then re-throw.
+  try {
+    storedJob = readStoredJob(workspaceRoot, jobId);
+    if (!storedJob) {
+      throw new Error(`No stored job found for ${jobId}.`);
+    }
+
+    request = storedJob.request;
+    if (!request || typeof request !== "object") {
+      throw new Error(`Stored job ${jobId} is missing its task request payload.`);
+    }
+
+    config = loadConfig();
+    profile = resolveProfile(request.profile, config);
+    write = request.write !== false;
+    prompt = request.prompt || positionals.join(" ");
+
+    if (!prompt) {
+      throw new Error("No prompt in stored job request.");
+    }
+
+    ({ logFile, progress } = createTrackedProgress(
+      { ...storedJob, workspaceRoot },
+      { logFile: storedJob.logFile ?? null, secrets: collectConfigSecrets(config) }
+    ));
+  } catch (error) {
+    persistWorkerLaunchFailure(workspaceRoot, jobId, error);
+    throw error;
   }
 
-  const request = storedJob.request;
-  if (!request || typeof request !== "object") {
-    throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
-  }
-
-  const config = loadConfig();
-  const profile = resolveProfile(request.profile, config);
-  const write = request.write !== false;
-  const prompt = request.prompt || positionals.join(" ");
-
-  if (!prompt) {
-    throw new Error("No prompt in stored job request.");
-  }
-
-  const { logFile, progress } = createTrackedProgress(
-    { ...storedJob, workspaceRoot },
-    { logFile: storedJob.logFile ?? null }
-  );
-
+  // runTrackedJob owns its own failure persistence for errors inside the runner.
   await runTrackedJob(
     { ...storedJob, workspaceRoot, logFile },
     () =>
@@ -1617,7 +1701,7 @@ async function handleDispatch(argv) {
     const { isCodexAvailable } = await import("./lib/codex-harness.mjs");
     if (!await isCodexAvailable()) {
       process.exitCode = 2;
-      throw new Error("--harness codex requires codex CLI. Install: npm i -g @anthropic-ai/codex");
+      throw new Error("--harness codex requires codex CLI. Install: npm i -g @openai/codex");
     }
   }
 
@@ -1757,7 +1841,8 @@ function createTrackedProgress(job, options = {}) {
     progress: createProgressReporter({
       stderr: Boolean(options.stderr),
       logFile,
-      onEvent: createJobProgressUpdater(job.workspaceRoot, job.id)
+      onEvent: createJobProgressUpdater(job.workspaceRoot, job.id),
+      secrets: options.secrets
     })
   };
 }

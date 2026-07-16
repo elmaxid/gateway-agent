@@ -120,6 +120,21 @@ describe("buildStructuredError", () => {
     assert.ok(logContents.includes("user:pass@gw"), "log must contain the full unredacted URL");
   });
 
+  it("operatorDetail is both redacted AND line-bounded for a >50-line stderr", () => {
+    const secret = "sk-buried-in-stderr";
+    // Secret on line 1 (survives truncation) proves redaction; 200 lines proves bounding.
+    const stderr = [`leak ${secret}`, ...Array.from({ length: 199 }, (_, i) => `noise ${i}`)].join("\n");
+    const result = buildStructuredError(
+      { message: "task blew up", stderr },
+      { secrets: [secret], logDir }
+    );
+
+    assert.ok(!result.operatorDetail.includes(secret), "operatorDetail must be redacted");
+    assert.match(result.operatorDetail, /\[\.\.\. \d+ lines omitted\]/, "operatorDetail must be line-bounded");
+    // message line + 50 kept stderr lines + marker = 52 lines
+    assert.equal(result.operatorDetail.split("\n").length, 52);
+  });
+
   it("returns localLogPath: null (never throws) when the log write fails", () => {
     // A path whose parent is a regular file can never be mkdir'd — ENOTDIR even
     // as root, so this is robust regardless of the test runner's uid.

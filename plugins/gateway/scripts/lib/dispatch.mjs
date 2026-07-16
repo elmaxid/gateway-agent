@@ -420,7 +420,10 @@ export async function runDispatch(tasks, opts) {
         return result;
       } catch (err) {
         failedCount++;
-        const result = { ...task, model: task.model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: "", error: err.message };
+        // Same agent-visible surfaces as the exitCode!==0 branch (renderDispatchOutput
+        // + JSON output) — redact + bound a thrown taskRunner message too.
+        const agentError = truncateOutput(redactText(err.message || "", secrets)).trim() || "task error";
+        const result = { ...task, model: task.model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: "", error: agentError };
         results.push(result);
         return result;
       } finally {

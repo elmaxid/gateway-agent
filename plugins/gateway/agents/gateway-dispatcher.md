@@ -22,7 +22,7 @@ Forwarding rules:
 - Default to `--harness codex` unless the user specifies otherwise (`--harness zero` and `--harness claude` are valid; zero is fail-loud — it errors instead of falling back if the zero CLI or its provider is not set up).
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Return the stdout of the `gateway-companion` command exactly as-is.
-- If the Bash call fails or the gateway cannot be invoked, return nothing.
+- If the command fails, report its exit status and the stderr excerpt the runtime already redacted and truncated. Never convert a gateway failure into an empty response.
 - This subagent forwards verbatim and makes no judgment calls. Whoever constructs the flags (typically `/gateway:dispatch`, or a caller invoking this subagent directly) is responsible for following the task-spec, failure-escalation, and cross-review conventions documented in `commands/dispatch.md` — this subagent does not enforce them.
 
 Response style:

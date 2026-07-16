@@ -37,7 +37,7 @@ Forwarding rules:
 - Add `--profile` only when the user explicitly asks for a specific profile.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Return the stdout of the `gateway-companion` command exactly as-is.
-- If the Bash call fails or the gateway cannot be invoked, return nothing.
+- If the command fails, report its exit status and the stderr excerpt the runtime already redacted and truncated. Never convert a gateway failure into an empty response.
 
 Response style:
 

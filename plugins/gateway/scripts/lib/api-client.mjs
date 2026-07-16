@@ -3,6 +3,8 @@
  * Uses globalThis.fetch (Node 18.18+). No external dependencies.
  */
 
+import { redactText } from "./redaction.mjs";
+
 const DEFAULT_IDLE_TIMEOUT = 30_000;
 
 // ---------------------------------------------------------------------------
@@ -59,9 +61,11 @@ async function readCappedJson(res, maxBytes = MAX_RESPONSE_BYTES) {
 }
 
 export function sanitizeError(error) {
-  // Strip anything that could leak auth tokens from error messages
+  // Strip anything that could leak auth tokens/credentials from error messages.
+  // Delegates to the shared redactor. No config secrets here — this lib has no
+  // access to them; callers that do can route through redaction.mjs directly.
   const msg = error instanceof Error ? error.message : String(error);
-  return msg.replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
+  return redactText(msg);
 }
 
 export function extractJson(content) {

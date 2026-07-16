@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Semaphore, normalizeBaseUrl } from "./concurrency.mjs";
 import { generateJobId } from "./state.mjs";
+import { redactText, truncateOutput } from "./redaction.mjs";
 
 // ---------------------------------------------------------------------------
 // Input parsing
@@ -283,6 +284,7 @@ export async function runDispatch(tasks, opts) {
     taskRunner,
     resolveProfileFn,
     onProgress,
+    secrets = [],
   } = opts;
 
   const repoRoot = execSync("git rev-parse --show-toplevel", { cwd, encoding: "utf8" }).trim();
@@ -394,7 +396,10 @@ export async function runDispatch(tasks, opts) {
 
         if (exitCode !== 0) {
           failedCount++;
-          const result = { ...task, model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: rawOutput, error: runnerResult.stderr || `exit ${exitCode}` };
+          // `error` surfaces to the agent via renderDispatchOutput ("FAILED (...)"),
+          // so redact secrets and bound it. The 0600 logFile keeps full stderr for diagnosis.
+          const agentError = truncateOutput(redactText(runnerResult.stderr || "", secrets)).trim() || `exit ${exitCode}`;
+          const result = { ...task, model, status: "failed", noChanges: false, duration: Date.now() - start, patchFile: null, output: rawOutput, error: agentError };
           fs.writeFileSync(logFile, logOutput + "\n" + (runnerResult.stderr || ""), { encoding: "utf8", mode: 0o600 });
           results.push(result);
           return result;

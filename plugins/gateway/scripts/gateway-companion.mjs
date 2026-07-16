@@ -55,6 +55,7 @@ import {
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { applyPersona, getValidPersonas, matchPersona } from "./lib/personas.mjs";
+import { buildStructuredError, collectConfigSecrets, redactText, truncateOutput } from "./lib/redaction.mjs";
 import {
   renderCancelReport,
   renderJobStatusReport,
@@ -965,7 +966,9 @@ async function executeTaskRun(request) {
   });
 
   const rawOutput = result.stdout || "";
-  const failureMessage = result.stderr?.trim() || "";
+  // Harness (claude/codex/zero) stderr becomes agent-visible here via the
+  // rendered output, payload.stderr, and summary — redact secrets and bound it.
+  const failureMessage = truncateOutput(redactText(result.stderr?.trim() || "", request.secrets));
   const exitStatus = result.exitCode ?? (result.signal ? 1 : 0);
 
   const rendered = renderTaskResult(
@@ -1115,6 +1118,7 @@ async function handleTask(argv) {
         write,
         harness,
         persona: resolveTaskPersona(options.as, prompt),
+        secrets: collectConfigSecrets(config),
         jobId: job.id,
         jobTitle: taskTitle,
         onProgress: progress
@@ -1174,6 +1178,7 @@ async function handleTaskWorker(argv) {
         write,
         harness: request.harness,
         persona: request.persona,
+        secrets: collectConfigSecrets(config),
         jobId: storedJob.id,
         jobTitle: storedJob.title || "Gateway Task",
         onProgress: progress
@@ -1633,6 +1638,7 @@ async function handleDispatch(argv) {
     failFast: options["fail-fast"],
     taskRunner: taskRunnerFn,
     resolveProfileFn,
+    secrets: collectConfigSecrets(config),
     onProgress: options.json ? null : (evt) => console.error(`[dispatch] ${evt.message}`),
   });
 
@@ -1837,7 +1843,23 @@ async function main() {
 
 main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
+  // Load config secrets so profile apiKey/authToken values leaked into an error
+  // get scrubbed. If the config can't load, redact without secrets (still covers
+  // Bearer tokens, URL credentials, and query strings).
+  let secrets = [];
+  try {
+    secrets = collectConfigSecrets(loadConfig());
+  } catch {
+    secrets = [];
+  }
+  const structured = buildStructuredError({ message, context: "gateway-companion main" }, { secrets });
+  process.stderr.write(`${structured.userMessage}\n`);
+  if (structured.operatorDetail && structured.operatorDetail !== structured.userMessage) {
+    process.stderr.write(`${structured.operatorDetail}\n`);
+  }
+  if (structured.localLogPath) {
+    process.stderr.write(`Full details: ${structured.localLogPath}\n`);
+  }
   // Preserve a more specific exit code a handler already set (e.g. dispatch's
   // validation/preflight errors use 2) instead of always forcing 1.
   process.exitCode = process.exitCode || 1;

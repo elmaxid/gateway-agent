@@ -306,6 +306,44 @@ describe("setup warning — kind-incompatible defaultProfile/taskProfile", () =>
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it("setup set-task-profile onto an openai-chat profile emits the warning", async () => {
+    const tmp = mkTmp("gw-setup-warn-settask-");
+    try {
+      await runCli(
+        ["setup", "add", "--profile", "cg5", "--url", "https://api.example.com", "--model", "claude-x", "--kind", "claude-gateway"],
+        tmp
+      );
+      await runCli(
+        ["setup", "add", "--profile", "oai3", "--url", "https://api.example.com", "--model", "gpt-4o", "--kind", "openai-chat"],
+        tmp
+      );
+      const result = await runCli(["setup", "set-task-profile", "--profile", "oai3"], tmp);
+      assert.equal(result.code, 0, `expected exit 0, stderr: ${result.stderr}`);
+      assert.match(result.stderr, /Warning:.*"oai3".*openai-chat.*rejected by task\/dispatch/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("setup set-task-profile onto a claude-gateway profile does NOT emit the warning", async () => {
+    const tmp = mkTmp("gw-setup-warn-settask-ok-");
+    try {
+      await runCli(
+        ["setup", "add", "--profile", "cg6", "--url", "https://api.example.com", "--model", "claude-x", "--kind", "claude-gateway"],
+        tmp
+      );
+      await runCli(
+        ["setup", "add", "--profile", "cg7", "--url", "https://api.example.com", "--model", "claude-y", "--kind", "claude-gateway"],
+        tmp
+      );
+      const result = await runCli(["setup", "set-task-profile", "--profile", "cg7"], tmp);
+      assert.equal(result.code, 0, `expected exit 0, stderr: ${result.stderr}`);
+      assert.ok(!/openai-chat/.test(result.stderr), `unexpected openai-chat warning in stderr: ${result.stderr}`);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

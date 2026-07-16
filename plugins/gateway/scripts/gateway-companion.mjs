@@ -376,6 +376,7 @@ async function handleSetup(argv) {
       config.taskProfile = options.profile;
       saveConfig(config);
       console.log(`Task profile set to "${options.profile}".`);
+      warnIncompatibleTaskKinds(config);
       break;
     }
 

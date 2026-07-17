@@ -151,6 +151,29 @@ describe("buildStructuredError", () => {
     assert.equal(result.operatorDetail.split("\n").length, 52);
   });
 
+  it("bounds a huge Error.message in operatorDetail while the log keeps every line", () => {
+    // A provider error whose Error.message embeds a huge HTTP body must not
+    // print unbounded via operatorDetail (main().catch composes the message
+    // with no stderr). The bounded message caps at the same DEFAULT_MAX_LINES
+    // as stderr; the local log remains the full diagnostic channel.
+    const secret = "sk-in-huge-message";
+    const message = [`leak ${secret}`, ...Array.from({ length: 299 }, (_, i) => `body ${i}`)].join("\n");
+    const result = buildStructuredError({ message }, { secrets: [secret], logDir });
+
+    assert.ok(!result.operatorDetail.includes(secret), "operatorDetail must be redacted");
+    assert.match(result.operatorDetail, /\[\.\.\. \d+ lines omitted\]/, "operatorDetail message must be line-bounded");
+    // 50 kept message lines + 1 marker line (no stderr in this case).
+    assert.equal(result.operatorDetail.split("\n").length, 51);
+    // userMessage is still the (redacted) first line only, unchanged by bounding.
+    assert.ok(!result.userMessage.includes("\n"), "userMessage must be a single line");
+    assert.match(result.userMessage, /leak \[REDACTED\]/);
+
+    // The log on disk retains ALL 300 lines (line 300 = "body 298").
+    const logContents = fs.readFileSync(result.localLogPath, "utf8");
+    assert.ok(logContents.includes("body 298"), "log must retain the full unbounded message");
+    assert.ok(logContents.includes(secret), "log must retain the full unredacted secret");
+  });
+
   it("returns localLogPath: null (never throws) when the log write fails", () => {
     // A path whose parent is a regular file can never be mkdir'd — ENOTDIR even
     // as root, so this is robust regardless of the test runner's uid.

@@ -7,7 +7,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString, validateTimeoutOption } from "./lib/args.mjs";
-import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJson } from "./lib/api-client.mjs";
+import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJson, profileSecrets, sanitizeError } from "./lib/api-client.mjs";
 import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
 import { runTask } from "./lib/codex-harness.mjs";
@@ -122,6 +122,26 @@ function outputResult(value, asJson) {
 
 function outputCommandResult(payload, rendered, asJson) {
   outputResult(asJson ? payload : rendered, asJson);
+}
+
+/**
+ * Reduce a profile to a shape safe to emit at an output boundary: the literal
+ * apiKey/authToken are replaced by hasApiKey/hasAuthToken booleans; every other
+ * (non-secret) field — name, kind, baseUrl, defaultModel, maxContext… — is kept
+ * verbatim. Agents can run `setup list --json`, whose payload would otherwise
+ * serialize the raw secret values.
+ */
+function sanitizeProfileForOutput(profile) {
+  const { apiKey, authToken, ...rest } = profile;
+  return {
+    ...rest,
+    hasApiKey: typeof apiKey === "string" && apiKey.length > 0,
+    hasAuthToken: typeof authToken === "string" && authToken.length > 0,
+  };
+}
+
+function sanitizeProfilesForOutput(profiles) {
+  return profiles.map(sanitizeProfileForOutput);
 }
 
 function normalizeArgv(argv) {
@@ -244,7 +264,7 @@ async function handleSetup(argv) {
     const config = loadConfig();
     const profiles = listProfiles(config);
     const payload = {
-      profiles,
+      profiles: sanitizeProfilesForOutput(profiles),
       defaultProfile: config.defaultProfile,
       reviewProfile: config.reviewProfile,
       taskProfile: config.taskProfile
@@ -312,7 +332,7 @@ async function handleSetup(argv) {
       const config = loadConfig();
       const profiles = listProfiles(config);
       const payload = {
-        profiles,
+        profiles: sanitizeProfilesForOutput(profiles),
         defaultProfile: config.defaultProfile,
         reviewProfile: config.reviewProfile,
         taskProfile: config.taskProfile
@@ -325,7 +345,7 @@ async function handleSetup(argv) {
       const { options } = parseArgs(rest, { valueOptions: ["profile"], booleanOptions: ["json"] });
       const config = loadConfig();
       const profile = resolveProfile(options.profile, config);
-      console.error(`Testing connectivity to ${profile.baseUrl} (${profile.name})...`);
+      console.error(`Testing connectivity to ${redactText(profile.baseUrl, profileSecrets(profile))} (${profile.name})...`);
       const result = await testConnectivity(profile);
       const payload = { profile: profile.name, ...result };
       if (options.json) {
@@ -537,18 +557,21 @@ async function handleSetup(argv) {
         break;
       }
 
+      const secrets = profileSecrets(profile);
+      const safeBaseUrl = redactText(profile.baseUrl, secrets);
+
       let models;
       try {
         models = await listModels(profile);
       } catch (err) {
-        console.error(`Failed to list models from ${profile.baseUrl}: ${err.message}`);
+        console.error(`Failed to list models from ${safeBaseUrl}: ${sanitizeError(err, secrets)}`);
         process.exitCode = 1;
         break;
       }
 
       const payload = {
         profile:          profile.name,
-        endpoint:         profile.baseUrl,
+        endpoint:         safeBaseUrl,
         configured_model: profile.defaultModel,
         models,
       };
@@ -557,9 +580,9 @@ async function handleSetup(argv) {
         outputResult(payload, true);
       } else {
         if (models.length === 0) {
-          console.log(`No models returned by ${profile.name} (${profile.baseUrl})`);
+          console.log(`No models returned by ${profile.name} (${safeBaseUrl})`);
         } else {
-          console.log(`Models available at ${profile.name} (${profile.baseUrl}):`);
+          console.log(`Models available at ${profile.name} (${safeBaseUrl}):`);
           for (const m of models) {
             const marker = m === profile.defaultModel ? "  ← configured" : "";
             console.log(`  ${m}${marker}`);

@@ -153,10 +153,29 @@ export function sanitizeBaseUrl(rawUrl) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Strip git environment overrides so an inherited/hostile GIT_DIR (etc.) can't
+ * redirect our provenance probes at a foreign repo. Duplicated from
+ * version-info.mjs's sanitizedGitEnv — this file must stay import-free (see the
+ * file header).
+ */
+function sanitizedGitEnv() {
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
+    delete env[key];
+  }
+  return env;
+}
+
+/**
  * Resolve {version, commit, commitSource} for a plugin root, mirroring
  * plugins/gateway/scripts/lib/version-info.mjs's resolution order:
- *   1. <pluginRoot>/.claude-plugin/build-info.json → "build-info"
- *   2. `git rev-parse HEAD` with cwd=pluginRoot (dev checkout) → "git"
+ *   1. `git rev-parse HEAD` (cwd=pluginRoot, sanitized env, 5s timeout) — but
+ *      only when this repo tracks the plugin (`git ls-files --error-unmatch
+ *      .claude-plugin/plugin.json` exits 0) → "git". Dev checkouts must report
+ *      live HEAD even over a committed build-info.json.
+ *   2. <pluginRoot>/.claude-plugin/build-info.json → "build-info". Serves
+ *      git-less installs and a cache nested under an unrelated parent repo
+ *      (whose plugin.json is untracked there).
  *   3. Neither → "unknown"
  * @param {string} pluginRoot
  */
@@ -173,22 +192,28 @@ export function getPluginVersionInfo(pluginRoot) {
   let commit = null;
   let commitSource = null;
 
-  const buildInfoPath = path.join(pluginRoot, ".claude-plugin", "build-info.json");
-  try {
-    const buildInfo = JSON.parse(fs.readFileSync(buildInfoPath, "utf8"));
-    if (buildInfo.commit) {
-      commit = buildInfo.commit;
-      commitSource = "build-info";
+  const gitOpts = { cwd: pluginRoot, encoding: "utf8", env: sanitizedGitEnv(), timeout: 5000 };
+  const headResult = spawnSync("git", ["rev-parse", "HEAD"], gitOpts);
+  if (headResult.status === 0 && headResult.stdout && headResult.stdout.trim()) {
+    // Trust HEAD only if THIS repo tracks the plugin — a marketplace cache
+    // nested under an unrelated parent repo must not borrow the parent's HEAD.
+    const tracked = spawnSync("git", ["ls-files", "--error-unmatch", ".claude-plugin/plugin.json"], gitOpts);
+    if (tracked.status === 0) {
+      commit = headResult.stdout.trim();
+      commitSource = "git";
     }
-  } catch {
-    // No build-info.json — fall through to git.
   }
 
   if (!commit) {
-    const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd: pluginRoot, encoding: "utf8" });
-    if (result.status === 0 && result.stdout && result.stdout.trim()) {
-      commit = result.stdout.trim();
-      commitSource = "git";
+    const buildInfoPath = path.join(pluginRoot, ".claude-plugin", "build-info.json");
+    try {
+      const buildInfo = JSON.parse(fs.readFileSync(buildInfoPath, "utf8"));
+      if (buildInfo.commit) {
+        commit = buildInfo.commit;
+        commitSource = "build-info";
+      }
+    } catch {
+      // No build-info.json (or unreadable/invalid) — fall through to unknown.
     }
   }
 

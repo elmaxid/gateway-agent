@@ -128,18 +128,24 @@ describe("getVersionInfo — both .git and build-info.json present", () => {
       writePluginJson(tmp, "5.5.5");
       const initResult = spawnSync("git", ["init", "-q"], { cwd: tmp });
       assert.equal(initResult.status, 0, "precondition: git init must succeed");
+      // Track plugin.json so the tracked-check trusts this repo's HEAD — git is
+      // trusted only for a repo that actually tracks the plugin.
+      const addResult = spawnSync("git", ["add", ".claude-plugin/plugin.json"], { cwd: tmp });
+      assert.equal(addResult.status, 0, "precondition: git add must succeed");
       const commitResult = spawnSync(
         "git",
-        ["-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "--allow-empty", "-q", "-m", "init"],
+        ["-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-q", "-m", "init"],
         { cwd: tmp }
       );
-      assert.equal(commitResult.status, 0, "precondition: empty commit must succeed");
+      assert.equal(commitResult.status, 0, "precondition: commit must succeed");
       const gitHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: tmp, encoding: "utf8" });
       assert.equal(gitHead.status, 0);
       const realCommit = gitHead.stdout.trim();
 
       // Fake commit deliberately differs from realCommit, so a pass proves
-      // git precedence rather than coincidental agreement.
+      // git precedence rather than coincidental agreement. build-info.json is
+      // left UNTRACKED — the tracked-check only requires plugin.json to be
+      // tracked, which is what marks this as a genuine checkout of the plugin.
       const fakeCommit = "f".repeat(40);
       fs.writeFileSync(
         path.join(tmp, ".claude-plugin", "build-info.json"),
@@ -152,6 +158,81 @@ describe("getVersionInfo — both .git and build-info.json present", () => {
       assert.notEqual(info.commit, fakeCommit);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2c. pluginRoot is an UNTRACKED subdir nested inside a parent git repo, with a
+// committed build-info.json. git-first must NOT report the parent's HEAD; the
+// tracked-check falls through to build-info — this is the marketplace-cache-
+// dropped-inside-a-parent-repo case.
+// ---------------------------------------------------------------------------
+
+describe("getVersionInfo — untracked plugin nested inside a parent git repo", () => {
+  it("ignores the parent's HEAD (plugin.json untracked) and uses build-info", () => {
+    const parent = mkTmp("gw-version-parent-");
+    try {
+      assert.equal(spawnSync("git", ["init", "-q"], { cwd: parent }).status, 0, "precondition: parent git init");
+      assert.equal(
+        spawnSync("git", ["-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "--allow-empty", "-q", "-m", "parent"], { cwd: parent }).status,
+        0,
+        "precondition: parent commit"
+      );
+      const parentHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: parent, encoding: "utf8" }).stdout.trim();
+
+      // Nested plugin root — files deliberately NOT `git add`ed (a marketplace
+      // cache clone dropped inside someone's repo).
+      const pluginRoot = path.join(parent, "cache", "gateway");
+      const pluginDir = writePluginJson(pluginRoot, "3.3.3");
+      const buildCommit = "c".repeat(40);
+      fs.writeFileSync(
+        path.join(pluginDir, "build-info.json"),
+        JSON.stringify({ commit: buildCommit, builtAt: new Date().toISOString() })
+      );
+
+      const info = getVersionInfo({ pluginRoot });
+      assert.equal(info.commitSource, "build-info", "must not trust the parent repo's HEAD for an untracked plugin");
+      assert.equal(info.commit, buildCommit);
+      assert.notEqual(info.commit, parentHead);
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2d. A hostile/inherited GIT_DIR in the environment must not redirect
+// provenance away from the plugin's own checkout — the git child runs with a
+// sanitized env.
+// ---------------------------------------------------------------------------
+
+describe("getVersionInfo — hostile GIT_DIR env is ignored", () => {
+  it("reports the checkout's own HEAD even when GIT_DIR points at another repo", () => {
+    const other = mkTmp("gw-version-othergit-");
+    const savedGitDir = process.env.GIT_DIR;
+    try {
+      assert.equal(spawnSync("git", ["init", "-q"], { cwd: other }).status, 0, "precondition: other git init");
+      assert.equal(
+        spawnSync("git", ["-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "--allow-empty", "-q", "-m", "other"], { cwd: other }).status,
+        0,
+        "precondition: other commit"
+      );
+      const otherHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: other, encoding: "utf8" }).stdout.trim();
+
+      const realHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: REAL_PLUGIN_ROOT, encoding: "utf8" }).stdout.trim();
+      assert.match(realHead, /^[0-9a-f]{40}$/);
+      assert.notEqual(realHead, otherHead, "precondition: the two repos have different HEADs");
+
+      process.env.GIT_DIR = path.join(other, ".git");
+      const info = getVersionInfo({ pluginRoot: REAL_PLUGIN_ROOT });
+      assert.equal(info.commitSource, "git");
+      assert.equal(info.commit, realHead, "GIT_DIR must be stripped from the git child's env");
+      assert.notEqual(info.commit, otherHead);
+    } finally {
+      if (savedGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = savedGitDir;
+      fs.rmSync(other, { recursive: true, force: true });
     }
   });
 });

@@ -12,10 +12,11 @@
  *      JSON.
  *   2. sanitizeBaseUrl() reduces a URL with credentials or a query string to
  *      host-only; a clean URL passes through unchanged.
- *   3. getPluginVersionInfo() resolves version+commit from a fixture
- *      pluginRoot (plugin.json + build-info.json), falls back to `git
- *      rev-parse HEAD` for a git checkout with no build-info.json, and
- *      reports "unknown" when neither is available.
+ *   3. getPluginVersionInfo() resolves version+commit git-first: a tracked git
+ *      checkout reports live HEAD (even over a stale committed build-info.json),
+ *      an untracked plugin nested under a parent repo falls through to
+ *      build-info instead of borrowing the parent's HEAD, and "unknown" is
+ *      reported when neither is available.
  *   4. redactMatrixOutput() masks Bearer tokens and known literal secrets in
  *      matrix stdout/stderr text.
  */
@@ -191,6 +192,66 @@ describe("getPluginVersionInfo", () => {
       assert.equal(info.commitSource, "unknown");
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("git-first: a tracked checkout reports live HEAD, ignoring a stale build-info.json", () => {
+    const tmp = mkTmp("baseline-version-gitfirst-");
+    try {
+      writePluginJson(tmp, "4.4.4");
+      assert.equal(spawnSync("git", ["init", "-q"], { cwd: tmp }).status, 0, "precondition: git init");
+      // Track plugin.json so the tracked-check trusts this repo's HEAD.
+      assert.equal(spawnSync("git", ["add", ".claude-plugin/plugin.json"], { cwd: tmp }).status, 0);
+      assert.equal(
+        spawnSync("git", ["-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-q", "-m", "init"], { cwd: tmp }).status,
+        0,
+        "precondition: commit"
+      );
+      const realCommit = spawnSync("git", ["rev-parse", "HEAD"], { cwd: tmp, encoding: "utf8" }).stdout.trim();
+
+      // Stale build-info.json (untracked) with a DIFFERENT commit — a pass
+      // proves git precedence, not coincidental agreement.
+      const fakeCommit = "d".repeat(40);
+      fs.writeFileSync(
+        path.join(tmp, ".claude-plugin", "build-info.json"),
+        JSON.stringify({ commit: fakeCommit, builtAt: new Date().toISOString() })
+      );
+
+      const info = getPluginVersionInfo(tmp);
+      assert.equal(info.commitSource, "git");
+      assert.equal(info.commit, realCommit);
+      assert.notEqual(info.commit, fakeCommit);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("untracked plugin nested inside a parent repo uses build-info, not the parent's HEAD", () => {
+    const parent = mkTmp("baseline-version-parent-");
+    try {
+      assert.equal(spawnSync("git", ["init", "-q"], { cwd: parent }).status, 0, "precondition: parent git init");
+      assert.equal(
+        spawnSync("git", ["-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "--allow-empty", "-q", "-m", "parent"], { cwd: parent }).status,
+        0,
+        "precondition: parent commit"
+      );
+      const parentHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: parent, encoding: "utf8" }).stdout.trim();
+
+      // Nested plugin root — files deliberately NOT `git add`ed.
+      const pluginRoot = path.join(parent, "cache", "gateway");
+      const pluginDir = writePluginJson(pluginRoot, "3.3.3");
+      const buildCommit = "e".repeat(40);
+      fs.writeFileSync(
+        path.join(pluginDir, "build-info.json"),
+        JSON.stringify({ commit: buildCommit, builtAt: new Date().toISOString() })
+      );
+
+      const info = getPluginVersionInfo(pluginRoot);
+      assert.equal(info.commitSource, "build-info", "must not trust the parent repo's HEAD for an untracked plugin");
+      assert.equal(info.commit, buildCommit);
+      assert.notEqual(info.commit, parentHead);
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true });
     }
   });
 });

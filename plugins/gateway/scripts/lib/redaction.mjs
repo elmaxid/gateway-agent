@@ -136,12 +136,18 @@ export function buildStructuredError(input = {}, { secrets = [], logDir } = {}) 
 
   const redactedMessage = redactText(message, secrets);
   const redactedStderr = truncateOutput(redactText(stderr, secrets)).trim();
+  // Bound the message too: a provider error whose Error.message embeds a huge
+  // HTTP body would otherwise print unbounded in operatorDetail (composed with
+  // no stderr via main().catch). Same DEFAULT_MAX_LINES bound as stderr. The
+  // local log keeps the full unbounded detail; userMessage (first line) is
+  // taken from the full redacted message so bounding never alters it.
+  const boundedMessage = truncateOutput(redactedMessage).trim();
 
   const firstLine = redactedMessage.split("\n")[0].trim();
   let userMessage = firstLine || "Gateway error.";
   if (hasExit) userMessage += ` (exit ${input.exitCode})`;
 
-  const detailParts = [redactedMessage.trim()].filter(Boolean);
+  const detailParts = [boundedMessage].filter(Boolean);
   if (redactedStderr) detailParts.push(redactedStderr);
   const operatorDetail = detailParts.join("\n") || userMessage;
 

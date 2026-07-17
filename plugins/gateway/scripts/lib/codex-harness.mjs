@@ -87,10 +87,22 @@ export function runCodexTask(profile, prompt, opts = {}) {
   }
 
   return new Promise((resolve, reject) => {
+    let exitCode = null;
+    let exitSignal = null;
     proc.on("error", reject);
-    proc.on("exit", (code, sig) => {
-      if (stdoutBuf && opts.onStdout) opts.onStdout(stdoutBuf);
-      resolve({ stdout, stderr, exitCode: code, signal: sig });
+    // Record the exit status when the process ends...
+    proc.on("exit", (code, sig) => { exitCode = code; exitSignal = sig; });
+    // ...but only SETTLE on "close", which fires after the child's stdout AND
+    // stderr streams have fully drained (EOF). Resolving on "exit" can settle
+    // the run while buffered pipe data is still unread, so the captured output —
+    // and everything the CLI derives from it, including the final result the
+    // parent flushes as it exits — could be empty or partial depending on
+    // scheduling. That was the intermittent "exit=1 with empty streams" race on
+    // the codex failure path. "close" guarantees stdout/stderr are complete
+    // before we shape and return the result.
+    proc.on("close", (code, sig) => {
+      if (stdoutBuf && opts.onStdout) { opts.onStdout(stdoutBuf); stdoutBuf = ""; }
+      resolve({ stdout, stderr, exitCode: exitCode ?? code, signal: exitSignal ?? sig });
     });
   });
 }
@@ -99,6 +111,88 @@ export function runCodexTask(profile, prompt, opts = {}) {
 function isCodexAuthError(result) {
   const text = result.stdout + result.stderr;
   return result.exitCode !== 0 && text.includes("ChatGPT account");
+}
+
+// ---------------------------------------------------------------------------
+// Failure extraction
+//
+// codex reports a task failure as a `turn.failed` / `error` event inside its
+// --json stream on STDOUT (not stderr). Its STDERR on failure is the backend
+// model-catalog dump. The CLI must surface a single, redacted, human-readable
+// line — never the raw JSON stream or the catalog — so pull one clean line out
+// of the stream here.
+// ---------------------------------------------------------------------------
+
+// A codex error message is frequently a nested JSON body, e.g.
+//   {"error":{"message":"...","code":"400", ...}}
+// Unwrap it to the inner message + status code when present.
+function tryParseNestedError(message) {
+  if (typeof message !== "string") return null;
+  const trimmed = message.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    const err = parsed && typeof parsed === "object" ? (parsed.error ?? parsed) : null;
+    if (err && typeof err === "object") {
+      return { message: err.message, code: err.code };
+    }
+  } catch {
+    /* not nested JSON — use the string as-is */
+  }
+  return null;
+}
+
+function normalizeCodexError(err) {
+  let message = "";
+  let code;
+  if (typeof err === "string") {
+    message = err;
+  } else if (err && typeof err === "object") {
+    message = typeof err.message === "string" ? err.message : String(err.message ?? "");
+    code = err.code;
+  }
+  const nested = tryParseNestedError(message);
+  if (nested) {
+    if (nested.message) message = String(nested.message);
+    if (nested.code != null) code = nested.code;
+  }
+  message = message.trim();
+  if (!message) return "";
+  return code != null && String(code).length > 0 ? `HTTP ${code}: ${message}` : message;
+}
+
+/**
+ * Extract a single human-readable failure line from a codex --json stdout
+ * stream. Prefers the terminal `turn.failed` event, then a standalone `error`
+ * event, then an `item.completed` error item. Returns "" when the stream shows
+ * no failure signal (e.g. a clean run). Pure/synchronous — safe to unit test.
+ * @param {string} stdout raw codex --json stream
+ * @returns {string}
+ */
+export function extractCodexFailure(stdout) {
+  if (typeof stdout !== "string" || stdout.length === 0) return "";
+  let turnFailed = "";
+  let errorEvent = "";
+  let itemError = "";
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let evt;
+    try {
+      evt = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (!evt || typeof evt !== "object") continue;
+    if (evt.type === "turn.failed" && evt.error != null) {
+      turnFailed = normalizeCodexError(evt.error) || turnFailed;
+    } else if (evt.type === "error" && (evt.error != null || evt.message != null)) {
+      errorEvent = errorEvent || normalizeCodexError(evt.error ?? evt.message);
+    } else if (evt.type === "item.completed" && evt.item && evt.item.type === "error" && evt.item.message) {
+      itemError = itemError || String(evt.item.message).trim();
+    }
+  }
+  return turnFailed || errorEvent || itemError || "";
 }
 
 export async function runTask(profile, prompt, opts = {}) {

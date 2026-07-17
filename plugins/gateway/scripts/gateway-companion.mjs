@@ -10,7 +10,7 @@ import { parseArgs, splitRawArgumentString, validateTimeoutOption } from "./lib/
 import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJson, profileSecrets, sanitizeError } from "./lib/api-client.mjs";
 import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
-import { runTask } from "./lib/codex-harness.mjs";
+import { runTask, extractCodexFailure } from "./lib/codex-harness.mjs";
 import { runZeroTask, isZeroAvailable, getZeroProvider, zeroPreflightError, urlsMatch } from "./lib/zero-harness.mjs";
 import { loadTranscript, parseTranscript, buildMessages } from "./lib/claude-session-transfer.mjs";
 import { runDebate, renderDebateOutput, preflightProfiles } from "./lib/debate.mjs";
@@ -1017,10 +1017,21 @@ async function executeTaskRun(request) {
   });
 
   const rawOutput = result.stdout || "";
-  // Harness (claude/codex/zero) stderr becomes agent-visible here via the
-  // rendered output, payload.stderr, and summary — redact secrets and bound it.
-  const failureMessage = truncateOutput(redactText(result.stderr?.trim() || "", request.secrets));
+  const rawStderr = result.stderr || "";
   const exitStatus = result.exitCode ?? (result.signal ? 1 : 0);
+
+  if (exitStatus !== 0) {
+    // FAIL-LOUD, LEAK-SAFE failure path (parity with the claude/main() error
+    // contract): a redacted one-line message on the agent-visible surfaces and a
+    // 0600 log holding the COMPLETE raw material — never the raw codex JSON
+    // stream or the backend catalog on an agent-visible stream.
+    return shapeTaskFailure({ request, harness, rawOutput, rawStderr, exitStatus, write });
+  }
+
+  // Success: return the model output verbatim (unchanged behavior). Harness
+  // stderr can still carry non-fatal noise — redact secrets and bound it before
+  // it becomes agent-visible via payload.stderr.
+  const failureMessage = truncateOutput(redactText(rawStderr.trim(), request.secrets));
 
   const rendered = renderTaskResult(
     { rawOutput, failureMessage },
@@ -1030,12 +1041,75 @@ async function executeTaskRun(request) {
   return {
     exitStatus,
     payload: {
-      status: exitStatus === 0 ? "completed" : "failed",
+      status: "completed",
       rawOutput,
       stderr: failureMessage
     },
     rendered,
     summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, "Task finished.")),
+    jobTitle: request.jobTitle ?? "Gateway Task",
+    jobClass: "task",
+    write
+  };
+}
+
+// Shape a FAILED task run (any harness) into the fail-loud, leak-safe contract:
+//  - agent-visible surfaces (rendered / payload.stderr / summary) get a redacted,
+//    one-line message plus a `Full details:` pointer to a 0600 log;
+//  - the 0600 log gets the COMPLETE raw material (raw stdout stream + stderr);
+//  - exit status is preserved (non-zero).
+// The raw codex JSON stream (stdout) and backend catalog (stderr) are NEVER
+// echoed to an agent-visible surface.
+function shapeTaskFailure({ request, harness, rawOutput, rawStderr, exitStatus, write }) {
+  const secrets = request.secrets ?? [];
+
+  // Where the actionable error lives differs by harness:
+  //  - codex reports it as a `turn.failed`/`error` event in its JSON stream on
+  //    STDOUT; its STDERR on failure is the backend model-catalog dump (giant
+  //    single lines). Both are forbidden on agent-visible streams, so extract a
+  //    single clean line and never echo the streams verbatim.
+  //  - claude/zero put a human-readable error on stdout and/or stderr.
+  let message;
+  if (harness === "codex") {
+    message = extractCodexFailure(rawOutput) || `Codex task failed (exit ${exitStatus}). See log for details.`;
+  } else {
+    message =
+      firstMeaningfulLine(rawStderr, "") ||
+      firstMeaningfulLine(rawOutput, "") ||
+      `Gateway task failed (harness: ${harness}, exit ${exitStatus}).`;
+  }
+
+  // Full material for the 0600 log: the entire stdout stream (raw turn.failed
+  // JSON for codex) plus the full stderr (catalog dump). writeLocalLog keeps it
+  // unredacted on a 0600 file for diagnosis.
+  const rawMaterial = [
+    rawOutput ? `--- stdout ---\n${rawOutput}` : "",
+    rawStderr ? `--- stderr ---\n${rawStderr}` : ""
+  ].filter(Boolean).join("\n\n");
+
+  const structured = buildStructuredError(
+    { message, stderr: rawMaterial, exitCode: exitStatus, context: `gateway task (${harness})` },
+    { secrets }
+  );
+
+  // Agent-visible surface: the redacted one-line message + a pointer to the full
+  // local log. We intentionally do NOT surface structured.operatorDetail or the
+  // raw streams here — operatorDetail embeds the (redacted-but-structural)
+  // JSON/catalog, which the release forbids on agent-visible streams.
+  const lines = [structured.userMessage];
+  if (structured.localLogPath) lines.push(`Full details: ${structured.localLogPath}`);
+  const rendered = `${lines.join("\n")}\n`;
+
+  return {
+    exitStatus,
+    payload: {
+      status: "failed",
+      rawOutput: "",
+      stderr: structured.userMessage,
+      localLogPath: structured.localLogPath
+    },
+    rendered,
+    summary: structured.userMessage,
     jobTitle: request.jobTitle ?? "Gateway Task",
     jobClass: "task",
     write

@@ -52,7 +52,7 @@ De acá en adelante, cada comando tiene su propia sección más abajo con flags 
 
 ### Personas especializadas
 
-5 subagentes con prompt-shaping por dominio y harness óptimo:
+6 subagentes con prompt-shaping por dominio y harness óptimo:
 
 | Persona | Dominio | Harness | Modo |
 |---------|---------|---------|------|
@@ -60,7 +60,8 @@ De acá en adelante, cada comando tiene su propia sección más abajo con flags 
 | `gateway-debugger` | Bugs, test failures | codex (stateful) | write |
 | `gateway-reviewer` | Code review, audit | claude (stateless) | read-only |
 | `gateway-researcher` | Research, exploración | claude (stateless) | read-only |
-| `security` | Vulnerabilidades, CVE, OWASP | gateway-rescue + `--as security` | read-only |
+| `gateway-dispatcher` | Distribución de tareas en paralelo (`/gateway:dispatch`) | codex (default) | write |
+| `gateway-rescue` | Fallback genérico; `--as security` para CVE/OWASP | claude (stateless) | read-only |
 
 Las personas están definidas en archivos `personas/*.md` con frontmatter YAML. Cada archivo declara `name`, `description`, `activation_keywords` y el cuerpo del system prompt. Para agregar una nueva persona basta con crear un archivo `.md` nuevo — no requiere cambios en código.
 
@@ -72,7 +73,7 @@ Las personas están definidas en archivos `personas/*.md` con frontmatter YAML. 
 | **codex** | `codex exec --json` | Threads persistentes, reasoning traces, sandbox real |
 | **zero** | `zero` (one-shot) | Tool whitelist fijo, fail-loud (sin fallback) |
 
-Si codex no está instalado, fallback automático a claude. Zero no tiene fallback: si falta, falla explícito.
+En `task`/`task-worker`, si codex no está instalado hay fallback automático a claude (para perfiles claude-gateway). En `dispatch` **no** hay fallback: si falta el CLI de codex o de zero, el comando preflight-falla (exit 2). Zero nunca tiene fallback: si falta, falla explícito.
 
 ### Zero harness
 
@@ -521,9 +522,10 @@ Muestra estado de jobs en la sesión actual.
 
 **Output:**
 ```
-| Job ID                  | Status    | Kind | Duration | Summary              |
-|-------------------------|-----------|------|----------|----------------------|
-| task-mpx5a9tt-6y65u1   | completed | task | 9s       | ## Archivos .mjs ... |
+Active jobs:
+| Job                  | Kind | Status  | Phase   | Elapsed | Summary              | Actions                                              |
+| -------------------- | ---- | ------- | ------- | ------- | -------------------- | ---------------------------------------------------- |
+| task-mpx5a9tt-6y65u1 | task | running | running | 9s      | ## Archivos .mjs ... | `/gateway:status task-…`<br>`/gateway:cancel task-…` |
 ```
 
 ---
@@ -708,35 +710,45 @@ Los nombres son exactos — sin prefijos adicionales.
 │           ├── workspace.mjs            # Resolución de workspace root
 │           └── claude-session-transfer.mjs  # Parser de transcripts + window transfer
 └── tests/
-    ├── api-client.test.mjs          # HTTP client + AbortController timeout + testConnectivity timeoutMs — unit (12 tests)
+    ├── api-client.test.mjs          # HTTP client + AbortController timeout + testConnectivity timeoutMs — unit (15 tests)
     ├── debate.test.mjs              # Quorum enforcement + exports + preflight timeoutMs — unit (9 tests)
     ├── args.test.mjs                # validateTimeoutOption (--timeout de review/adversarial-review/staged-review/debate) — unit (10 tests)
     ├── agentic-review.test.mjs      # timeoutMs threading + retry-on-malformed-output + validación de forma en runToolLoop/forceFinish — unit (8 tests)
     ├── agentic-review-malformed-output.test.mjs # exitStatus/render de fallo end-to-end cuando el modelo devuelve garbage — unit (2 tests)
     ├── agentic-review-maxtime.test.mjs # maxTime scaling del loop agentic (max(120000, timeout×2)) — unit (1 test)
     ├── cli-timeout.test.mjs         # --timeout end-to-end vía CLI real, mocks HTTP stateful — unit (6 tests)
-    ├── claude-subprocess.test.mjs   # Subprocess env + auth — unit (9 tests)
-    ├── codex-harness.test.mjs       # Codex env + auth — unit (6 tests)
+    ├── claude-subprocess.test.mjs   # Subprocess env + auth + capture completeness (close, no exit) — unit (10 tests)
+    ├── codex-harness.test.mjs       # Codex env + auth + failure extraction + capture completeness — unit (15 tests)
     ├── config.test.mjs              # Profile CRUD — unit (13 tests)
     ├── claude-session-transfer.test.mjs # Transcript parser + buildMessages — unit (9 tests)
     ├── session-lifecycle-hook.test.mjs  # Hook stdin + env var — unit (2 tests)
-    ├── dispatch.test.mjs            # Semaphore, parsers, worktree lifecycle, execution engine, cross-review, CLI — unit (43 tests)
+    ├── dispatch.test.mjs            # Semaphore, parsers, worktree lifecycle, execution engine, cross-review, CLI — unit (69 tests)
     └── integration.test.mjs         # Live gateway — connectivity, review, task (claude+codex)
 ```
+
+## Observabilidad y provenance (v0.5.2)
+
+- **`version` / `version --json`** — reporta la provenance del build: `pluginVersion`, `commit`, `commitSource` (`build-info` | `git` | `unknown`), `pluginRoot` y `node`. Si no hay `build-info.json` y `pluginRoot` no es un checkout git, `commitSource` queda en `unknown` y se emite un warning por stderr.
+- **`npm run build-info`** (`scripts/make-build-info.mjs`) — congela el commit actual en `build-info.json`, para que instalaciones sin `.git` (p. ej. desde el marketplace) sigan reportando el commit real en vez de `unknown`.
+- **`scripts/baseline-capture.mjs`** — snapshot JSON del entorno para diagnóstico y comparación entre máquinas. `--plugin-root <path>` fija el descubrimiento del plugin a un directorio exacto (útil en workstations con varias instalaciones). `--run-matrix` además hace smoke-tests reales de `review`/`task` contra los perfiles configurados: **hace llamadas de red reales y consume tokens de modelo** (lo advierte por stderr).
+- **Contrato de error (fail-loud, leak-safe)** — cuando un harness falla, las superficies visibles al agente (stdout rendido, `stderr` del payload, summary) reciben un mensaje de una línea, redactado y acotado, más `Full details: <path>` apuntando a un log `0600` con el material crudo completo. Nunca se filtra el JSON crudo del harness ni secretos.
+- **Ciclo de vida de jobs en background** — un job pasa por `starting` → `queued` → `running` → terminal (`completed`/`failed`/`cancelled`). Al leer `status`/`result` se reconcilian jobs muertos u huérfanos: se auto-marcan `failed` ("worker never started…"), sin intervención manual.
+- **`setup list --json`** — nunca emite secretos: reemplaza `apiKey`/`authToken` por los booleanos `hasApiKey`/`hasAuthToken`. Además, `setup` advierte si el perfil default o de task es `openai-chat` (será rechazado por `task`/`dispatch` en v0.5.x; `review` sí funciona).
 
 ## Tests
 
 ```bash
 cd /path/to/agent-plugin-cc
 
-# Unit tests (sin red) — todos menos integration.test.mjs
-node --test tests/claude-subprocess.test.mjs tests/codex-harness.test.mjs tests/zero-harness.test.mjs tests/api-client.test.mjs tests/debate.test.mjs tests/config.test.mjs tests/claude-session-transfer.test.mjs tests/session-lifecycle-hook.test.mjs tests/args.test.mjs tests/agentic-review.test.mjs tests/agentic-review-malformed-output.test.mjs tests/agentic-review-maxtime.test.mjs tests/cli-timeout.test.mjs tests/dispatch.test.mjs
+# Suite completa — los 21 archivos tests/*.test.mjs (292 tests).
+node --test tests/*.test.mjs
 
-# Integration tests (requiere gateway activo)
+# Nota: integration.test.mjs (13 tests) requiere un gateway activo y alcanzable;
+# sin gateway esos tests fallan por timeout. Para correrlos solos, con timeout amplio:
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Unit tests:** 191 tests — config (13), api-client (12), debate (9), args (10), agentic-review (8), agentic-review-maxtime (1), agentic-review-malformed-output (2), cli-timeout (6), claude-subprocess (9), codex-harness (6), zero-harness (35 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping), claude-session-transfer (9), session-lifecycle-hook (2), dispatch (69 — Semaphore/normalizeBaseUrl, parsers, worktree lifecycle, execution engine, cross-review, CLI). Sin red — todos usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real.
+**Suite completa:** 292 tests — 279 sin red + 13 de integración. Los 279 sin red no requieren gateway: usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real. Cubren toda la superficie del CLI, incluyendo la de v0.5.2: background jobs (`background-jobs`), redaction/contrato de error (`redaction`, `setup-output-redaction`), baseline-capture (`baseline-capture`), `version --json` (`version`) y los tres harnesses (`claude-subprocess`, `codex-harness`, `zero-harness`). Los de mayor cobertura son dispatch (69) y zero-harness (36 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping).
 
 **Integration tests:** 13 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness y task via codex harness (cada uno contra los 3 modelos principales: glm-5.2, minimax-m3, deepseek-v4-pro), más task via zero harness (solo glm-5.2).
 
@@ -861,7 +873,7 @@ rm ~/.gateway-plugin/config.json
 
 MIT — ver [LICENSE](LICENSE).
 
-**Versión actual:** v0.5.1
+**Versión actual:** v0.5.2
 
 ## Créditos
 

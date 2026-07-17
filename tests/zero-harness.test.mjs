@@ -349,6 +349,39 @@ describe("runZeroTask preflight and guards", () => {
     assert.match(result.stderr, /elsewhere:9/);
   });
 
+  it("captures the full raw stream even when zero exits immediately after a large write (close, not exit)", async () => {
+    // aligned provider — preflight passes and runZeroTask actually spawns `zero`
+    fs.mkdirSync(path.join(tmpDir, "zero"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "zero", "config.json"),
+      JSON.stringify({ activeProvider: "gw", providers: [{ name: "gw", baseURL: PROFILE.baseUrl }] })
+    );
+    _resetZeroProviderCache();
+
+    // fake `zero` emits a large `final` event then exits non-zero right away.
+    // Settling on "exit" could truncate the JSONL before the terminal line,
+    // making parseZeroJsonl miss the final; "close" guarantees full capture.
+    const big = "X".repeat(60000);
+    const finalLine = JSON.stringify({ type: "final", text: big });
+    const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "zero-fake-"));
+    const fakeZeroPath = path.join(fakeBinDir, "zero");
+    fs.writeFileSync(fakeZeroPath, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(finalLine)} + "\\n", () => process.exit(1));\n`);
+    fs.chmodSync(fakeZeroPath, 0o755);
+
+    const originalPath = process.env.PATH;
+    const NODE_BIN_DIR = path.dirname(process.execPath);
+    process.env.PATH = [fakeBinDir, NODE_BIN_DIR, originalPath ?? ""].filter(Boolean).join(path.delimiter);
+    try {
+      const result = await runZeroTask(PROFILE, "hi", { write: false });
+      assert.equal(result.exitCode, 1, "non-zero exit must be preserved");
+      // Full final text survived → the raw stream was captured completely.
+      assert.equal(result.stdout.length, 60000, `expected full capture, got ${result.stdout.length} chars`);
+      assert.ok(result.rawJsonl.includes(big), "rawJsonl must retain the complete stream");
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
   it("kills the spawned process tree immediately when the signal is already aborted", async () => {
     // aligned provider — preflight passes and runZeroTask actually spawns `zero`
     fs.mkdirSync(path.join(tmpDir, "zero"), { recursive: true });

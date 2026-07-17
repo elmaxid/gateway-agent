@@ -254,16 +254,26 @@ export async function runZeroTask(profile, prompt, opts = {}) {
   };
 
   return new Promise((resolve, reject) => {
+    let exitCode = null;
+    let exitSignal = null;
     proc.on("error", (err) => {
       removePromptFile();
       detachAbort();
       reject(err);
     });
-    proc.on("exit", (code, sig) => {
+    // Record the exit status when the process ends...
+    proc.on("exit", (code, sig) => { exitCode = code; exitSignal = sig; });
+    // ...but only SETTLE on "close", which fires after the child's stdout AND
+    // stderr streams have fully drained (EOF). Resolving on "exit" can settle
+    // the run while buffered JSONL is still unread, so parseZeroJsonl could miss
+    // the terminal `final` event and shapeZeroResult would wrongly report no
+    // final message. "close" guarantees the stream is complete before shaping.
+    // (Parity with codex-harness.mjs.)
+    proc.on("close", (code, sig) => {
       removePromptFile();
       detachAbort();
-      if (stdoutBuf && opts.onStdout) opts.onStdout(stdoutBuf);
-      resolve(shapeZeroResult({ code, signal: sig, stdout, stderr }));
+      if (stdoutBuf && opts.onStdout) { opts.onStdout(stdoutBuf); stdoutBuf = ""; }
+      resolve(shapeZeroResult({ code: exitCode ?? code, signal: exitSignal ?? sig, stdout, stderr }));
     });
   });
 }

@@ -66,10 +66,20 @@ export function runClaudeTask(profile, prompt, opts = {}) {
   }
 
   return new Promise((resolve, reject) => {
+    let exitCode = null;
+    let exitSignal = null;
     proc.on("error", reject);
-    proc.on("exit", (code, sig) => {
-      if (stdoutBuf && opts.onStdout) opts.onStdout(stdoutBuf);
-      resolve({ stdout, stderr, exitCode: code, signal: sig });
+    // Record the exit status when the process ends...
+    proc.on("exit", (code, sig) => { exitCode = code; exitSignal = sig; });
+    // ...but only SETTLE on "close", which fires after the child's stdout AND
+    // stderr streams have fully drained (EOF). Resolving on "exit" can settle
+    // the run while buffered pipe data is still unread, so the captured output
+    // could be empty or partial depending on scheduling. "close" guarantees
+    // stdout/stderr are complete before we return the result. (Parity with
+    // codex-harness.mjs; the abort cleanup above stays on "exit".)
+    proc.on("close", (code, sig) => {
+      if (stdoutBuf && opts.onStdout) { opts.onStdout(stdoutBuf); stdoutBuf = ""; }
+      resolve({ stdout, stderr, exitCode: exitCode ?? code, signal: exitSignal ?? sig });
     });
   });
 }

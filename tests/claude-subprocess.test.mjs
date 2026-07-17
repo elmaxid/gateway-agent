@@ -1,5 +1,8 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { buildSubprocessEnv, runClaudeTask } from "../plugins/gateway/scripts/lib/claude-subprocess.mjs";
 
@@ -137,6 +140,51 @@ describe("runClaudeTask", () => {
     } catch (err) {
       assert.ok(err.message.includes("openai-chat"),
         "Error should mention the actual profile kind");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runClaudeTask — capture completeness (resolves on close, not exit).
+// A fast-failing fake `claude` writes a large blob then exits non-zero: if the
+// promise settled on "exit" instead of "close", the buffered stdout could be
+// truncated or empty. This guards the exit-vs-close parity fix.
+// ---------------------------------------------------------------------------
+
+// The node bin dir stays on PATH so the fake's `#!/usr/bin/env node` shebang
+// resolves after we prepend the fake dir.
+const NODE_BIN_DIR = path.dirname(process.execPath);
+
+function writeFakeClaude() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-fake-"));
+  const bin = path.join(dir, "claude");
+  const script = `#!/usr/bin/env node
+// Drain stdin (the harness pipes the prompt in), then emit a large deterministic
+// blob right before a fast non-zero exit.
+let buf = "";
+process.stdin.on("data", (c) => { buf += c; });
+process.stdin.on("end", () => {
+  process.stdout.write("X".repeat(60000) + "\\n", () => process.exit(1));
+});
+`;
+  fs.writeFileSync(bin, script);
+  fs.chmodSync(bin, 0o755);
+  return { dir };
+}
+
+describe("runClaudeTask — capture completeness (resolves on close, not exit)", () => {
+  it("captures the child's full stdout even when it exits immediately after a large write", async () => {
+    const { dir } = writeFakeClaude();
+    const originalPath = process.env.PATH;
+    process.env.PATH = [dir, NODE_BIN_DIR, originalPath ?? ""].filter(Boolean).join(path.delimiter);
+    try {
+      const result = await runClaudeTask(CLAUDE_PROFILE, "hi", { model: "m", write: false });
+      assert.equal(result.exitCode, 1, "non-zero exit must be preserved");
+      // Settling on "exit" could truncate this; "close" guarantees the full
+      // 60000-char payload drained before the promise settled.
+      assert.equal(result.stdout.trim().length, 60000, `expected full capture, got ${result.stdout.trim().length} chars`);
+    } finally {
+      process.env.PATH = originalPath;
     }
   });
 });

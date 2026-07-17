@@ -93,36 +93,66 @@ describe("getVersionInfo — build-info.json present", () => {
 // 2. no build-info.json, real git checkout
 // ---------------------------------------------------------------------------
 
-describe("getVersionInfo — real plugin root (git checkout or release build)", () => {
-  it("resolves a 40-hex commit from git rev-parse HEAD, or from build-info.json when a release build wrote one", () => {
-    // Uses the real plugins/gateway dir in THIS repo. It normally has no
-    // build-info.json (git fallback), but the release flow (`npm run
-    // build-info`) writes a gitignored one — so accept either resolution
-    // rather than depending on that file's absence.
-    const buildInfoPath = path.join(REAL_PLUGIN_ROOT, ".claude-plugin", "build-info.json");
+describe("getVersionInfo — real plugin root (dev checkout: git wins even over a committed build-info.json)", () => {
+  it("resolves commit via git rev-parse HEAD, not build-info.json, since this is a live git work tree", () => {
+    // Uses the real plugins/gateway dir in THIS repo, which is always inside
+    // a git work tree when the suite runs from a checkout. Under the
+    // git-first precedence, commitSource must be "git" unconditionally here
+    // — even if a committed build-info.json happens to exist alongside it
+    // (release flow commits one at tag time) — because dev checkouts must
+    // always report live HEAD, not a possibly-stale committed snapshot.
+    const expected = spawnSync("git", ["rev-parse", "HEAD"], { cwd: REAL_PLUGIN_ROOT, encoding: "utf8" });
+    assert.equal(expected.status, 0, "precondition: repo must be a git checkout with a HEAD commit");
 
     const info = getVersionInfo({ pluginRoot: REAL_PLUGIN_ROOT });
+    assert.equal(info.commitSource, "git", "git must win in a live work tree regardless of build-info.json");
+    assert.equal(info.commit, expected.stdout.trim());
     assert.match(info.commit, /^[0-9a-f]{40}$/);
-    assert.ok(
-      ["git", "build-info"].includes(info.commitSource),
-      `expected commitSource git|build-info, got ${info.commitSource}`
-    );
-
-    if (fs.existsSync(buildInfoPath)) {
-      const buildInfo = JSON.parse(fs.readFileSync(buildInfoPath, "utf8"));
-      assert.equal(info.commitSource, "build-info");
-      assert.equal(info.commit, buildInfo.commit);
-    } else {
-      const expected = spawnSync("git", ["rev-parse", "HEAD"], { cwd: REAL_PLUGIN_ROOT, encoding: "utf8" });
-      assert.equal(expected.status, 0, "precondition: repo must be a git checkout with a HEAD commit");
-      assert.equal(info.commitSource, "git");
-      assert.equal(info.commit, expected.stdout.trim());
-    }
 
     const pluginJson = JSON.parse(
       fs.readFileSync(path.join(REAL_PLUGIN_ROOT, ".claude-plugin", "plugin.json"), "utf8")
     );
     assert.equal(info.pluginVersion, pluginJson.version, "must read version dynamically, not hardcode it");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. both .git and build-info.json present — git must win (proves precedence,
+// not mere consistency: build-info.json is planted with a DIFFERENT commit)
+// ---------------------------------------------------------------------------
+
+describe("getVersionInfo — both .git and build-info.json present", () => {
+  it("reports commitSource 'git' and the live HEAD commit, ignoring a stale build-info.json", () => {
+    const tmp = mkTmp("gw-version-both-");
+    try {
+      writePluginJson(tmp, "5.5.5");
+      const initResult = spawnSync("git", ["init", "-q"], { cwd: tmp });
+      assert.equal(initResult.status, 0, "precondition: git init must succeed");
+      const commitResult = spawnSync(
+        "git",
+        ["-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "--allow-empty", "-q", "-m", "init"],
+        { cwd: tmp }
+      );
+      assert.equal(commitResult.status, 0, "precondition: empty commit must succeed");
+      const gitHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: tmp, encoding: "utf8" });
+      assert.equal(gitHead.status, 0);
+      const realCommit = gitHead.stdout.trim();
+
+      // Fake commit deliberately differs from realCommit, so a pass proves
+      // git precedence rather than coincidental agreement.
+      const fakeCommit = "f".repeat(40);
+      fs.writeFileSync(
+        path.join(tmp, ".claude-plugin", "build-info.json"),
+        JSON.stringify({ commit: fakeCommit, builtAt: new Date().toISOString() })
+      );
+
+      const info = getVersionInfo({ pluginRoot: tmp });
+      assert.equal(info.commitSource, "git");
+      assert.equal(info.commit, realCommit);
+      assert.notEqual(info.commit, fakeCommit);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 

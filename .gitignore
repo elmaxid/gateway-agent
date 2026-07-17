@@ -7,4 +7,3 @@ docs/superpowers/
 .claude/settings.json
 .gateway-dispatch/
 tasks/
-plugins/gateway/.claude-plugin/build-info.json

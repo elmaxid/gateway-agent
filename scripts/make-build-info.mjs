@@ -10,6 +10,21 @@
 // Fails loud (non-zero exit + message) if git isn't available or this isn't
 // a git checkout — a build-info.json with a fabricated/missing commit would
 // be worse than none, since it would misreport provenance.
+//
+// Release flow: run make-build-info → commit build-info.json → tag.
+// build-info.json is committed (not gitignored) specifically so marketplace
+// installs — which clone the repo but land with no .git directory in
+// ~/.claude/plugins/cache/... — still carry commit provenance. Dev checkouts
+// don't need it: version-info.mjs prefers live `git rev-parse HEAD` over
+// build-info.json whenever pluginRoot is a git work tree, so a stale
+// committed file never shadows a dev's real HEAD.
+//
+// Off-by-nothing caveat: the commit recorded here is HEAD at generation
+// time, which is BEFORE the commit that adds/updates build-info.json itself.
+// So a tag's build-info.json names the content commit one before the tag
+// commit — not the tag commit, and not the commit that carries the file.
+// This is expected and not a bug: the file can't record its own commit hash
+// before that commit exists.
 
 import fs from "node:fs";
 import path from "node:path";

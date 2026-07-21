@@ -352,6 +352,25 @@ Delega una tarea al LLM via subprocess. Soporta triple-harness (claude, codex o 
 
 ---
 
+### `/gateway:task-review`
+
+Encadena task + cross-model review automático. Ejecuta la tarea con un modelo, luego revisa los cambios con otro.
+
+```
+/gateway:task-review --review glm "implementa input validation en auth.mjs"
+/gateway:task-review --review glm --profile deepseek-pro "fix el bug de parsing"
+/gateway:task-review --review deepseek-pro --harness codex "refactoriza render.mjs"
+```
+
+**Flags:**
+- `--review PROFILE` — **(requerido)** perfil que ejecuta el review post-implementación
+- Todos los flags de `/gateway:task` aplican (`--profile`, `--model`, `--harness`, `--as`, `--write`, `--no-write`, `--prompt-file`)
+- No soporta `--background` — la tarea debe completar antes del review
+
+**Flujo:** task (exit 0) → `review --profile <review> --include-diff --scope working-tree`. Si task falla, review se omite.
+
+---
+
 ### `/gateway:dispatch`
 
 Distribuye varias tareas de implementación across múltiples modelos gateway en paralelo, cada una en su propia worktree git aislada, con cross-review opcional. Ideal para ejecutar un plan (`## Task N`) repartiendo tareas entre modelos.

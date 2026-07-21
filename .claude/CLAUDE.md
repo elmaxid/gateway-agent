@@ -49,6 +49,7 @@ node plugins/gateway/scripts/gateway-companion.mjs setup test --profile profile-
 | Review 2-fases (spec + adversarial) | `/gateway:staged-review --include-diff` |
 | Debate arquitectura / decisión técnica | `/gateway:debate --include-diff` |
 | Revisión adversarial (2-pass false-positive filter) | `/gateway:adversarial-review --include-diff` |
+| Implementación + auto cross-review | `/gateway:task-review --review <profile>` |
 | Implementación / feature nueva (spec ya cerrado) | `gateway:gateway-coder` (codex harness) |
 | Debug / investigación de bug | `gateway:gateway-debugger` (codex harness) |
 | Exploración de código | `gateway:gateway-researcher` |

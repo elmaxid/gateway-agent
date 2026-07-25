@@ -38,6 +38,18 @@ node plugins/gateway/scripts/gateway-companion.mjs setup test --profile profile-
 
 > La config de perfiles vive en `~/.gateway-plugin/config.json` — no se commitea.
 
+### 4. (Opcional) Instalar también para Codex
+```bash
+codex plugin marketplace add /path/to/agent-plugin-cc
+codex plugin add gateway-codex@agent-gateway
+```
+> Plugin nativo de Codex (sin MCP): `plugins/gateway-codex/`, un solo skill
+> (`gateway-workflows`) que documenta cómo invocar `gateway-companion` por shell.
+> Usa los mismos perfiles del paso 2 — no hay config separada.
+> `codex plugin add` corrido desde Claude Code se bloquea por el hook
+> `codex-exec-guard` del plugin octo (solo permite `codex exec|--version|--help|-h|login|auth|completion`
+> como subcomando bare) — correrlo con `!` o directo en tu propia terminal.
+
 ---
 
 ## Routing rules para este proyecto

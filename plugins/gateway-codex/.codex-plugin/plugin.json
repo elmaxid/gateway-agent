@@ -1,0 +1,24 @@
+{
+  "name": "gateway-codex",
+  "version": "0.1.0",
+  "description": "Delega tareas, reviews y debates a modelos alternativos (DeepSeek, MiniMax, Ollama, etc.) vía el CLI gateway-companion, sin MCP.",
+  "author": {
+    "name": "elmaxi"
+  },
+  "repository": "https://github.com/elmaxid/gateway-agent",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Gateway Codex",
+    "shortDescription": "Delegar tareas/review/debate al gateway multi-modelo",
+    "longDescription": "Expone el CLI gateway-companion (ya instalado en PATH) a Codex: delega tareas, code review, debates y dispatch paralelo a modelos configurados en el gateway (DeepSeek, MiniMax, Ollama, otros endpoints OpenAI-compatibles). Sin servidor MCP: invoca el binario directo por shell.",
+    "developerName": "elmaxi",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": [
+      "Delega este bug a MiniMax",
+      "Corré un review adversarial del diff actual",
+      "Lanzá un debate entre 2 perfiles del gateway"
+    ]
+  }
+}

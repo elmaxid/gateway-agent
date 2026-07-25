@@ -861,6 +861,75 @@ describe("hasDevCachebuster", () => {
   });
 });
 
+describe("devCachebusterWarning wiring (Task 6b — hasDevCachebuster reaches the installer's actual output)", () => {
+  // Not just asserting on hasDevCachebuster() in isolation (already covered
+  // above): this writes a *real* plugins/gateway-codex/.codex-plugin/plugin.json
+  // to a temp repo, reads it back through the real readRepoManifests, derives
+  // the same {detected, version} shape main() derives, and confirms it
+  // actually reaches both renderReport's text and buildJson's JSON.
+  let repoRoot;
+
+  function writeCodexPluginFixture(codexPluginVersion) {
+    fs.writeFileSync(
+      path.join(repoRoot, "package.json"),
+      JSON.stringify({ name: "gateway-plugin-cc", version: "0.5.4" }, null, 2)
+    );
+    fs.mkdirSync(path.join(repoRoot, ".agents/plugins"), { recursive: true });
+    fs.writeFileSync(
+      path.join(repoRoot, ".agents/plugins/marketplace.json"),
+      JSON.stringify(
+        { name: "agent-gateway", plugins: [{ name: "gateway-codex", source: { source: "local", path: "./plugins/gateway-codex" } }] },
+        null,
+        2
+      )
+    );
+    fs.mkdirSync(path.join(repoRoot, "plugins/gateway-codex/.codex-plugin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(repoRoot, "plugins/gateway-codex/.codex-plugin/plugin.json"),
+      JSON.stringify({ name: "gateway-codex", version: codexPluginVersion }, null, 2)
+    );
+  }
+
+  beforeEach(() => {
+    repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "install-plugins-devcachebuster-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it("a real manifest carrying +codex.<token>: the warning reaches both renderReport and buildJson", () => {
+    writeCodexPluginFixture("0.1.0+codex.abc123");
+    const manifests = readRepoManifests(repoRoot);
+    assert.equal(manifests.codex.pluginVersion, "0.1.0+codex.abc123");
+
+    const detected = hasDevCachebuster(manifests.codex.pluginVersion);
+    const devCachebusterWarning = { detected, version: detected ? manifests.codex.pluginVersion : null };
+    const result = baseResult({ devCachebusterWarning });
+
+    const report = renderReport(result);
+    assert.match(report, /dev cachebuster suffix/);
+    assert.ok(report.includes("0.1.0+codex.abc123"));
+
+    const json = buildJson(result);
+    assert.equal(json.devCachebusterWarning.detected, true);
+    assert.equal(json.devCachebusterWarning.version, "0.1.0+codex.abc123");
+  });
+
+  it("a real manifest with a plain version (no suffix): no warning in either output", () => {
+    writeCodexPluginFixture("0.1.0");
+    const manifests = readRepoManifests(repoRoot);
+    assert.equal(manifests.codex.pluginVersion, "0.1.0");
+
+    const detected = hasDevCachebuster(manifests.codex.pluginVersion);
+    const devCachebusterWarning = { detected, version: detected ? manifests.codex.pluginVersion : null };
+    const result = baseResult({ devCachebusterWarning });
+
+    assert.ok(!renderReport(result).includes("dev cachebuster suffix"));
+    assert.deepEqual(buildJson(result).devCachebusterWarning, { detected: false, version: null });
+  });
+});
+
 describe("applyCachebuster (Task 5 — the installer's one sanctioned repo write)", () => {
   let pluginRoot;
 
@@ -1282,6 +1351,25 @@ describe("computeExitCode", () => {
     });
     assert.equal(computeExitCode(result), 0);
   });
+
+  it("devCachebusterWarning.detected is informational only — all harnesses ok despite the warning -> still 0", () => {
+    const result = baseResult({
+      devCachebusterWarning: { detected: true, version: "0.1.0+codex.abc123" },
+      harnesses: [
+        harnessResult({ name: "claude", action: "unchanged", status: "ok" }),
+        harnessResult({ name: "codex", action: "unchanged", status: "ok" }),
+      ],
+    });
+    assert.equal(computeExitCode(result), 0);
+  });
+
+  it("devCachebusterWarning.detected does not mask a real harness failure -> still 1", () => {
+    const result = baseResult({
+      devCachebusterWarning: { detected: true, version: "0.1.0+codex.abc123" },
+      harnesses: [harnessResult({ name: "codex", status: "failed" })],
+    });
+    assert.equal(computeExitCode(result), 1);
+  });
 });
 
 describe("buildJson", () => {
@@ -1363,6 +1451,18 @@ describe("buildJson", () => {
       ],
     });
     assert.equal(buildJson(result).exitCode, 0);
+  });
+
+  it("surfaces devCachebusterWarning when set on result, shaped {detected, version}", () => {
+    const json = buildJson(
+      baseResult({ devCachebusterWarning: { detected: true, version: "0.1.0+codex.abc123" } })
+    );
+    assert.deepEqual(json.devCachebusterWarning, { detected: true, version: "0.1.0+codex.abc123" });
+  });
+
+  it("devCachebusterWarning absent on result defaults to {detected:false, version:null}", () => {
+    const json = buildJson(baseResult());
+    assert.deepEqual(json.devCachebusterWarning, { detected: false, version: null });
   });
 });
 
@@ -1521,6 +1621,27 @@ describe("renderReport", () => {
     assert.ok(report.includes("0.5.4"));
     assert.ok(report.includes("0.5.3"));
     assert.ok(report.includes("plugins/gateway/.claude-plugin/plugin.json"));
+  });
+
+  it("dev cachebuster warning is surfaced prominently (near the top, same convention as version drift) when detected", () => {
+    const report = renderReport(
+      baseResult({ devCachebusterWarning: { detected: true, version: "0.1.0+codex.abc123" } })
+    );
+    assert.match(report, /WARNING/);
+    assert.match(report, /dev cachebuster suffix/);
+    assert.ok(report.includes("0.1.0+codex.abc123"));
+    assert.ok(report.includes("plugins/gateway-codex/.codex-plugin/plugin.json"));
+    assert.ok(report.includes("strip it before tagging a release"));
+  });
+
+  it("no dev cachebuster warning line when devCachebusterWarning.detected is false (clean output)", () => {
+    const report = renderReport(baseResult({ devCachebusterWarning: { detected: false, version: null } }));
+    assert.ok(!report.includes("dev cachebuster suffix"));
+  });
+
+  it("no dev cachebuster warning line when devCachebusterWarning is absent entirely (older/partial result objects)", () => {
+    const report = renderReport(baseResult());
+    assert.ok(!report.includes("dev cachebuster suffix"));
   });
 });
 

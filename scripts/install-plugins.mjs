@@ -974,11 +974,16 @@ export function applyCachebuster(pluginRoot, token = defaultCachebusterToken()) 
 //
 // renderReport/buildJson/computeExitCode all take the same aggregate
 // `result` object main() assembles (repoRoot, dryRun, uninstall, versionDrift,
-// harnesses[], summary, error) — see docs/superpowers/specs/
+// devCachebusterWarning, harnesses[], summary, error) — see docs/superpowers/specs/
 // 2026-07-25-harness-installer-design.md §7.2 for the JSON shape this is
 // built to satisfy (schemaVersion, harnesses[].commands[].argv, summary,
 // exitCode are the fields the plan's test list checks for explicitly; the
 // rest of the shape below is a reasonable superset, not a stricter contract).
+//
+// devCachebusterWarning is informational only (spec §4 decision 6:
+// hasDevCachebuster was built in Task 5 but never wired anywhere until now)
+// — it never feeds computeExitCode and never alters install/update/uninstall
+// behavior, same contract as versionDrift.
 
 /** Read-only state probes (`plugin list --json`, `plugin marketplace list
  * --json`) — cheap, never mutate, run even in --dry-run so the plan they
@@ -1231,6 +1236,7 @@ export function buildJson(result) {
     dryRun: Boolean(result.dryRun),
     uninstall: Boolean(result.uninstall),
     versionDrift: result.versionDrift ?? { detected: false, values: {} },
+    devCachebusterWarning: result.devCachebusterWarning ?? { detected: false, version: null },
     harnesses: result.harnesses ?? [],
     summary: result.summary ?? computeSummary(result.harnesses ?? []),
     error: result.error ?? null,
@@ -1292,6 +1298,14 @@ export function renderReport(result) {
     for (const [field, info] of Object.entries(result.versionDrift.values || {})) {
       lines.push(`  ${field} = ${info.value} (${info.path})`);
     }
+    lines.push("");
+  }
+
+  if (result.devCachebusterWarning && result.devCachebusterWarning.detected) {
+    lines.push(
+      `WARNING: plugins/gateway-codex/.codex-plugin/plugin.json has a dev cachebuster suffix ` +
+        `(${result.devCachebusterWarning.version}) — strip it before tagging a release.`
+    );
     lines.push("");
   }
 
@@ -1409,6 +1423,16 @@ function main() {
   const manifests = readRepoManifests(repoRoot);
   const detected = detectHarnesses(args.harnesses);
 
+  // Task 5 built hasDevCachebuster but never wired it in (spec §4 decision
+  // 6: "el instalador avisa en cada corrida posterior que el manifest tiene
+  // sufijo de dev y hay que limpiarlo antes de release"). Informational
+  // only — see the note above buildJson/renderReport.
+  const devCachebusterDetected = hasDevCachebuster(manifests.codex.pluginVersion);
+  const devCachebusterWarning = {
+    detected: devCachebusterDetected,
+    version: devCachebusterDetected ? manifests.codex.pluginVersion : null,
+  };
+
   // Must run after detection (codex's presence is only knowable now) and
   // before any planning — rejecting late means we never spend time building
   // plans for a --force that was never going to be valid (Task 4/§9).
@@ -1464,6 +1488,7 @@ function main() {
     dryRun: args.dryRun,
     uninstall: args.uninstall,
     versionDrift: manifests.drift,
+    devCachebusterWarning,
     harnesses,
     error: harnesses.some((h) => h.detected) ? null : NO_HARNESS_DETECTED_ERROR,
   };

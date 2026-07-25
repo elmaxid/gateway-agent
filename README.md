@@ -1,6 +1,6 @@
 # gateway-plugin-cc
 
-Claude Code plugin que delega code reviews y tareas a endpoints LLM alternativos (Ollama, gateways custom) usando la API compatible con OpenAI.
+Claude Code plugin que delega code reviews y tareas a endpoints LLM alternativos (Ollama, gateways custom) usando la API compatible con OpenAI. También incluye un plugin nativo (sin MCP) para usar el mismo gateway desde [Codex](#codex).
 
 ## Qué hace
 
@@ -99,6 +99,7 @@ contain the complete output"*. The full stream survives either way in the task l
 - Al menos un endpoint compatible con OpenAI (Ollama, gateway custom, etc.)
 - **Opcional:** [Codex CLI](https://github.com/openai/codex) para el harness codex (si no está, usa claude subprocess como fallback)
   > ⚠️ **Nota:** Codex requiere que el directorio de trabajo sea un repositorio git. Si no lo es, ejecutar `git init` antes de usar harness codex.
+  > Codex también puede ser **cliente** del plugin (no solo harness de ejecución) — ver sección [Codex](#codex) más abajo.
 - **Opcional:** [Zero CLI](https://github.com/Gitlawb/zero) (`npm i -g @gitlawb/zero`) para el harness zero (sin fallback: fail-loud si no está instalado)
 
 ## Instalación
@@ -131,6 +132,35 @@ Dentro de Claude Code:
 ```
 
 Debe responder (vacío si es primera vez, o con perfiles si ya configuraste).
+
+## Codex
+
+Además del plugin de Claude Code, el repo incluye un plugin nativo para [Codex](https://github.com/openai/codex) — sin servidor MCP, solo un skill (`gateway-workflows`) que le enseña a Codex a invocar el mismo CLI `gateway-companion` por shell. Los perfiles configurados (`~/.gateway-plugin/config.json`) son compartidos — no hay configuración separada para Codex.
+
+### Instalación
+
+```bash
+codex plugin marketplace add /path/to/agent-plugin-cc
+codex plugin add gateway-codex@agent-gateway
+```
+
+Usa el mismo checkout local del repo que ya tenés para el plugin de Claude Code (no hace falta clonar de nuevo).
+
+### Verificar instalación
+
+```bash
+codex plugin list
+```
+
+Debe listar `gateway-codex@agent-gateway` como instalado.
+
+### Qué expone
+
+El skill `gateway-workflows` (`plugins/gateway-codex/skills/gateway-workflows/SKILL.md`) documenta para Codex los mismos subcomandos que Claude Code expone vía `/gateway:*` — `task`, `review`, `adversarial-review`, `staged-review`, `debate`, `dispatch`, `transfer`, `status`, `result`, `cancel`, `setup` — más las reglas de seguridad: no secretos en el prompt, `--prompt-file` para prompts largos, `--no-write` por defecto, no fallback silencioso entre harnesses.
+
+### Limitación conocida: sandbox anidado
+
+Invocar `gateway-companion task --harness codex` (o `claude`) desde **dentro** de una sesión de Codex ya activa puede colgarse o fallar sin log útil — es Codex invocándose a sí mismo anidado, no un bug del CLI. `debate`/`review`/`staged-review`/`transfer` son HTTP directo (sin subprocess) y no tienen ese problema. Ante `fetch failed` o un colgado, correr `gateway-companion setup test --profile <nombre>` primero para descartar que sea el perfil (sin cupo/token en el router) antes de sospechar del harness.
 
 ## Configuración inicial
 
@@ -728,6 +758,10 @@ Los nombres son exactos — sin prefijos adicionales.
 │           ├── tracked-jobs.mjs         # Logging por job
 │           ├── workspace.mjs            # Resolución de workspace root
 │           └── claude-session-transfer.mjs  # Parser de transcripts + window transfer
+├── plugins/gateway-codex/                   # Plugin nativo de Codex (sin MCP)
+│   ├── .codex-plugin/plugin.json            # Manifiesto Codex
+│   └── skills/gateway-workflows/SKILL.md    # Cómo invocar gateway-companion desde Codex
+├── .agents/plugins/marketplace.json         # Marketplace Codex repo-local (name: agent-gateway)
 └── tests/
     ├── api-client.test.mjs          # HTTP client + AbortController timeout + testConnectivity timeoutMs — unit (15 tests)
     ├── debate.test.mjs              # Quorum enforcement + exports + preflight timeoutMs — unit (9 tests)
@@ -873,6 +907,10 @@ function readHookInput() {
 }
 ```
 
+### Codex: `fetch failed` o colgado al delegar
+
+Ver [Limitación conocida: sandbox anidado](#limitación-conocida-sandbox-anidado) en la sección Codex — típico de invocar `task`/`dispatch` con harness subprocess desde dentro de una sesión Codex activa. Usar `review`/`debate`/`staged-review`/`transfer` (HTTP directo) si el problema persiste, y `setup test --profile <nombre>` para descartar perfil sin cupo.
+
 ### Resetear configuración
 
 ```bash
@@ -892,7 +930,7 @@ rm ~/.gateway-plugin/config.json
 
 MIT — ver [LICENSE](LICENSE).
 
-**Versión actual:** v0.5.2
+**Versión actual:** v0.5.4
 
 ## Créditos
 

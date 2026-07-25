@@ -1,0 +1,20 @@
+{
+  "name": "agent-gateway",
+  "interface": {
+    "displayName": "Agent Gateway"
+  },
+  "plugins": [
+    {
+      "name": "gateway-codex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/gateway-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

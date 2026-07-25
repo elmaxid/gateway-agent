@@ -23,12 +23,14 @@
 //
 // Implementation status: this file currently implements CLI argument
 // parsing (`parseCliArgs`, `--help` text — Task 1), manifest reading +
-// version drift detection (`readRepoManifests` — Task 2), and harness
+// version drift detection (`readRepoManifests` — Task 2), harness
 // detection + state parsing (`detectHarnesses`, `parseClaudeState`,
-// `parseCodexState` — Task 3). Planning and execution land in Tasks 4-6 of
-// that plan. Running this script today parses its args and, with
-// `-h`/`--help`, prints usage; it does not yet install or update
-// anything — that's a deliberate scope boundary for this task, not a bug.
+// `parseCodexState` — Task 3), and pure per-harness install/update/
+// uninstall planning (`planClaude`, `planCodex`, `validateForceSelection`
+// — Task 4). Execution and CLI wiring land in Tasks 5-6 of that plan.
+// Running this script today parses its args and, with `-h`/`--help`,
+// prints usage; it does not yet install or update anything — that's a
+// deliberate scope boundary for this task, not a bug.
 //
 // Style precedent: same pattern as scripts/make-build-info.mjs and
 // scripts/baseline-capture.mjs — ESM, node:* builtins only, and a main()
@@ -552,6 +554,316 @@ export function parseCodexState({ marketplaceListStdout, pluginListStdout }, { m
   };
 }
 
+// ---------------------------------------------------------------------------
+// Pure per-harness install/update/uninstall planning (Task 4)
+// ---------------------------------------------------------------------------
+//
+// planClaude / planCodex turn (repoRoot, the per-harness block of
+// readRepoManifests' output, the per-harness parseClaudeState/parseCodexState
+// result, and a mode) into the exact ordered sequence of argv this installer
+// would run — nothing more. Zero side effects: no spawnSync, no fs writes.
+// Task 6 is what actually executes the returned steps.
+//
+// Mirrors spec §6.2 (Claude sequence table) / §6.3 (Codex sequence table).
+// The one behavioral difference between the two harnesses, per §6.4, is what
+// happens when `state.parseError` is set: Claude aborts that harness (return
+// no steps — guessing install-vs-update state is exactly what produces
+// mis-registered installs) while Codex degrades to running `plugin add`
+// anyway, because that command is idempotent (safe whether or not it was
+// already installed).
+//
+// `purgeMarketplace` isn't in the plan brief's one-line interface signature,
+// but is required to build the `+ marketplace remove` step for uninstall
+// (mirrors `parseCliArgs`' own `purgeMarketplace` field — main() will pass
+// `args.purgeMarketplace` straight through once Task 6 wires this up).
+
+const CLAUDE_NEXT_STEPS = [
+  "Run /reload-plugins in any open Claude Code session (or restart it) — plugin changes on disk are not picked up live.",
+];
+
+const CODEX_NEXT_STEPS = [
+  "Open a NEW Codex thread — a session already open keeps the old copy of the skill loaded.",
+];
+
+/**
+ * Build the actionable "marketplace registered somewhere else" error shared
+ * by planClaude/planCodex's mismatch branch (spec §4 decision 4: print both
+ * paths and the exact `marketplace remove` escape hatch, with its warning
+ * that removing a marketplace uninstalls every plugin registered under it).
+ *
+ * @param {string} harnessCmd - "claude" or "codex"
+ * @param {string} marketplaceName
+ * @param {string} expectedPath
+ * @param {string} actualPath
+ */
+function mismatchError(harnessCmd, marketplaceName, expectedPath, actualPath) {
+  return (
+    `${harnessCmd === "claude" ? "Claude" : "Codex"}'s "${marketplaceName}" marketplace is already registered ` +
+    `pointing at a different path than this repo — refusing to silently repoint it.\n` +
+    `  expected (this repo): ${expectedPath}\n` +
+    `  actual (already registered): ${actualPath}\n` +
+    `To fix: ${harnessCmd} plugin marketplace remove ${marketplaceName}\n` +
+    `  (warning: this uninstalls every plugin currently registered under that marketplace — you'll need to re-add it pointing here)`
+  );
+}
+
+/**
+ * Pure planning for Claude Code. See spec §6.2 for the sequence table this
+ * mirrors.
+ *
+ * @param {{
+ *   repoRoot: string,
+ *   manifest: {marketplaceName: string, pluginName: string, pluginVersion: string},
+ *   state: {marketplaceRegistered: boolean, marketplaceSource: string|null, installedVersion: string|null, parseError: string|null},
+ *   mode: "install"|"uninstall",
+ *   purgeMarketplace?: boolean,
+ * }} args
+ * @returns {{action: string|null, steps: {label: string, argv: string[]|null, mutating: boolean}[], nextSteps: string[], error: string|null, installedVersionBefore: string|null}}
+ */
+export function planClaude({ repoRoot, manifest, state, mode, purgeMarketplace = false }) {
+  const pluginId = `${manifest.pluginName}@${manifest.marketplaceName}`;
+
+  if (mode === "uninstall") {
+    const steps = [
+      { label: `uninstall ${pluginId}`, argv: ["claude", "plugin", "uninstall", pluginId], mutating: true },
+    ];
+    if (purgeMarketplace) {
+      steps.push({
+        label: `remove marketplace ${manifest.marketplaceName}`,
+        argv: ["claude", "plugin", "marketplace", "remove", manifest.marketplaceName],
+        mutating: true,
+      });
+    }
+    return {
+      action: "uninstalled",
+      steps,
+      nextSteps: CLAUDE_NEXT_STEPS,
+      error: null,
+      installedVersionBefore: state.installedVersion,
+    };
+  }
+
+  // mode === "install"
+  if (state.parseError) {
+    // Fail loud rather than guess: without a readable state, we don't know
+    // if this is a fresh install or an update, and "run it and see" is
+    // exactly the pattern §4 decision 3 forbids.
+    return {
+      action: "blocked",
+      steps: [],
+      nextSteps: [],
+      error:
+        `Could not read Claude's current plugin/marketplace state (${state.parseError}). ` +
+        `Not guessing whether ${pluginId} is already installed — run these manually to check, then re-run this installer: ` +
+        `claude plugin marketplace list --json && claude plugin list --json`,
+      installedVersionBefore: state.installedVersion,
+    };
+  }
+
+  if (state.marketplaceRegistered && state.marketplaceSource !== repoRoot) {
+    return {
+      action: "mismatch",
+      steps: [],
+      nextSteps: [],
+      error: mismatchError("claude", manifest.marketplaceName, repoRoot, state.marketplaceSource),
+      installedVersionBefore: state.installedVersion,
+    };
+  }
+
+  const steps = [];
+  if (!state.marketplaceRegistered) {
+    steps.push({
+      label: `register marketplace ${manifest.marketplaceName}`,
+      argv: ["claude", "plugin", "marketplace", "add", repoRoot],
+      mutating: true,
+    });
+  } else {
+    // Registered and pointing here: still refresh it every run (cheap, and
+    // it's the only way marketplace-level changes get picked up even when
+    // the plugin version itself hasn't moved — spec §6.2 row 2/3).
+    steps.push({
+      label: `refresh marketplace ${manifest.marketplaceName}`,
+      argv: ["claude", "plugin", "marketplace", "update", manifest.marketplaceName],
+      mutating: true,
+    });
+  }
+
+  let action;
+  if (!state.installedVersion) {
+    steps.push({ label: `install ${pluginId}`, argv: ["claude", "plugin", "install", pluginId], mutating: true });
+    action = "installed";
+  } else if (state.installedVersion !== manifest.pluginVersion) {
+    steps.push({ label: `update ${pluginId}`, argv: ["claude", "plugin", "update", pluginId], mutating: true });
+    action = "updated";
+  } else {
+    action = "unchanged";
+  }
+
+  return {
+    action,
+    steps,
+    nextSteps: CLAUDE_NEXT_STEPS,
+    error: null,
+    installedVersionBefore: state.installedVersion,
+  };
+}
+
+/**
+ * Pure planning for Codex. See spec §6.3 for the sequence table this
+ * mirrors.
+ *
+ * @param {{
+ *   repoRoot: string,
+ *   manifest: {marketplaceName: string, pluginName: string, pluginVersion: string},
+ *   state: {marketplaceRegistered: boolean, marketplaceSource: string|null, installedVersion: string|null, parseError: string|null},
+ *   mode: "install"|"uninstall",
+ *   force?: boolean,
+ *   purgeMarketplace?: boolean,
+ * }} args
+ * @returns {{action: string|null, steps: {label: string, argv: string[]|null, mutating: boolean, pluginRoot?: string}[], nextSteps: string[], error: string|null, installedVersionBefore: string|null}}
+ */
+export function planCodex({ repoRoot, manifest, state, mode, force = false, purgeMarketplace = false }) {
+  const pluginId = `${manifest.pluginName}@${manifest.marketplaceName}`;
+
+  if (mode === "uninstall") {
+    const steps = [{ label: `remove ${pluginId}`, argv: ["codex", "plugin", "remove", pluginId], mutating: true }];
+    if (purgeMarketplace) {
+      steps.push({
+        label: `remove marketplace ${manifest.marketplaceName}`,
+        argv: ["codex", "plugin", "marketplace", "remove", manifest.marketplaceName],
+        mutating: true,
+      });
+    }
+    return {
+      action: "uninstalled",
+      steps,
+      nextSteps: CODEX_NEXT_STEPS,
+      error: null,
+      installedVersionBefore: state.installedVersion,
+    };
+  }
+
+  // mode === "install"
+  if (state.parseError) {
+    // Unlike Claude, Codex degrades instead of aborting (spec §6.4 point 3):
+    // `codex plugin add` is the same idempotent command for install and
+    // update, so it's safe to run even with state unknown. Deliberately no
+    // marketplace-add step here: parseCodexState's parseError branch always
+    // reports `marketplaceRegistered: false` as a safe *parser* default, not
+    // a verified "actually absent" — adding it on top of an unreadable state
+    // could conflict with a marketplace that's genuinely already there.
+    return {
+      action: "installed-or-refreshed",
+      steps: [{ label: `add/refresh ${pluginId}`, argv: ["codex", "plugin", "add", pluginId], mutating: true }],
+      nextSteps: CODEX_NEXT_STEPS,
+      error: null,
+      installedVersionBefore: state.installedVersion,
+    };
+  }
+
+  if (state.marketplaceRegistered && state.marketplaceSource !== repoRoot) {
+    return {
+      action: "mismatch",
+      steps: [],
+      nextSteps: [],
+      error: mismatchError("codex", manifest.marketplaceName, repoRoot, state.marketplaceSource),
+      installedVersionBefore: state.installedVersion,
+    };
+  }
+
+  const steps = [];
+  if (!state.marketplaceRegistered) {
+    steps.push({
+      label: `register marketplace ${manifest.marketplaceName}`,
+      argv: ["codex", "plugin", "marketplace", "add", repoRoot],
+      mutating: true,
+    });
+  }
+  // Registered and pointing here: no step. Unlike Claude, there is no cheap
+  // "refresh" for a local marketplace — `codex plugin marketplace upgrade`
+  // only refreshes Git-sourced snapshots (spec §6.3 note) — and the
+  // idempotent `plugin add` below covers picking up a new plugin version.
+
+  if (force) {
+    // The installer's one sanctioned write to a tracked file (spec §4
+    // decision 6): bump the codex plugin manifest's cachebuster so a
+    // same-version content change is actually picked up. This is a plain
+    // Node fs write (Task 5's applyCachebuster), never a subprocess — so
+    // unlike every other step here, there is no real argv to run, and
+    // `argv` is `null` rather than a fabricated command. `pluginRoot` gives
+    // Task 6 the directory applyCachebuster(pluginRoot, token) needs.
+    const pluginRoot = path.join(repoRoot, "plugins", "gateway-codex");
+    steps.push({
+      label: `bump the Codex plugin manifest's cachebuster (repo write, not a CLI call): ${path.join(pluginRoot, ".codex-plugin", "plugin.json")}`,
+      argv: null,
+      mutating: true,
+      pluginRoot,
+    });
+    steps.push({ label: `add/refresh ${pluginId}`, argv: ["codex", "plugin", "add", pluginId], mutating: true });
+    return {
+      action: "forced",
+      steps,
+      nextSteps: CODEX_NEXT_STEPS,
+      error: null,
+      installedVersionBefore: state.installedVersion,
+    };
+  }
+
+  steps.push({ label: `add/refresh ${pluginId}`, argv: ["codex", "plugin", "add", pluginId], mutating: true });
+
+  let action;
+  if (!state.installedVersion) {
+    action = "installed";
+  } else if (state.installedVersion !== manifest.pluginVersion) {
+    action = "updated";
+  } else {
+    action = "unchanged";
+  }
+
+  return {
+    action,
+    steps,
+    nextSteps: CODEX_NEXT_STEPS,
+    error: null,
+    installedVersionBefore: state.installedVersion,
+  };
+}
+
+/**
+ * Closes the `--force` validation gap `parseCliArgs` deliberately left open
+ * (Task 1): `--force` with no explicit `--harness` (the default = "every
+ * harness detected") can only be checked against codex's presence once
+ * harness detection has actually run, which wasn't available yet in Task 1.
+ *
+ * When `args.harnesses` was explicit, `parseCliArgs` has already thrown if
+ * that selection excluded codex — this function only has anything left to
+ * check for the default (`harnesses: null`) case, against the harnesses
+ * `detectHarnesses` actually found (Task 3's reviewer-confirmed pattern:
+ * `detectHarnesses(null, {probe}).filter(h => h.detected)`).
+ *
+ * Intentionally a standalone step rather than logic inside planCodex:
+ * planCodex is only ever invoked for a harness that's already in scope, so
+ * it has no reason to know whether *that* was a valid thing to do — this is
+ * a CLI-usage concern, checked once, before any per-harness planning runs.
+ *
+ * @param {{force: boolean, harnesses: string[]|null}} args - parseCliArgs' output
+ * @param {{name: string, detected: boolean}[]} detectedHarnesses - detectHarnesses' output
+ */
+export function validateForceSelection(args, detectedHarnesses) {
+  if (!args.force) return;
+  if (args.harnesses && args.harnesses.length > 0) return; // already validated by parseCliArgs
+
+  const effective = detectedHarnesses.filter((h) => h.detected).map((h) => h.name);
+  if (!effective.includes("codex")) {
+    throw new Error(
+      `--force only applies to codex (it bumps the codex plugin manifest's cachebuster); ` +
+        `no --harness was given and codex was not detected on this machine ` +
+        `(detected: ${effective.length > 0 ? effective.join(", ") : "none"}). ` +
+        `Install codex, pass --harness codex explicitly once it is, or drop --force.`
+    );
+  }
+}
+
 function main() {
   const args = parseCliArgs(process.argv.slice(2));
 
@@ -560,12 +872,12 @@ function main() {
     return;
   }
 
-  // Planning and execution are added in Tasks 4-6 of
-  // docs/superpowers/plans/2026-07-25-harness-installer.md.
-  // readRepoManifests (Task 2) and detectHarnesses/parseClaudeState/
-  // parseCodexState (Task 3) are implemented but not yet wired in here —
-  // that's Task 4+'s job. Nothing else happens yet — see the
-  // "Implementation status" note above.
+  // Planning is implemented (planClaude/planCodex/validateForceSelection —
+  // Task 4) but not yet wired in here. Execution and full CLI wiring
+  // (manifests → detect → validateForceSelection → state → plan → execute
+  // → render → exit) are added in Tasks 5-6 of
+  // docs/superpowers/plans/2026-07-25-harness-installer.md. Nothing else
+  // happens yet — see the "Implementation status" note above.
 }
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

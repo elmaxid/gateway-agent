@@ -13,6 +13,9 @@ import {
   detectHarnesses,
   parseClaudeState,
   parseCodexState,
+  planClaude,
+  planCodex,
+  validateForceSelection,
 } from "../scripts/install-plugins.mjs";
 import { captureBinaryVersion } from "../scripts/baseline-capture.mjs";
 
@@ -543,5 +546,279 @@ describe("parseCodexState", () => {
       );
     });
     assert.equal(typeof result.parseError, "string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// planClaude / planCodex (Task 4) — argv arrays ARE the contract. Every
+// scenario asserts full argv arrays via assert.deepEqual, never substrings.
+// Scenario numbers below match the plan's Task 4 table
+// (docs/superpowers/plans/2026-07-25-harness-installer.md, Task 4).
+// ---------------------------------------------------------------------------
+
+const REPO_ROOT = "/repo";
+const CLAUDE_MANIFEST = { marketplaceName: "agent-gateway", pluginName: "gateway", pluginVersion: "0.5.4" };
+const CODEX_MANIFEST = { marketplaceName: "agent-gateway", pluginName: "gateway-codex", pluginVersion: "0.1.1" };
+
+function baseState(overrides = {}) {
+  return {
+    marketplaceRegistered: false,
+    marketplaceSource: null,
+    installedVersion: null,
+    parseError: null,
+    ...overrides,
+  };
+}
+
+describe("planClaude", () => {
+  it("scenario 1: nothing installed, marketplace absent -> [marketplace add, install], action installed", () => {
+    const plan = planClaude({ repoRoot: REPO_ROOT, manifest: CLAUDE_MANIFEST, state: baseState(), mode: "install" });
+    assert.deepEqual(plan.steps.map((s) => s.argv), [
+      ["claude", "plugin", "marketplace", "add", "/repo"],
+      ["claude", "plugin", "install", "gateway@agent-gateway"],
+    ]);
+    assert.equal(plan.action, "installed");
+    assert.equal(plan.error, null);
+    for (const step of plan.steps) assert.equal(step.mutating, true);
+  });
+
+  it("scenario 2: marketplace ok, plugin 0.5.2 vs repo 0.5.4 -> [marketplace update, plugin update], action updated", () => {
+    const plan = planClaude({
+      repoRoot: REPO_ROOT,
+      manifest: CLAUDE_MANIFEST,
+      state: baseState({ marketplaceRegistered: true, marketplaceSource: REPO_ROOT, installedVersion: "0.5.2" }),
+      mode: "install",
+    });
+    assert.deepEqual(plan.steps.map((s) => s.argv), [
+      ["claude", "plugin", "marketplace", "update", "agent-gateway"],
+      ["claude", "plugin", "update", "gateway@agent-gateway"],
+    ]);
+    assert.equal(plan.action, "updated");
+    assert.equal(plan.installedVersionBefore, "0.5.2");
+  });
+
+  it("scenario 3: marketplace ok, same version -> [marketplace update] only, action unchanged", () => {
+    const plan = planClaude({
+      repoRoot: REPO_ROOT,
+      manifest: CLAUDE_MANIFEST,
+      state: baseState({ marketplaceRegistered: true, marketplaceSource: REPO_ROOT, installedVersion: "0.5.4" }),
+      mode: "install",
+    });
+    assert.deepEqual(plan.steps.map((s) => s.argv), [["claude", "plugin", "marketplace", "update", "agent-gateway"]]);
+    assert.equal(plan.action, "unchanged");
+  });
+
+  it("scenario 4: marketplace points at another path -> steps:[], error names both paths + the marketplace remove command", () => {
+    const plan = planClaude({
+      repoRoot: REPO_ROOT,
+      manifest: CLAUDE_MANIFEST,
+      state: baseState({
+        marketplaceRegistered: true,
+        marketplaceSource: "/some/other/checkout",
+        installedVersion: "0.5.4",
+      }),
+      mode: "install",
+    });
+    assert.deepEqual(plan.steps, []);
+    assert.equal(plan.action, "mismatch");
+    assert.ok(plan.error.includes("/repo"), "error should include the expected (repo) path");
+    assert.ok(plan.error.includes("/some/other/checkout"), "error should include the actual registered path");
+    assert.ok(
+      plan.error.includes("claude plugin marketplace remove agent-gateway"),
+      "error should suggest the exact marketplace remove command"
+    );
+  });
+
+  it("scenario 5: uninstall -> [plugin uninstall]; with purgeMarketplace also removes the marketplace", () => {
+    const plain = planClaude({
+      repoRoot: REPO_ROOT,
+      manifest: CLAUDE_MANIFEST,
+      state: baseState({ marketplaceRegistered: true, marketplaceSource: REPO_ROOT, installedVersion: "0.5.4" }),
+      mode: "uninstall",
+    });
+    assert.deepEqual(plain.steps.map((s) => s.argv), [["claude", "plugin", "uninstall", "gateway@agent-gateway"]]);
+    assert.equal(plain.action, "uninstalled");
+
+    const withPurge = planClaude({
+      repoRoot: REPO_ROOT,
+      manifest: CLAUDE_MANIFEST,
+      state: baseState({ marketplaceRegistered: true, marketplaceSource: REPO_ROOT, installedVersion: "0.5.4" }),
+      mode: "uninstall",
+      purgeMarketplace: true,
+    });
+    assert.deepEqual(withPurge.steps.map((s) => s.argv), [
+      ["claude", "plugin", "uninstall", "gateway@agent-gateway"],
+      ["claude", "plugin", "marketplace", "remove", "agent-gateway"],
+    ]);
+  });
+
+  it("scenario 10 (claude half): nextSteps present and mentions /reload-plugins", () => {
+    const plan = planClaude({ repoRoot: REPO_ROOT, manifest: CLAUDE_MANIFEST, state: baseState(), mode: "install" });
+    assert.ok(plan.nextSteps.length > 0);
+    assert.ok(plan.nextSteps.some((s) => s.includes("/reload-plugins")));
+  });
+
+  it("scenario 11: state.parseError -> steps:[], actionable error, does not throw", () => {
+    let plan;
+    assert.doesNotThrow(() => {
+      plan = planClaude({
+        repoRoot: REPO_ROOT,
+        manifest: CLAUDE_MANIFEST,
+        state: baseState({ parseError: "could not parse claude state (boom)" }),
+        mode: "install",
+      });
+    });
+    assert.deepEqual(plan.steps, []);
+    assert.ok(typeof plan.error === "string" && plan.error.length > 0);
+    assert.ok(plan.error.includes("boom"), "error should surface the underlying parseError text");
+  });
+});
+
+describe("planCodex", () => {
+  it("scenario 6: marketplace absent -> [marketplace add, plugin add]", () => {
+    const plan = planCodex({ repoRoot: REPO_ROOT, manifest: CODEX_MANIFEST, state: baseState(), mode: "install" });
+    assert.deepEqual(plan.steps.map((s) => s.argv), [
+      ["codex", "plugin", "marketplace", "add", "/repo"],
+      ["codex", "plugin", "add", "gateway-codex@agent-gateway"],
+    ]);
+    for (const step of plan.steps) assert.equal(step.mutating, true);
+  });
+
+  it("scenario 7: marketplace ok, same version -> [plugin add] only (idempotent), action unchanged", () => {
+    const plan = planCodex({
+      repoRoot: REPO_ROOT,
+      manifest: CODEX_MANIFEST,
+      state: baseState({ marketplaceRegistered: true, marketplaceSource: REPO_ROOT, installedVersion: "0.1.1" }),
+      mode: "install",
+    });
+    assert.deepEqual(plan.steps.map((s) => s.argv), [["codex", "plugin", "add", "gateway-codex@agent-gateway"]]);
+    assert.equal(plan.action, "unchanged");
+  });
+
+  it("scenario 8: --force -> first step is the cachebuster write (mutating, no CLI argv), then [plugin add]", () => {
+    const plan = planCodex({
+      repoRoot: REPO_ROOT,
+      manifest: CODEX_MANIFEST,
+      state: baseState({ marketplaceRegistered: true, marketplaceSource: REPO_ROOT, installedVersion: "0.1.1" }),
+      mode: "install",
+      force: true,
+    });
+    assert.equal(plan.steps.length, 2, "cachebuster write + plugin add, no marketplace step (already registered here)");
+    assert.equal(plan.steps[0].mutating, true, "the cachebuster bump is a real repo write");
+    assert.equal(plan.steps[0].argv, null, "not a spawnable CLI command — it's a direct fs write, not shelled out");
+    assert.ok(/cachebuster/i.test(plan.steps[0].label));
+    assert.deepEqual(plan.steps[1].argv, ["codex", "plugin", "add", "gateway-codex@agent-gateway"]);
+    assert.equal(plan.action, "forced");
+  });
+
+  it("scenario 9: uninstall -> [plugin remove]; with purgeMarketplace also removes the marketplace", () => {
+    const plain = planCodex({
+      repoRoot: REPO_ROOT,
+      manifest: CODEX_MANIFEST,
+      state: baseState({ marketplaceRegistered: true, marketplaceSource: REPO_ROOT, installedVersion: "0.1.1" }),
+      mode: "uninstall",
+    });
+    assert.deepEqual(plain.steps.map((s) => s.argv), [["codex", "plugin", "remove", "gateway-codex@agent-gateway"]]);
+    assert.equal(plain.action, "uninstalled");
+
+    const withPurge = planCodex({
+      repoRoot: REPO_ROOT,
+      manifest: CODEX_MANIFEST,
+      state: baseState({ marketplaceRegistered: true, marketplaceSource: REPO_ROOT, installedVersion: "0.1.1" }),
+      mode: "uninstall",
+      purgeMarketplace: true,
+    });
+    assert.deepEqual(withPurge.steps.map((s) => s.argv), [
+      ["codex", "plugin", "remove", "gateway-codex@agent-gateway"],
+      ["codex", "plugin", "marketplace", "remove", "agent-gateway"],
+    ]);
+  });
+
+  it("scenario 10 (codex half): nextSteps present, mentions a new thread, and differs from Claude's", () => {
+    const codexPlan = planCodex({ repoRoot: REPO_ROOT, manifest: CODEX_MANIFEST, state: baseState(), mode: "install" });
+    const claudePlan = planClaude({ repoRoot: REPO_ROOT, manifest: CLAUDE_MANIFEST, state: baseState(), mode: "install" });
+    assert.ok(codexPlan.nextSteps.length > 0);
+    assert.ok(codexPlan.nextSteps.some((s) => /thread/i.test(s)));
+    assert.notDeepEqual(codexPlan.nextSteps, claudePlan.nextSteps);
+  });
+
+  it("scenario 12: state.parseError -> still runs [plugin add], installedVersionBefore null, no error", () => {
+    let plan;
+    assert.doesNotThrow(() => {
+      plan = planCodex({
+        repoRoot: REPO_ROOT,
+        manifest: CODEX_MANIFEST,
+        state: baseState({ parseError: "could not parse codex state (boom)" }),
+        mode: "install",
+      });
+    });
+    assert.deepEqual(plan.steps.map((s) => s.argv), [["codex", "plugin", "add", "gateway-codex@agent-gateway"]]);
+    assert.equal(plan.installedVersionBefore, null);
+    assert.equal(plan.error, null);
+    assert.equal(plan.action, "installed-or-refreshed");
+  });
+
+  it("marketplace points at another path (mirrors claude's scenario 4) -> steps:[], actionable error", () => {
+    const plan = planCodex({
+      repoRoot: REPO_ROOT,
+      manifest: CODEX_MANIFEST,
+      state: baseState({ marketplaceRegistered: true, marketplaceSource: "/some/other/checkout", installedVersion: "0.1.1" }),
+      mode: "install",
+    });
+    assert.deepEqual(plan.steps, []);
+    assert.equal(plan.action, "mismatch");
+    assert.ok(plan.error.includes("/repo"));
+    assert.ok(plan.error.includes("/some/other/checkout"));
+    assert.ok(plan.error.includes("codex plugin marketplace remove agent-gateway"));
+  });
+});
+
+describe("validateForceSelection (closes Task 1's deferred --force default-selection gap)", () => {
+  it("--force with no --harness and codex NOT detected -> throws naming codex", () => {
+    assert.throws(
+      () =>
+        validateForceSelection({ force: true, harnesses: null }, [
+          { name: "claude", detected: true, cliVersion: "2.1.3" },
+          { name: "codex", detected: false, cliVersion: null },
+        ]),
+      /--force only applies to codex/
+    );
+  });
+
+  it("--force with no --harness and NEITHER harness detected -> throws", () => {
+    assert.throws(
+      () =>
+        validateForceSelection({ force: true, harnesses: null }, [
+          { name: "claude", detected: false, cliVersion: null },
+          { name: "codex", detected: false, cliVersion: null },
+        ]),
+      /--force only applies to codex/
+    );
+  });
+
+  it("--force with no --harness and codex detected -> does not throw", () => {
+    assert.doesNotThrow(() =>
+      validateForceSelection({ force: true, harnesses: null }, [
+        { name: "claude", detected: false, cliVersion: null },
+        { name: "codex", detected: true, cliVersion: "0.5.1" },
+      ])
+    );
+  });
+
+  it("force:false -> never throws, regardless of detection", () => {
+    assert.doesNotThrow(() =>
+      validateForceSelection({ force: false, harnesses: null }, [
+        { name: "claude", detected: false, cliVersion: null },
+        { name: "codex", detected: false, cliVersion: null },
+      ])
+    );
+  });
+
+  it("an explicit --harness selection is left entirely to parseCliArgs — never throws here even if that harness isn't detected", () => {
+    assert.doesNotThrow(() =>
+      validateForceSelection({ force: true, harnesses: ["codex"] }, [
+        { name: "codex", detected: false, cliVersion: null },
+      ])
+    );
   });
 });

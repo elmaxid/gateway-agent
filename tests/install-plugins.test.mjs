@@ -256,6 +256,11 @@ describe("readRepoManifests", () => {
     assert.equal(typeof result.claude.error, "string");
     assert.ok(result.claude.error.includes(pluginPath), "error message should include the offending file path");
     assert.equal(result.codex.error, undefined);
+
+    // Claude manifests unreadable → drift can't be computed from missing
+    // data. Must never be silently reported as "no drift".
+    assert.equal(result.drift.detected, true);
+    assert.equal(typeof result.drift.error, "string");
   });
 
   it("smoke: reads the real repo's own manifests and finds the real marketplace name in both blocks", () => {

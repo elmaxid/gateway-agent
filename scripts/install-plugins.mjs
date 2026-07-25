@@ -21,18 +21,20 @@
 //   node scripts/install-plugins.mjs --dry-run   # print the plan, mutate nothing
 //   node scripts/install-plugins.mjs --help      # full flag reference
 //
-// Implementation status: this file currently implements only CLI argument
-// parsing (`parseCliArgs`) and the `--help` text — Task 1 of the plan linked
-// above. Manifest reading, harness detection, planning, and execution land
-// in Tasks 2-6 of that plan. Running this script today parses its args and,
-// with `-h`/`--help`, prints usage; it does not yet install or update
-// anything — that's a deliberate scope boundary for this task, not a bug.
+// Implementation status: this file currently implements CLI argument
+// parsing (`parseCliArgs`, `--help` text — Task 1) and manifest reading +
+// version drift detection (`readRepoManifests` — Task 2). Harness
+// detection, planning, and execution land in Tasks 3-6 of that plan.
+// Running this script today parses its args and, with `-h`/`--help`,
+// prints usage; it does not yet install or update anything — that's a
+// deliberate scope boundary for this task, not a bug.
 //
 // Style precedent: same pattern as scripts/make-build-info.mjs and
 // scripts/baseline-capture.mjs — ESM, node:* builtins only, and a main()
 // guarded by comparing process.argv[1] against this module's URL so the
 // file is importable from tests without side effects.
 
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -200,6 +202,165 @@ export function parseCliArgs(argv) {
   return args;
 }
 
+// ---------------------------------------------------------------------------
+// Manifest reading + version drift detection (Task 2)
+// ---------------------------------------------------------------------------
+//
+// Five files make up the "one repo, one version" contract this installer
+// exists to protect (see docs/superpowers/specs/2026-07-25-harness-installer-design.md
+// §2.2): package.json's `version`, `.claude-plugin/marketplace.json`'s
+// `metadata.version` and `plugins[0].version`, and
+// `plugins/gateway/.claude-plugin/plugin.json`'s `version` are meant to
+// move together on every release. The Codex plugin manifest
+// (`plugins/gateway-codex/.codex-plugin/plugin.json`) tracks its own,
+// independent version and is deliberately excluded from the drift check.
+
+/**
+ * Read and JSON.parse a manifest file. Throws an Error whose message
+ * always names the file's path — callers rely on that path showing up
+ * verbatim so a missing/corrupt manifest is actionable, not a bare stack
+ * trace.
+ *
+ * @param {string} filePath
+ * @returns {any}
+ */
+function readJsonManifest(filePath) {
+  let raw;
+  try {
+    raw = fs.readFileSync(filePath, "utf8");
+  } catch (err) {
+    const reason = err && err.code === "ENOENT" ? "file not found" : err instanceof Error ? err.message : String(err);
+    throw new Error(`could not read manifest ${filePath}: ${reason}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `could not parse manifest ${filePath} as JSON: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+/**
+ * Read the two manifests that make up the Claude Code side of the plugin:
+ * the repo's marketplace registration and the gateway plugin's own
+ * manifest. A missing or corrupt file degrades this block to `{ error }`
+ * instead of throwing, so a Claude-side problem never prevents the Codex
+ * block (read independently) from being reported.
+ *
+ * @param {string} repoRoot
+ */
+function readClaudeManifests(repoRoot) {
+  const marketplacePath = path.join(repoRoot, ".claude-plugin", "marketplace.json");
+  const pluginPath = path.join(repoRoot, "plugins", "gateway", ".claude-plugin", "plugin.json");
+  try {
+    const marketplace = readJsonManifest(marketplacePath);
+    const plugin = readJsonManifest(pluginPath);
+    const entry = (marketplace.plugins && marketplace.plugins[0]) || {};
+    return {
+      marketplaceName: marketplace.name,
+      pluginName: entry.name,
+      pluginVersion: plugin.version,
+      marketplaceEntryVersion: entry.version,
+      marketplaceMetaVersion: marketplace.metadata && marketplace.metadata.version,
+    };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Read the two manifests that make up the Codex side of the plugin. Same
+ * degrade-to-`{ error }` contract as {@link readClaudeManifests}.
+ *
+ * @param {string} repoRoot
+ */
+function readCodexManifests(repoRoot) {
+  const marketplacePath = path.join(repoRoot, ".agents", "plugins", "marketplace.json");
+  const pluginPath = path.join(repoRoot, "plugins", "gateway-codex", ".codex-plugin", "plugin.json");
+  try {
+    const marketplace = readJsonManifest(marketplacePath);
+    const plugin = readJsonManifest(pluginPath);
+    const entry = (marketplace.plugins && marketplace.plugins[0]) || {};
+    return {
+      marketplaceName: marketplace.name,
+      pluginName: entry.name,
+      pluginVersion: plugin.version,
+    };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Compare the four version fields that are supposed to move together on
+ * every release. Always returns all four values with their source path,
+ * whether or not they agree, so callers (including --dry-run output in a
+ * later task) can print them regardless of drift state.
+ *
+ * @param {string|undefined} packageVersion
+ * @param {ReturnType<typeof readClaudeManifests>} claude
+ */
+function computeDrift(packageVersion, claude) {
+  if (claude.error) {
+    // Can't compare what we couldn't read. Fail loud rather than silently
+    // reporting "no drift" when the truth is "unknown".
+    return {
+      detected: true,
+      values: {},
+      error: `cannot compute version drift: Claude manifests unavailable (${claude.error})`,
+    };
+  }
+
+  const values = {
+    packageVersion: { value: packageVersion, path: "package.json" },
+    pluginVersion: { value: claude.pluginVersion, path: "plugins/gateway/.claude-plugin/plugin.json" },
+    marketplaceEntryVersion: {
+      value: claude.marketplaceEntryVersion,
+      path: ".claude-plugin/marketplace.json (plugins[0].version)",
+    },
+    marketplaceMetaVersion: {
+      value: claude.marketplaceMetaVersion,
+      path: ".claude-plugin/marketplace.json (metadata.version)",
+    },
+  };
+
+  const distinctValues = new Set(Object.values(values).map((entry) => entry.value));
+  return { detected: distinctValues.size > 1, values };
+}
+
+/**
+ * Read every version manifest this repo ships (package.json, the Claude
+ * marketplace + plugin manifests, the Codex marketplace + plugin
+ * manifests) and detect version drift across the four that are meant to
+ * move together (see {@link computeDrift}).
+ *
+ * Pure function of `repoRoot`: only reads files under it, never writes,
+ * never spawns a process. A missing/corrupt package.json is the one
+ * exception to the "degrade, don't throw" behavior of the per-harness
+ * blocks below — this repo's own package.json existing and parsing is a
+ * base invariant of the checkout, not a per-harness condition for this
+ * function to handle gracefully.
+ *
+ * @param {string} repoRoot
+ * @returns {{
+ *   claude: {marketplaceName: string, pluginName: string, pluginVersion: string, marketplaceEntryVersion: string, marketplaceMetaVersion: string}|{error: string},
+ *   codex: {marketplaceName: string, pluginName: string, pluginVersion: string}|{error: string},
+ *   packageVersion: string,
+ *   drift: {detected: boolean, values: object, error?: string},
+ * }}
+ */
+export function readRepoManifests(repoRoot) {
+  const pkg = readJsonManifest(path.join(repoRoot, "package.json"));
+  const packageVersion = pkg.version;
+
+  const claude = readClaudeManifests(repoRoot);
+  const codex = readCodexManifests(repoRoot);
+  const drift = computeDrift(packageVersion, claude);
+
+  return { claude, codex, packageVersion, drift };
+}
+
 function main() {
   const args = parseCliArgs(process.argv.slice(2));
 
@@ -208,9 +369,11 @@ function main() {
     return;
   }
 
-  // Manifest reading, harness detection, planning, and execution are added
-  // in Tasks 2-6 of docs/superpowers/plans/2026-07-25-harness-installer.md.
-  // Nothing else happens yet — see the "Implementation status" note above.
+  // Harness detection, planning, and execution are added in Tasks 3-6 of
+  // docs/superpowers/plans/2026-07-25-harness-installer.md.
+  // readRepoManifests (Task 2) is implemented but not yet wired in here —
+  // that's Task 3+'s job. Nothing else happens yet — see the
+  // "Implementation status" note above.
 }
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

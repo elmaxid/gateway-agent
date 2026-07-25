@@ -1,7 +1,11 @@
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { parseCliArgs, VALID_HARNESSES, HELP_TEXT } from "../scripts/install-plugins.mjs";
+import { parseCliArgs, VALID_HARNESSES, HELP_TEXT, readRepoManifests } from "../scripts/install-plugins.mjs";
 
 const DEFAULTS = Object.freeze({
   global: false,
@@ -141,5 +145,126 @@ describe("HELP_TEXT", () => {
     ]) {
       assert.ok(HELP_TEXT.includes(flag), `HELP_TEXT should mention ${flag}`);
     }
+  });
+});
+
+describe("readRepoManifests", () => {
+  let repoRoot;
+
+  function writeJson(relPath, data) {
+    const filePath = path.join(repoRoot, relPath);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  }
+
+  // Builds a fixture tree with the same 5 manifests as the real repo. All
+  // version fields default to a single aligned value; individual fields
+  // can be overridden per test to construct drift.
+  function writeFixture({
+    packageVersion = "0.5.4",
+    pluginVersion = packageVersion,
+    marketplaceEntryVersion = packageVersion,
+    marketplaceMetaVersion = packageVersion,
+    codexPluginVersion = "0.1.0",
+  } = {}) {
+    writeJson("package.json", { name: "gateway-plugin-cc", version: packageVersion });
+    writeJson(".claude-plugin/marketplace.json", {
+      name: "agent-gateway",
+      metadata: { version: marketplaceMetaVersion },
+      plugins: [{ name: "gateway", version: marketplaceEntryVersion, source: "./plugins/gateway" }],
+    });
+    writeJson("plugins/gateway/.claude-plugin/plugin.json", { name: "gateway", version: pluginVersion });
+    writeJson(".agents/plugins/marketplace.json", {
+      name: "agent-gateway",
+      plugins: [{ name: "gateway-codex", source: { source: "local", path: "./plugins/gateway-codex" } }],
+    });
+    writeJson("plugins/gateway-codex/.codex-plugin/plugin.json", {
+      name: "gateway-codex",
+      version: codexPluginVersion,
+    });
+  }
+
+  beforeEach(() => {
+    repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "install-plugins-manifests-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it("reads the real marketplace/plugin names for both harnesses", () => {
+    writeFixture();
+    const result = readRepoManifests(repoRoot);
+    assert.equal(result.claude.marketplaceName, "agent-gateway");
+    assert.equal(result.claude.pluginName, "gateway");
+    assert.equal(result.codex.marketplaceName, "agent-gateway");
+    assert.equal(result.codex.pluginName, "gateway-codex");
+  });
+
+  it("reports no drift when all four synced versions agree", () => {
+    writeFixture({ packageVersion: "0.5.4" });
+    const result = readRepoManifests(repoRoot);
+    assert.equal(result.drift.detected, false);
+  });
+
+  it("detects drift when plugin.json lags the marketplace entry version, and reports all 4 fields with their paths", () => {
+    writeFixture({
+      packageVersion: "0.5.4",
+      marketplaceEntryVersion: "0.5.4",
+      marketplaceMetaVersion: "0.5.4",
+      pluginVersion: "0.5.3",
+    });
+    const result = readRepoManifests(repoRoot);
+
+    assert.equal(result.drift.detected, true);
+    assert.equal(result.drift.values.packageVersion.value, "0.5.4");
+    assert.equal(result.drift.values.pluginVersion.value, "0.5.3");
+    assert.equal(result.drift.values.marketplaceEntryVersion.value, "0.5.4");
+    assert.equal(result.drift.values.marketplaceMetaVersion.value, "0.5.4");
+
+    for (const field of [
+      "packageVersion",
+      "pluginVersion",
+      "marketplaceEntryVersion",
+      "marketplaceMetaVersion",
+    ]) {
+      assert.equal(typeof result.drift.values[field].path, "string", `${field} should carry a source path`);
+      assert.ok(result.drift.values[field].path.length > 0, `${field} path should be non-empty`);
+    }
+  });
+
+  it("marks the codex block with an error when its marketplace.json is missing, leaving claude intact", () => {
+    writeFixture();
+    fs.rmSync(path.join(repoRoot, ".agents/plugins/marketplace.json"));
+
+    const result = readRepoManifests(repoRoot);
+
+    assert.equal(typeof result.codex.error, "string");
+    assert.equal(result.codex.marketplaceName, undefined);
+    assert.equal(result.claude.error, undefined);
+    assert.equal(result.claude.marketplaceName, "agent-gateway");
+    assert.equal(result.claude.pluginName, "gateway");
+  });
+
+  it("marks the claude block with an error naming the file path when its plugin.json is corrupt JSON", () => {
+    writeFixture();
+    const pluginPath = path.join(repoRoot, "plugins/gateway/.claude-plugin/plugin.json");
+    fs.writeFileSync(pluginPath, "{ not valid json");
+
+    const result = readRepoManifests(repoRoot);
+
+    assert.equal(typeof result.claude.error, "string");
+    assert.ok(result.claude.error.includes(pluginPath), "error message should include the offending file path");
+    assert.equal(result.codex.error, undefined);
+  });
+
+  it("smoke: reads the real repo's own manifests and finds the real marketplace name in both blocks", () => {
+    const realRepoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const result = readRepoManifests(realRepoRoot);
+
+    assert.equal(result.claude.marketplaceName, "agent-gateway");
+    assert.equal(result.codex.marketplaceName, "agent-gateway");
+    assert.equal(result.claude.error, undefined);
+    assert.equal(result.codex.error, undefined);
   });
 });

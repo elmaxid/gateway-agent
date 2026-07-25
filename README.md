@@ -104,7 +104,27 @@ contain the complete output"*. The full stream survives either way in the task l
 
 ## Instalación
 
-### Opción 1: Directo desde GitHub (recomendado)
+### Opción 0: instalador (recomendado, todos los harnesses)
+
+```bash
+git clone https://github.com/elmaxid/gateway-agent.git
+cd gateway-agent
+node scripts/install-plugins.mjs
+```
+
+Detecta qué CLIs de harness hay en la máquina (`claude`, `codex`) e instala o actualiza el plugin en cada uno que encuentra — mismo comando para la primera instalación y para resincronizar después de un `git pull` (las cachés de plugin de cada harness son por versión; un pull solo no las refresca).
+
+```bash
+node scripts/install-plugins.mjs --dry-run
+```
+
+Muestra el plan exacto (harnesses detectados, acción por harness, comandos literales) sin ejecutar nada.
+
+> **No configura perfiles ni credenciales** (URLs, API keys) — eso es un paso aparte, ver [Configuración inicial](#configuración-inicial).
+
+Ver `node scripts/install-plugins.mjs --help` para el resto de flags (`--harness`, `--uninstall`, `--force`, `--json`).
+
+### Opción 1: Directo desde GitHub (manual)
 
 ```bash
 claude plugin marketplace add https://github.com/elmaxid/gateway-agent.git
@@ -139,12 +159,26 @@ Además del plugin de Claude Code, el repo incluye un plugin nativo para [Codex]
 
 ### Instalación
 
+Recomendado — el mismo instalador de la [Opción 0](#opción-0-instalador-recomendado-todos-los-harnesses) de más arriba, restringido a Codex:
+
+```bash
+node scripts/install-plugins.mjs --harness codex
+```
+
+Alternativa manual (usa el mismo checkout local del repo que ya tenés para el plugin de Claude Code, no hace falta clonar de nuevo):
+
 ```bash
 codex plugin marketplace add /path/to/agent-plugin-cc
 codex plugin add gateway-codex@agent-gateway
 ```
 
-Usa el mismo checkout local del repo que ya tenés para el plugin de Claude Code (no hace falta clonar de nuevo).
+Para iteración de desarrollo — cambiar contenido del plugin sin bumpear su versión — `--force` bump-ea un sufijo cachebuster en el `version` de `plugins/gateway-codex/.codex-plugin/plugin.json` (no es un bump de versión real; ver `node scripts/install-plugins.mjs --help` para el detalle exacto):
+
+```bash
+node scripts/install-plugins.mjs --harness codex --force
+```
+
+> Después de instalar o actualizar, abrí un thread nuevo de Codex — una sesión ya abierta mantiene la copia vieja del skill cargada.
 
 ### Verificar instalación
 
@@ -840,6 +874,26 @@ claude plugin marketplace add https://github.com/elmaxid/gateway-agent.git
 claude plugin install gateway@agent-gateway
 # Reiniciar Claude Code
 ```
+
+### El plugin no se actualizó después de un `git pull`
+
+Las cachés de plugin de cada harness son por versión — un `git pull` solo no las refresca. Correr el instalador de nuevo:
+
+```bash
+node scripts/install-plugins.mjs
+```
+
+Después, para que el cambio se vea: `/reload-plugins` en Claude Code (o reiniciar la sesión); para Codex, abrir un thread nuevo (una sesión ya abierta mantiene la copia vieja del skill cargada).
+
+### `codex plugin ...` se bloquea al correrlo dentro de una sesión de agente
+
+Algunos hooks de seguridad de agente restringen qué subcomandos de `codex` se pueden tipear directo en una sesión (típico: solo permiten `codex exec`/`--version`/`--help`/`login`/etc., bloqueando `codex plugin ...`). El instalador es inmune a ese bloqueo — nunca tipea un string literal `codex ...` en una herramienta de shell del agente, lo spawnea directo vía `child_process` de Node:
+
+```bash
+node scripts/install-plugins.mjs --harness codex
+```
+
+Si preferís los comandos manuales, correlos en tu propia terminal en vez de dentro de la sesión de agente.
 
 ### "No credentials for provider" en task
 

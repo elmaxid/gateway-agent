@@ -2,6 +2,16 @@
 
 ## Setup en máquina nueva
 
+### 0. Instalador (fast path)
+
+```bash
+node scripts/install-plugins.mjs
+```
+
+Detecta los harnesses presentes (`claude`, `codex`) e instala/actualiza el plugin en cada uno — mismo comando para la primera instalación y para resincronizar después de un `git pull`. `--dry-run` muestra el plan sin ejecutar nada. No configura perfiles ni credenciales (pasos 2/2-bis/3 más abajo). Ver `node scripts/install-plugins.mjs --help` para el resto de flags.
+
+Los pasos manuales de abajo siguen disponibles para quien quiera entender/controlar cada paso por separado.
+
 ### 1. Instalar el plugin
 ```bash
 claude plugin install /path/to/agent-plugin-cc

@@ -10,7 +10,8 @@
     "gateway-companion": "plugins/gateway/scripts/gateway-companion.mjs"
   },
   "scripts": {
-    "build-info": "node scripts/make-build-info.mjs"
+    "build-info": "node scripts/make-build-info.mjs",
+    "install-plugins": "node scripts/install-plugins.mjs"
   },
   "keywords": [
     "claude-code",

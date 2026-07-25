@@ -24,6 +24,7 @@ import {
   renderReport,
   buildJson,
   computeExitCode,
+  readHarnessState,
   STATE_TIMEOUT_MS,
   MUTATION_TIMEOUT_MS,
 } from "../scripts/install-plugins.mjs";
@@ -639,6 +640,51 @@ describe("planClaude", () => {
     );
   });
 
+  it("Finding 2: mismatch against a plain local path (worktree/second clone) -> error suggests running the installer from the primary checkout", () => {
+    const plan = planClaude({
+      repoRoot: REPO_ROOT,
+      manifest: CLAUDE_MANIFEST,
+      state: baseState({
+        marketplaceRegistered: true,
+        marketplaceSource: "/some/other/checkout",
+        installedVersion: "0.5.4",
+      }),
+      mode: "install",
+    });
+    assert.match(plan.error, /worktree/i);
+    assert.match(plan.error, /primary checkout/i);
+    assert.doesNotMatch(
+      plan.error,
+      /remote\/git source/i,
+      "a plain local path mismatch should not be mislabeled as a remote/git registration"
+    );
+  });
+
+  it("Finding 2: mismatch against Claude's internal marketplace cache path (registered via a remote/git source, e.g. README Opción 1) -> error warns before removing, does not suggest a worktree", () => {
+    const plan = planClaude({
+      repoRoot: REPO_ROOT,
+      manifest: CLAUDE_MANIFEST,
+      state: baseState({
+        marketplaceRegistered: true,
+        marketplaceSource: "/home/dev/.claude/plugins/marketplaces/agent-gateway",
+        installedVersion: "0.5.4",
+      }),
+      mode: "install",
+    });
+    assert.equal(plan.action, "mismatch");
+    assert.match(plan.error, /remote\/git source/i);
+    assert.match(plan.error, /intentionally switching to a local-checkout install/i);
+    assert.doesNotMatch(
+      plan.error,
+      /worktree/i,
+      "a remote/git-sourced cache path should not get the worktree/second-clone hint"
+    );
+    // Existing detail (both paths + the exact remove command) must still be present.
+    assert.ok(plan.error.includes("/repo"));
+    assert.ok(plan.error.includes("/home/dev/.claude/plugins/marketplaces/agent-gateway"));
+    assert.ok(plan.error.includes("claude plugin marketplace remove agent-gateway"));
+  });
+
   it("scenario 5: uninstall -> [plugin uninstall]; with purgeMarketplace also removes the marketplace", () => {
     const plain = planClaude({
       repoRoot: REPO_ROOT,
@@ -779,6 +825,35 @@ describe("planCodex", () => {
     assert.equal(plan.action, "mismatch");
     assert.ok(plan.error.includes("/repo"));
     assert.ok(plan.error.includes("/some/other/checkout"));
+    assert.ok(plan.error.includes("codex plugin marketplace remove agent-gateway"));
+  });
+
+  it("Finding 2: mismatch against a plain local path (worktree/second clone) -> error suggests running the installer from the primary checkout", () => {
+    const plan = planCodex({
+      repoRoot: REPO_ROOT,
+      manifest: CODEX_MANIFEST,
+      state: baseState({ marketplaceRegistered: true, marketplaceSource: "/some/other/checkout", installedVersion: "0.1.1" }),
+      mode: "install",
+    });
+    assert.match(plan.error, /worktree/i);
+    assert.match(plan.error, /primary checkout/i);
+    assert.doesNotMatch(plan.error, /remote\/git source/i);
+  });
+
+  it("Finding 2: mismatch against Codex's internal marketplace cache path (remote/git source) -> error warns before removing, does not suggest a worktree", () => {
+    const plan = planCodex({
+      repoRoot: REPO_ROOT,
+      manifest: CODEX_MANIFEST,
+      state: baseState({
+        marketplaceRegistered: true,
+        marketplaceSource: "/home/dev/.codex/plugins/marketplaces/agent-gateway",
+        installedVersion: "0.1.1",
+      }),
+      mode: "install",
+    });
+    assert.equal(plan.action, "mismatch");
+    assert.match(plan.error, /remote\/git source/i);
+    assert.doesNotMatch(plan.error, /worktree/i);
     assert.ok(plan.error.includes("codex plugin marketplace remove agent-gateway"));
   });
 });
@@ -1024,6 +1099,75 @@ function makeExecSpy(responder) {
   exec.calls = calls;
   return exec;
 }
+
+const HARNESS_STATE_KEYS = { marketplaceName: "agent-gateway", pluginId: "gateway@agent-gateway" };
+
+describe("readHarnessState (Finding 3: probe diagnostics must not be discarded on a parse failure)", () => {
+  it("non-JSON stdout WITH informative stderr on both probes -> parseError includes the truncated stderr from each", () => {
+    const exec = makeExecSpy((argv) => {
+      const isMarketplaceProbe = argv.includes("marketplace");
+      return {
+        exitStatus: 1,
+        stdout: "",
+        stderr: isMarketplaceProbe ? "error: unknown command 'marketplace'" : "error: unknown command 'list'",
+        timedOut: false,
+        durationMs: 5,
+      };
+    });
+    const state = readHarnessState(exec, "claude", HARNESS_STATE_KEYS);
+    assert.ok(state.parseError, "should have a parseError for unparseable stdout");
+    assert.match(state.parseError, /unknown command 'marketplace'/);
+    assert.match(state.parseError, /unknown command 'list'/);
+  });
+
+  it("a probe timeout is reported distinctly ('timed out'), not folded into a generic parse-failure message", () => {
+    const exec = makeExecSpy((argv) => {
+      const isMarketplaceProbe = argv.includes("marketplace");
+      if (isMarketplaceProbe) {
+        return { exitStatus: null, stdout: "", stderr: "", timedOut: true, durationMs: STATE_TIMEOUT_MS };
+      }
+      // The other probe succeeds cleanly — proves the diagnostic isolates
+      // which probe actually failed instead of blaming both indiscriminately.
+      return { exitStatus: 0, stdout: "[]", stderr: "", timedOut: false, durationMs: 5 };
+    });
+    const state = readHarnessState(exec, "claude", HARNESS_STATE_KEYS);
+    assert.ok(state.parseError);
+    assert.match(state.parseError, /timed out/);
+  });
+
+  it("long stderr is truncated via the shared firstNLines/MATRIX_OUTPUT_MAX_LINES convention, not dumped in full", () => {
+    const longStderr = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
+    const exec = makeExecSpy(() => ({
+      exitStatus: 1,
+      stdout: "not json",
+      stderr: longStderr,
+      timedOut: false,
+      durationMs: 5,
+    }));
+    const state = readHarnessState(exec, "codex", {
+      marketplaceName: "agent-gateway",
+      pluginId: "gateway-codex@agent-gateway",
+    });
+    assert.ok(state.parseError);
+    assert.ok(state.parseError.includes("line 0"));
+    assert.ok(!state.parseError.includes("line 39"), "stderr should be truncated, not dumped in full");
+  });
+
+  it("a clean, successfully-parsed probe pair carries no diagnostics noise (parseError stays null)", () => {
+    const exec = makeExecSpy((argv) => {
+      const isMarketplaceProbe = argv.includes("marketplace");
+      return {
+        exitStatus: 0,
+        stdout: isMarketplaceProbe ? "[]" : "[]",
+        stderr: "",
+        timedOut: false,
+        durationMs: 5,
+      };
+    });
+    const state = readHarnessState(exec, "claude", HARNESS_STATE_KEYS);
+    assert.equal(state.parseError, null);
+  });
+});
 
 describe("executePlan", () => {
   it("dry-run: never invokes exec for a mutating step; each is marked skipped/dry-run but keeps its literal argv", () => {

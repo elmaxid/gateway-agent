@@ -124,6 +124,8 @@ Muestra el plan exacto (harnesses detectados, acción por harness, comandos lite
 
 Ver `node scripts/install-plugins.mjs --help` para el resto de flags (`--harness`, `--uninstall`, `--force`, `--json`).
 
+> Esta opción reemplaza a la Opción 1 de abajo — no uses ambas sobre el mismo marketplace: si primero registrás `agent-gateway` con `claude plugin marketplace add <url>` (Opción 1) y después corrés el instalador desde un clon local, vas a pisar un mismatch de marketplace (path del cache remoto vs. path del checkout local) que el instalador reporta y no resuelve solo.
+
 ### Opción 1: Directo desde GitHub (manual)
 
 ```bash

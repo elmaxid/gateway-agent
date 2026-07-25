@@ -992,8 +992,12 @@ export const MUTATION_TIMEOUT_MS = 120_000;
 
 // Cheap defense for spec §2.4/§7.4: if stdout/stderr carries a marker that
 // looks like a hook/wrapper denied the command outright, say so explicitly
-// rather than just reporting a bare nonzero exit.
-const HOOK_BLOCK_PATTERN = /permissionDecision|BLOCKED:/;
+// rather than just reporting a bare nonzero exit. Spec §7.4 names three
+// markers: `permissionDecision`, `"deny"`, `BLOCKED:`. `\bdeny\b` (word
+// boundary, not a bare substring match) catches both a quoted JSON value
+// (`"decision":"deny"`) and a plain-text one (`PreToolUse hook result: deny`)
+// without also matching unrelated words like "denied"/"denying".
+const HOOK_BLOCK_PATTERN = /permissionDecision|BLOCKED:|\bdeny\b/;
 
 function isHookBlocked(text) {
   return typeof text === "string" && HOOK_BLOCK_PATTERN.test(text);

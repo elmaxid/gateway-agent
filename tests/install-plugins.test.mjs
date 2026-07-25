@@ -1070,6 +1070,72 @@ describe("executePlan", () => {
     assert.equal(result.commands[0].hookBlockDetected, true);
   });
 
+  it("stderr carrying ONLY the 'deny' marker (no permissionDecision, no BLOCKED:) still sets hookBlockDetected — a quoted JSON value", () => {
+    const exec = makeExecSpy(() => ({
+      exitStatus: 1,
+      stdout: "",
+      stderr: '{"decision":"deny"}',
+      timedOut: false,
+      durationMs: 3,
+    }));
+    const plans = [
+      {
+        name: "codex",
+        error: null,
+        steps: [{ label: "add", argv: ["codex", "plugin", "add", "gateway-codex@agent-gateway"], mutating: true }],
+      },
+    ];
+
+    const [result] = executePlan(plans, { exec, dryRun: false });
+
+    assert.equal(result.hookBlocked, true);
+    assert.equal(result.commands[0].hookBlockDetected, true);
+  });
+
+  it("stderr carrying ONLY the 'deny' marker as plain text (no quotes, no permissionDecision, no BLOCKED:) still sets hookBlockDetected", () => {
+    const exec = makeExecSpy(() => ({
+      exitStatus: 1,
+      stdout: "",
+      stderr: "PreToolUse hook result: deny",
+      timedOut: false,
+      durationMs: 3,
+    }));
+    const plans = [
+      {
+        name: "codex",
+        error: null,
+        steps: [{ label: "add", argv: ["codex", "plugin", "add", "gateway-codex@agent-gateway"], mutating: true }],
+      },
+    ];
+
+    const [result] = executePlan(plans, { exec, dryRun: false });
+
+    assert.equal(result.hookBlocked, true);
+    assert.equal(result.commands[0].hookBlockDetected, true);
+  });
+
+  it("stderr containing 'denied'/'denying' (not the whole word 'deny') does NOT falsely trigger hook-block detection", () => {
+    const exec = makeExecSpy(() => ({
+      exitStatus: 1,
+      stdout: "",
+      stderr: "permission denied while denying access to the resource",
+      timedOut: false,
+      durationMs: 3,
+    }));
+    const plans = [
+      {
+        name: "codex",
+        error: null,
+        steps: [{ label: "add", argv: ["codex", "plugin", "add", "gateway-codex@agent-gateway"], mutating: true }],
+      },
+    ];
+
+    const [result] = executePlan(plans, { exec, dryRun: false });
+
+    assert.equal(result.hookBlocked, false);
+    assert.equal(result.commands[0].hookBlockDetected, false);
+  });
+
   it("a plan-level error (mismatch/blocked) short-circuits to status failed with zero commands; exec is never called", () => {
     const exec = makeExecSpy(() => {
       throw new Error("exec must not be called for a plan that already errored during planning");

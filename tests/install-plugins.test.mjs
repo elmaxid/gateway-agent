@@ -16,6 +16,9 @@ import {
   planClaude,
   planCodex,
   validateForceSelection,
+  bumpCachebuster,
+  applyCachebuster,
+  hasDevCachebuster,
 } from "../scripts/install-plugins.mjs";
 import { captureBinaryVersion } from "../scripts/baseline-capture.mjs";
 
@@ -820,5 +823,106 @@ describe("validateForceSelection (closes Task 1's deferred --force default-selec
         { name: "codex", detected: false, cliVersion: null },
       ])
     );
+  });
+});
+
+describe("bumpCachebuster (Task 5 — pure, mirrors update_plugin_cachebuster.py::with_cachebuster)", () => {
+  it("plain version -> appends +codex.<token>", () => {
+    assert.equal(bumpCachebuster("0.1.0", "abc123"), "0.1.0+codex.abc123");
+  });
+
+  it("existing +codex.<old> suffix -> replaced, not stacked", () => {
+    assert.equal(bumpCachebuster("0.1.0+codex.old", "abc123"), "0.1.0+codex.abc123");
+  });
+
+  it("prerelease version with existing suffix -> prerelease segment kept, suffix replaced", () => {
+    assert.equal(bumpCachebuster("1.2.3-beta.1+codex.prev", "abc123"), "1.2.3-beta.1+codex.abc123");
+  });
+
+  it("a non-codex build-metadata suffix is dropped, not preserved alongside the new one", () => {
+    assert.equal(bumpCachebuster("dev-build+other-tag", "abc123"), "dev-build+codex.abc123");
+  });
+});
+
+describe("hasDevCachebuster", () => {
+  it("a plain version has no dev cachebuster", () => {
+    assert.equal(hasDevCachebuster("0.1.0"), false);
+  });
+
+  it("a version carrying +codex.<token> is flagged", () => {
+    assert.equal(hasDevCachebuster("0.1.0+codex.x"), true);
+  });
+});
+
+describe("applyCachebuster (Task 5 — the installer's one sanctioned repo write)", () => {
+  let pluginRoot;
+
+  beforeEach(() => {
+    pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), "install-plugins-cachebuster-"));
+    const manifestDir = path.join(pluginRoot, ".codex-plugin");
+    fs.mkdirSync(manifestDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(manifestDir, "plugin.json"),
+      JSON.stringify(
+        {
+          name: "gateway-codex",
+          version: "0.1.0",
+          skills: ["gateway-workflows"],
+          interface: { type: "cli" },
+        },
+        null,
+        2
+      ) + "\n"
+    );
+  });
+
+  afterEach(() => {
+    fs.rmSync(pluginRoot, { recursive: true, force: true });
+  });
+
+  it("bumps the version and returns {from, to, path}", () => {
+    const result = applyCachebuster(pluginRoot, "abc123");
+    assert.equal(result.from, "0.1.0");
+    assert.equal(result.to, "0.1.0+codex.abc123");
+    assert.equal(result.path, path.join(pluginRoot, ".codex-plugin", "plugin.json"));
+  });
+
+  it("preserves every other field (name, skills, interface) identically, indent 2, single trailing newline", () => {
+    applyCachebuster(pluginRoot, "abc123");
+    const manifestPath = path.join(pluginRoot, ".codex-plugin", "plugin.json");
+    const raw = fs.readFileSync(manifestPath, "utf8");
+
+    assert.ok(raw.endsWith("\n") && !raw.endsWith("\n\n"), "file should end in exactly one trailing newline");
+    assert.equal(
+      raw,
+      JSON.stringify(
+        {
+          name: "gateway-codex",
+          version: "0.1.0+codex.abc123",
+          skills: ["gateway-workflows"],
+          interface: { type: "cli" },
+        },
+        null,
+        2
+      ) + "\n"
+    );
+
+    const written = JSON.parse(raw);
+    assert.deepEqual(written.name, "gateway-codex");
+    assert.deepEqual(written.skills, ["gateway-workflows"]);
+    assert.deepEqual(written.interface, { type: "cli" });
+  });
+
+  it("replaces rather than stacks an existing +codex.<old> suffix on a second run", () => {
+    applyCachebuster(pluginRoot, "first-token");
+    const second = applyCachebuster(pluginRoot, "second-token");
+    assert.equal(second.from, "0.1.0+codex.first-token");
+    assert.equal(second.to, "0.1.0+codex.second-token");
+  });
+
+  it("with no token given, defaults to a UTC-timestamp-shaped token matching [a-z0-9-] (no wall-clock assertion, just shape)", () => {
+    const result = applyCachebuster(pluginRoot);
+    assert.match(result.to, /^0\.1\.0\+codex\.[a-z0-9-]+$/);
+    assert.notEqual(result.to, "0.1.0");
   });
 });

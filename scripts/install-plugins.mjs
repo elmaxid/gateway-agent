@@ -25,12 +25,14 @@
 // parsing (`parseCliArgs`, `--help` text — Task 1), manifest reading +
 // version drift detection (`readRepoManifests` — Task 2), harness
 // detection + state parsing (`detectHarnesses`, `parseClaudeState`,
-// `parseCodexState` — Task 3), and pure per-harness install/update/
-// uninstall planning (`planClaude`, `planCodex`, `validateForceSelection`
-// — Task 4). Execution and CLI wiring land in Tasks 5-6 of that plan.
-// Running this script today parses its args and, with `-h`/`--help`,
-// prints usage; it does not yet install or update anything — that's a
-// deliberate scope boundary for this task, not a bug.
+// `parseCodexState` — Task 3), pure per-harness install/update/uninstall
+// planning (`planClaude`, `planCodex`, `validateForceSelection` — Task 4),
+// and the Codex `--force` cachebuster (`bumpCachebuster`,
+// `applyCachebuster`, `hasDevCachebuster` — Task 5). Execution and CLI
+// wiring land in Task 6 of that plan. Running this script today parses its
+// args and, with `-h`/`--help`, prints usage; it does not yet install or
+// update anything — that's a deliberate scope boundary for this task, not
+// a bug.
 //
 // Style precedent: same pattern as scripts/make-build-info.mjs and
 // scripts/baseline-capture.mjs — ESM, node:* builtins only, and a main()
@@ -862,6 +864,102 @@ export function validateForceSelection(args, detectedHarnesses) {
         `Install codex, pass --harness codex explicitly once it is, or drop --force.`
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Codex cachebuster for --force (Task 5)
+// ---------------------------------------------------------------------------
+//
+// Mirrors ~/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py
+// (spec §2.4/§4 decision 6): same semantics, reimplemented in plain Node so
+// this installer never depends on python3 or on that skill path existing on
+// a colleague's machine. `bumpCachebuster` is that script's
+// `with_cachebuster` — pure, replaces rather than stacks the `+codex.<token>`
+// suffix. `applyCachebuster` is its `main()` file-write half, wired to the
+// `pluginRoot` field planCodex's `--force` step already produces (Task 4,
+// above) so Task 6's executor can call it directly against that step.
+
+const CACHEBUSTER_PREFIX = "codex";
+
+/**
+ * Format `now` as a UTC timestamp `YYYYMMDDHHMMSS` and sanitize it to
+ * `[a-z0-9-]`, matching update_plugin_cachebuster.py's
+ * `default_cachebuster` + `sanitize_cachebuster`. A real timestamp is
+ * already all digits, so the sanitize pass is a no-op in practice — kept
+ * anyway for parity with the Python contract this mirrors.
+ *
+ * `now` is an injectable parameter (defaults to `new Date()`) so tests can
+ * assert on the token's shape without a real file write ever depending on
+ * wall-clock timing to pass reliably.
+ *
+ * @param {Date} [now]
+ * @returns {string}
+ */
+function defaultCachebusterToken(now = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const raw =
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}` +
+    `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Rewrite `version` to carry a single `+codex.<token>` suffix, keeping
+ * everything before the first `+` and discarding any prior build-metadata
+ * suffix (codex's own or otherwise) rather than stacking onto it. Pure —
+ * mirrors update_plugin_cachebuster.py::with_cachebuster exactly.
+ *
+ * @param {string} version
+ * @param {string} token
+ * @returns {string}
+ */
+export function bumpCachebuster(version, token) {
+  const versionPrefix = version.split("+")[0];
+  return `${versionPrefix}+${CACHEBUSTER_PREFIX}.${token}`;
+}
+
+/**
+ * Does `version` already carry a dev cachebuster suffix? Used for the
+ * persistent warning that a `--force`-bumped manifest needs cleaning up
+ * before release (spec §4 decision 6).
+ *
+ * @param {string} version
+ * @returns {boolean}
+ */
+export function hasDevCachebuster(version) {
+  return typeof version === "string" && version.includes(`+${CACHEBUSTER_PREFIX}.`);
+}
+
+/**
+ * The installer's one sanctioned write to a tracked file (spec §4 decision
+ * 6): bump the Codex plugin manifest's version in place so a same-version
+ * content change is actually picked up by Codex's plugin cache. Preserves
+ * every other field and the file's formatting (2-space indent, single
+ * trailing newline) — only `version` changes.
+ *
+ * @param {string} pluginRoot - e.g. `<repoRoot>/plugins/gateway-codex`, the
+ *   same value planCodex's `--force` step already carries as `pluginRoot`.
+ * @param {string} [token] - defaults to a fresh UTC-timestamp token.
+ * @returns {{from: string, to: string, path: string}}
+ */
+export function applyCachebuster(pluginRoot, token = defaultCachebusterToken()) {
+  const manifestPath = path.join(pluginRoot, ".codex-plugin", "plugin.json");
+  const manifest = readJsonManifest(manifestPath);
+
+  const from = manifest.version;
+  if (typeof from !== "string" || !from.trim()) {
+    throw new Error(`${manifestPath} must contain a non-empty string "version".`);
+  }
+
+  const to = bumpCachebuster(from, token);
+  manifest.version = to;
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+
+  return { from, to, path: manifestPath };
 }
 
 function main() {

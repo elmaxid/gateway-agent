@@ -586,11 +586,40 @@ const CODEX_NEXT_STEPS = [
   "Open a NEW Codex thread — a session already open keeps the old copy of the skill loaded.",
 ];
 
+// Both harnesses cache a remote/git-sourced marketplace under their own
+// config dir rather than the source URL itself — confirmed live on this
+// machine for Claude (`~/.claude/plugins/known_marketplaces.json`: every
+// git/github-sourced entry has `installLocation: "<home>/.claude/plugins/
+// marketplaces/<name>"`, while the one directory-sourced entry has
+// `installLocation` equal to the literal checkout path). Codex's `plugin
+// marketplace add` documents the same local-vs-git split ("Add a local or
+// Git marketplace..."); by the same cache convention its git snapshots land
+// under `~/.codex/plugins/marketplaces/<name>` too. Matching on that shape
+// (rather than requiring the real homedir) keeps this a plain string check,
+// independent of whose home directory the mismatch was captured from.
+const MARKETPLACE_CACHE_PATH_PATTERN = /\/\.(?:claude|codex)\/plugins\/marketplaces\//;
+
+function looksLikeMarketplaceCachePath(actualPath) {
+  return typeof actualPath === "string" && MARKETPLACE_CACHE_PATH_PATTERN.test(actualPath);
+}
+
 /**
  * Build the actionable "marketplace registered somewhere else" error shared
  * by planClaude/planCodex's mismatch branch (spec §4 decision 4: print both
  * paths and the exact `marketplace remove` escape hatch, with its warning
  * that removing a marketplace uninstalls every plugin registered under it).
+ *
+ * The remediation hint branches on what `actualPath` looks like (Finding 2
+ * of the final whole-branch review — the two most common real triggers
+ * produced a misleading "just remove it" message):
+ *   - a path under the harness's own marketplace cache dir means it was
+ *     registered from a remote/git source (e.g. README's manual "Opción 1",
+ *     `claude plugin marketplace add https://github.com/...`) — the
+ *     registered path is an internal cache the user never chose, and
+ *     blindly telling them to remove it would uninstall a working plugin.
+ *   - any other local path is a plain filesystem mismatch — most likely a
+ *     git worktree or a second clone of this same repo (this repo's own
+ *     dev workflow uses worktrees, so a contributor hits this routinely).
  *
  * @param {string} harnessCmd - "claude" or "codex"
  * @param {string} marketplaceName
@@ -598,11 +627,20 @@ const CODEX_NEXT_STEPS = [
  * @param {string} actualPath
  */
 function mismatchError(harnessCmd, marketplaceName, expectedPath, actualPath) {
+  const harnessLabel = harnessCmd === "claude" ? "Claude" : "Codex";
+  const remediationHint = looksLikeMarketplaceCachePath(actualPath)
+    ? `  this looks like ${harnessCmd}'s internal marketplace cache path — it was likely registered from a ` +
+      `remote/git source, not a local checkout; only remove it if you're intentionally switching to a ` +
+      `local-checkout install.\n`
+    : `  if this looks like a git worktree or a second clone of the same repo, run the installer from the ` +
+      `primary checkout instead of removing the marketplace.\n`;
+
   return (
-    `${harnessCmd === "claude" ? "Claude" : "Codex"}'s "${marketplaceName}" marketplace is already registered ` +
+    `${harnessLabel}'s "${marketplaceName}" marketplace is already registered ` +
     `pointing at a different path than this repo — refusing to silently repoint it.\n` +
     `  expected (this repo): ${expectedPath}\n` +
     `  actual (already registered): ${actualPath}\n` +
+    remediationHint +
     `To fix: ${harnessCmd} plugin marketplace remove ${marketplaceName}\n` +
     `  (warning: this uninstalls every plugin currently registered under that marketplace — you'll need to re-add it pointing here)`
   );
@@ -1352,6 +1390,37 @@ export function renderReport(result) {
 }
 
 /**
+ * Describe why a single state probe (`plugin marketplace list --json` /
+ * `plugin list --json`) failed to produce useful output — the diagnostic
+ * that `readHarnessState` used to discard entirely (Finding 3 of the final
+ * whole-branch review; spec §6.4.1: "si el comando de estado no existe o su
+ * salida no parsea: se reporta el fallo con las primeras líneas crudas de
+ * la salida — fail loud"). A timeout and a plain non-zero exit are reported
+ * with different wording on purpose, so a real hang is never mistaken for
+ * malformed JSON. Returns `null` when the probe itself looks clean (exit 0,
+ * no stderr) — nothing useful to add for that probe.
+ *
+ * @param {string} label - e.g. "plugin marketplace list --json"
+ * @param {{exitStatus:number|null, stderr:string, timedOut:boolean}} result
+ * @param {number} timeoutMs
+ * @returns {string|null}
+ */
+function describeProbeFailure(label, result, timeoutMs) {
+  if (!result) return null;
+  if (result.timedOut) {
+    return `${label} timed out after ${timeoutMs}ms`;
+  }
+  const stderrText = firstNLines((result.stderr || "").trim(), MATRIX_OUTPUT_MAX_LINES);
+  if (stderrText) {
+    return `${label} exited ${result.exitStatus} — stderr: ${stderrText}`;
+  }
+  if (result.exitStatus !== 0) {
+    return `${label} exited ${result.exitStatus} with no stderr output`;
+  }
+  return null;
+}
+
+/**
  * Read one harness's install state by actually running its two read-only
  * probe commands (spec §6.4) through `exec`, then handing the captured
  * stdout to the pure parseClaudeState/parseCodexState. A probe that fails
@@ -1360,14 +1429,36 @@ export function renderReport(result) {
  * that into `parseError`, which planClaude/planCodex already know how to
  * handle (abort for Claude, degrade for Codex). No new failure mode is
  * invented at this layer.
+ *
+ * The exec results are also kept (not just their `.stdout`) so that, when
+ * parsing does fail, the actual stderr/exitStatus/timedOut can be threaded
+ * into that `parseError` (Finding 3: this used to be silently dropped, so a
+ * real failure — an old binary without this subcommand, a probe timeout —
+ * looked identical to malformed JSON, with no clue why in the user-visible
+ * error).
  */
-function readHarnessState(exec, harnessCmd, keys) {
-  const marketplaceListStdout = exec([harnessCmd, "plugin", "marketplace", "list", "--json"], {
+export function readHarnessState(exec, harnessCmd, keys) {
+  const marketplaceResult = exec([harnessCmd, "plugin", "marketplace", "list", "--json"], {
     timeoutMs: STATE_TIMEOUT_MS,
-  }).stdout;
-  const pluginListStdout = exec([harnessCmd, "plugin", "list", "--json"], { timeoutMs: STATE_TIMEOUT_MS }).stdout;
-  const stdouts = { marketplaceListStdout: marketplaceListStdout || "", pluginListStdout: pluginListStdout || "" };
-  return harnessCmd === "claude" ? parseClaudeState(stdouts, keys) : parseCodexState(stdouts, keys);
+  });
+  const pluginResult = exec([harnessCmd, "plugin", "list", "--json"], { timeoutMs: STATE_TIMEOUT_MS });
+
+  const stdouts = {
+    marketplaceListStdout: marketplaceResult.stdout || "",
+    pluginListStdout: pluginResult.stdout || "",
+  };
+  const state = harnessCmd === "claude" ? parseClaudeState(stdouts, keys) : parseCodexState(stdouts, keys);
+
+  if (!state.parseError) return state;
+
+  const diagnostics = [
+    describeProbeFailure("plugin marketplace list --json", marketplaceResult, STATE_TIMEOUT_MS),
+    describeProbeFailure("plugin list --json", pluginResult, STATE_TIMEOUT_MS),
+  ].filter(Boolean);
+
+  if (diagnostics.length === 0) return state;
+
+  return { ...state, parseError: `${state.parseError} — probe diagnostics: ${diagnostics.join("; ")}` };
 }
 
 /**

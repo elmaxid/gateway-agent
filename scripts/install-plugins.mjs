@@ -16,23 +16,21 @@
 // out here. It never touches gateway profiles or credentials — that's
 // plugins/gateway/scripts/bootstrap-profiles.mjs, out of scope for this file.
 //
-// Usage (once fully implemented — see status note below):
+// Usage:
 //   node scripts/install-plugins.mjs             # install/update everything detected
 //   node scripts/install-plugins.mjs --dry-run   # print the plan, mutate nothing
 //   node scripts/install-plugins.mjs --help      # full flag reference
 //
-// Implementation status: this file currently implements CLI argument
-// parsing (`parseCliArgs`, `--help` text — Task 1), manifest reading +
-// version drift detection (`readRepoManifests` — Task 2), harness
-// detection + state parsing (`detectHarnesses`, `parseClaudeState`,
-// `parseCodexState` — Task 3), pure per-harness install/update/uninstall
-// planning (`planClaude`, `planCodex`, `validateForceSelection` — Task 4),
-// and the Codex `--force` cachebuster (`bumpCachebuster`,
-// `applyCachebuster`, `hasDevCachebuster` — Task 5). Execution and CLI
-// wiring land in Task 6 of that plan. Running this script today parses its
-// args and, with `-h`/`--help`, prints usage; it does not yet install or
-// update anything — that's a deliberate scope boundary for this task, not
-// a bug.
+// Implementation status: fully wired end to end — CLI argument parsing
+// (`parseCliArgs`, `--help` text — Task 1), manifest reading + version
+// drift detection (`readRepoManifests` — Task 2), harness detection +
+// state parsing (`detectHarnesses`, `parseClaudeState`, `parseCodexState`
+// — Task 3), pure per-harness install/update/uninstall planning
+// (`planClaude`, `planCodex`, `validateForceSelection` — Task 4), the
+// Codex `--force` cachebuster (`bumpCachebuster`, `applyCachebuster`,
+// `hasDevCachebuster` — Task 5), and execution/reporting/exit codes
+// (`executePlan`, `renderReport`, `buildJson`, `computeExitCode`, and
+// `main()`'s full pipeline — Task 6).
 //
 // Style precedent: same pattern as scripts/make-build-info.mjs and
 // scripts/baseline-capture.mjs — ESM, node:* builtins only, and a main()
@@ -41,9 +39,10 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { captureBinaryVersion } from "./baseline-capture.mjs";
+import { captureBinaryVersion, firstNLines, MATRIX_OUTPUT_MAX_LINES } from "./baseline-capture.mjs";
 
 // zero is deliberately excluded: it has no plugin of its own (its setup is
 // a credentials step, `gateway-companion setup zero-init`), so it is never
@@ -962,6 +961,438 @@ export function applyCachebuster(pluginRoot, token = defaultCachebusterToken()) 
   return { from, to, path: manifestPath };
 }
 
+// ---------------------------------------------------------------------------
+// Execution, reporting, --json output, exit codes (Task 6)
+// ---------------------------------------------------------------------------
+//
+// executePlan turns the pure plans from planClaude/planCodex into real
+// results: it runs each harness's steps in order via an injectable `exec`
+// (production wiring: defaultExec, a thin spawnSync wrapper), stopping that
+// harness's remaining steps as soon as one fails (spec §7.4) — a failure in
+// one harness never stops the other, because each plan is executed
+// independently in the `plans.map()` below (spec §4 decision 9).
+//
+// renderReport/buildJson/computeExitCode all take the same aggregate
+// `result` object main() assembles (repoRoot, dryRun, uninstall, versionDrift,
+// harnesses[], summary, error) — see docs/superpowers/specs/
+// 2026-07-25-harness-installer-design.md §7.2 for the JSON shape this is
+// built to satisfy (schemaVersion, harnesses[].commands[].argv, summary,
+// exitCode are the fields the plan's test list checks for explicitly; the
+// rest of the shape below is a reasonable superset, not a stricter contract).
+
+/** Read-only state probes (`plugin list --json`, `plugin marketplace list
+ * --json`) — cheap, never mutate, run even in --dry-run so the plan they
+ * feed is real (spec §7.5). */
+export const STATE_TIMEOUT_MS = 10_000;
+
+/** Mutating commands (install/update/uninstall/marketplace add/update/
+ * remove) and the codex --force cachebuster write. Generous because plugin
+ * installs can involve real network/cache work. */
+export const MUTATION_TIMEOUT_MS = 120_000;
+
+// Cheap defense for spec §2.4/§7.4: if stdout/stderr carries a marker that
+// looks like a hook/wrapper denied the command outright, say so explicitly
+// rather than just reporting a bare nonzero exit.
+const HOOK_BLOCK_PATTERN = /permissionDecision|BLOCKED:/;
+
+function isHookBlocked(text) {
+  return typeof text === "string" && HOOK_BLOCK_PATTERN.test(text);
+}
+
+function baseCommandFields(step) {
+  return { label: step.label, argv: step.argv, mutating: step.mutating };
+}
+
+function skippedCommand(step, skipReason) {
+  return {
+    ...baseCommandFields(step),
+    executed: false,
+    skipped: true,
+    skipReason,
+    exitStatus: null,
+    stdout: null,
+    stderr: null,
+    timedOut: false,
+    durationMs: null,
+    timeoutMs: null,
+    hookBlockDetected: false,
+  };
+}
+
+/**
+ * Run one harness's plan to completion (or to its first failure). Pure with
+ * respect to `plan`/`exec`/`dryRun` in the sense that all its side effects
+ * are mediated through the injected `exec` and, for the one non-subprocess
+ * step Codex's --force produces, `applyCachebuster` (Task 5) — never a bare
+ * `spawnSync` of its own.
+ *
+ * @param {{name: string, steps: {label:string, argv:string[]|null, mutating:boolean, pluginRoot?:string}[], error: string|null}} plan
+ * @param {{exec: (argv:string[], opts:{timeoutMs:number}) => {exitStatus:number|null, stdout:string, stderr:string, timedOut:boolean, durationMs:number}, dryRun: boolean}} options
+ * @returns {{name: string, status: "ok"|"failed", hookBlocked: boolean, commands: object[]}}
+ */
+function executeSinglePlan(plan, { exec, dryRun }) {
+  // A plan-level error (marketplace mismatch, or Claude's parseError abort)
+  // means planning already refused to produce any steps — nothing to run,
+  // and the harness is failed by definition of that refusal.
+  if (plan.error) {
+    return { name: plan.name, status: "failed", hookBlocked: false, commands: [] };
+  }
+
+  const commands = [];
+  let hookBlocked = false;
+  let stopped = false;
+
+  for (const step of plan.steps) {
+    if (stopped) {
+      commands.push(skippedCommand(step, "previous-step-failed"));
+      continue;
+    }
+
+    if (dryRun && step.mutating) {
+      commands.push(skippedCommand(step, "dry-run"));
+      continue;
+    }
+
+    if (step.argv === null) {
+      // Codex --force's cachebuster step (Task 4/planCodex): a direct repo
+      // file write via applyCachebuster (Task 5), never a subprocess call.
+      // The dry-run/failure-skip checks above already ran for this step
+      // like any other mutating step, so reaching here means it's really
+      // meant to execute now.
+      const start = Date.now();
+      try {
+        const { from, to } = applyCachebuster(step.pluginRoot);
+        commands.push({
+          ...baseCommandFields(step),
+          executed: true,
+          skipped: false,
+          exitStatus: 0,
+          stdout: `bumped cachebuster: ${from} -> ${to}`,
+          stderr: "",
+          timedOut: false,
+          durationMs: Date.now() - start,
+          timeoutMs: null,
+          hookBlockDetected: false,
+        });
+      } catch (err) {
+        commands.push({
+          ...baseCommandFields(step),
+          executed: true,
+          skipped: false,
+          exitStatus: 1,
+          stdout: "",
+          stderr: firstNLines(err instanceof Error ? err.message : String(err), MATRIX_OUTPUT_MAX_LINES),
+          timedOut: false,
+          durationMs: Date.now() - start,
+          timeoutMs: null,
+          hookBlockDetected: false,
+        });
+        stopped = true;
+      }
+      continue;
+    }
+
+    const timeoutMs = MUTATION_TIMEOUT_MS;
+    const result = exec(step.argv, { timeoutMs });
+    const rawStdout = result.stdout || "";
+    const rawStderr = result.stderr || "";
+    const blocked = isHookBlocked(rawStderr) || isHookBlocked(rawStdout);
+    if (blocked) hookBlocked = true;
+
+    commands.push({
+      ...baseCommandFields(step),
+      executed: true,
+      skipped: false,
+      exitStatus: result.exitStatus,
+      stdout: rawStdout,
+      stderr: firstNLines(rawStderr, MATRIX_OUTPUT_MAX_LINES),
+      timedOut: Boolean(result.timedOut),
+      durationMs: typeof result.durationMs === "number" ? result.durationMs : null,
+      timeoutMs,
+      hookBlockDetected: blocked,
+    });
+
+    if (result.timedOut || result.exitStatus !== 0) {
+      stopped = true;
+    }
+  }
+
+  return { name: plan.name, status: stopped ? "failed" : "ok", hookBlocked, commands };
+}
+
+/**
+ * Execute every harness's plan. Each plan is run independently — a failure
+ * in one never stops or skips the other (spec §4 decision 9); only steps
+ * *within* the same harness's plan stop once that harness hits a failure.
+ *
+ * @param {{name:string, steps:object[], error:string|null}[]} plans
+ * @param {{exec: Function, dryRun?: boolean}} options
+ * @returns {{name:string, status:"ok"|"failed", hookBlocked:boolean, commands:object[]}[]}
+ */
+export function executePlan(plans, { exec, dryRun = false }) {
+  return plans.map((plan) => executeSinglePlan(plan, { exec, dryRun }));
+}
+
+/**
+ * Production `exec`: a thin spawnSync wrapper matching the shape
+ * executePlan's steps expect. Never thrown from — a spawn error (e.g.
+ * ENOENT because some *other* wrapper shadows the harness binary) is
+ * reported as a failed command, not an uncaught exception, so one bad
+ * command can't take down the whole run.
+ */
+function defaultExec(argv, { timeoutMs }) {
+  const [cmd, ...rest] = argv;
+  const start = Date.now();
+  const spawned = spawnSync(cmd, rest, { encoding: "utf8", timeout: timeoutMs });
+  const durationMs = Date.now() - start;
+  const timedOut = Boolean(spawned.error && spawned.error.code === "ETIMEDOUT");
+
+  if (spawned.error && !timedOut) {
+    return { exitStatus: null, stdout: spawned.stdout || "", stderr: spawned.error.message, timedOut: false, durationMs };
+  }
+
+  return {
+    exitStatus: timedOut ? null : typeof spawned.status === "number" ? spawned.status : 1,
+    stdout: spawned.stdout || "",
+    stderr: spawned.stderr || "",
+    timedOut,
+    durationMs,
+  };
+}
+
+const NO_HARNESS_DETECTED_ERROR =
+  `No harness detected on this machine (looked for: ${VALID_HARNESSES.join(", ")}). ` +
+  `Install at least one of them and re-run, or check PATH.`;
+
+function computeSummary(harnesses) {
+  const summary = { installed: 0, updated: 0, unchanged: 0, uninstalled: 0, failed: 0, skipped: 0 };
+  for (const h of harnesses) {
+    if (!h.detected) {
+      summary.skipped += 1;
+      continue;
+    }
+    if (h.status === "failed") {
+      summary.failed += 1;
+      continue;
+    }
+    switch (h.action) {
+      case "installed":
+        summary.installed += 1;
+        break;
+      case "updated":
+      case "forced":
+      case "installed-or-refreshed":
+        summary.updated += 1;
+        break;
+      case "uninstalled":
+        summary.uninstalled += 1;
+        break;
+      default:
+        summary.unchanged += 1;
+    }
+  }
+  return summary;
+}
+
+/**
+ * Compute the installer's exit code from the aggregate result. Exactly two
+ * values (spec §7.3): 1 for "no harness detected", "a global error was set",
+ * or "any attempted harness failed" (mismatch, blocked, command failure,
+ * timeout); 0 otherwise, including every harness reporting "unchanged".
+ *
+ * @param {{error?: string|null, harnesses: {detected:boolean, status?:string}[]}} result
+ * @returns {0|1}
+ */
+export function computeExitCode(result) {
+  if (result.error) return 1;
+  const harnesses = result.harnesses || [];
+  if (harnesses.length === 0 || !harnesses.some((h) => h.detected)) return 1;
+  const anyFailed = harnesses.some((h) => h.detected && h.status === "failed");
+  return anyFailed ? 1 : 0;
+}
+
+/**
+ * Build the exact `--json` object (spec §7.2). Always recomputes `exitCode`
+ * from `computeExitCode` rather than trusting a value the caller may have
+ * stamped on `result` — one source of truth, no risk of the two drifting
+ * apart.
+ *
+ * @param {object} result
+ * @returns {object}
+ */
+export function buildJson(result) {
+  return {
+    schemaVersion: 1,
+    repoRoot: result.repoRoot,
+    dryRun: Boolean(result.dryRun),
+    uninstall: Boolean(result.uninstall),
+    versionDrift: result.versionDrift ?? { detected: false, values: {} },
+    harnesses: result.harnesses ?? [],
+    summary: result.summary ?? computeSummary(result.harnesses ?? []),
+    error: result.error ?? null,
+    exitCode: computeExitCode(result),
+  };
+}
+
+function renderCommandLine(cmd) {
+  const argvText = cmd.argv ? cmd.argv.join(" ") : cmd.label;
+  const lines = [];
+
+  if (cmd.skipped) {
+    if (cmd.skipReason === "dry-run") {
+      lines.push(`  [dry-run] would run: ${argvText}`);
+    } else {
+      lines.push(`  [SKIPPED] ${argvText} (previous step in this harness failed)`);
+    }
+    return lines;
+  }
+
+  if (cmd.timedOut) {
+    lines.push(`  [FAILED] ${argvText} — timed out after ${cmd.timeoutMs}ms`);
+  } else if (cmd.exitStatus !== 0) {
+    lines.push(`  [FAILED] ${argvText} — exit status ${cmd.exitStatus}`);
+  } else {
+    lines.push(`  [ok] ${argvText}`);
+  }
+
+  if (cmd.timedOut || cmd.exitStatus !== 0) {
+    if (cmd.stderr) lines.push(`    stderr: ${cmd.stderr}`);
+    if (cmd.hookBlockDetected) {
+      lines.push(
+        `    it looks like a wrapper/hook intercepted this command — run it directly in your own terminal, outside the agent session`
+      );
+    }
+    lines.push(`    run this by hand in your terminal: ${argvText}`);
+  }
+
+  return lines;
+}
+
+/**
+ * Human-readable rendering of the same aggregate `result` buildJson turns
+ * into JSON (spec §7.1, adapted to this file's English convention rather
+ * than the design doc's Spanish illustration). Every mutating step — run,
+ * skipped, or dry-run — gets one line naming its literal argv, so
+ * `--dry-run`'s "print the exact plan" promise (spec §7.5) holds for the
+ * text output too.
+ *
+ * @param {object} result
+ * @returns {string}
+ */
+export function renderReport(result) {
+  const lines = [`gateway-plugin-cc installer — repo ${result.repoRoot}`, ""];
+
+  if (result.versionDrift && result.versionDrift.detected) {
+    lines.push("WARNING: version drift detected across the manifests that are supposed to move together:");
+    if (result.versionDrift.error) lines.push(`  ${result.versionDrift.error}`);
+    for (const [field, info] of Object.entries(result.versionDrift.values || {})) {
+      lines.push(`  ${field} = ${info.value} (${info.path})`);
+    }
+    lines.push("");
+  }
+
+  if (result.error) {
+    lines.push(`ERROR: ${result.error}`, "");
+  }
+
+  for (const h of result.harnesses || []) {
+    if (!h.detected) {
+      lines.push(`${h.name}  not detected`, "");
+      continue;
+    }
+
+    lines.push(`${h.name}  detected (${h.cliVersion ?? "unknown version"})`);
+    if (h.marketplace) {
+      lines.push(
+        `  marketplace ${h.marketplace.name} → expected ${h.marketplace.expectedSource}, actual ${
+          h.marketplace.actualSource ?? "(not registered)"
+        }`
+      );
+    }
+    if (h.action) {
+      lines.push(`  plugin action: ${h.action}${h.installedVersionBefore ? ` (was ${h.installedVersionBefore})` : ""}`);
+    }
+    if (h.error) lines.push(`  error: ${h.error}`);
+
+    for (const cmd of h.commands || []) {
+      lines.push(...renderCommandLine(cmd));
+    }
+
+    for (const step of h.nextSteps || []) {
+      lines.push(`  next: ${step}`);
+    }
+
+    lines.push("");
+  }
+
+  const s = result.summary || computeSummary(result.harnesses || []);
+  lines.push(
+    `Summary: ${s.installed} installed, ${s.updated} updated, ${s.unchanged} unchanged, ${s.uninstalled} uninstalled, ${s.failed} failed, ${s.skipped} skipped`
+  );
+
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Read one harness's install state by actually running its two read-only
+ * probe commands (spec §6.4) through `exec`, then handing the captured
+ * stdout to the pure parseClaudeState/parseCodexState. A probe that fails
+ * to produce parseable JSON (spawn error, non-JSON stdout, etc.) degrades
+ * to an empty string here — parseClaudeState/parseCodexState already turn
+ * that into `parseError`, which planClaude/planCodex already know how to
+ * handle (abort for Claude, degrade for Codex). No new failure mode is
+ * invented at this layer.
+ */
+function readHarnessState(exec, harnessCmd, keys) {
+  const marketplaceListStdout = exec([harnessCmd, "plugin", "marketplace", "list", "--json"], {
+    timeoutMs: STATE_TIMEOUT_MS,
+  }).stdout;
+  const pluginListStdout = exec([harnessCmd, "plugin", "list", "--json"], { timeoutMs: STATE_TIMEOUT_MS }).stdout;
+  const stdouts = { marketplaceListStdout: marketplaceListStdout || "", pluginListStdout: pluginListStdout || "" };
+  return harnessCmd === "claude" ? parseClaudeState(stdouts, keys) : parseCodexState(stdouts, keys);
+}
+
+/**
+ * Build one harness's plan entry (detection + manifest + state + the pure
+ * planClaude/planCodex output), or the "not detected"/"manifest unreadable"
+ * short-circuits that never reach planning. Returns the shape executePlan
+ * consumes (`name`, `steps`, `error`) plus everything main()'s final
+ * assembly needs to describe the harness regardless of whether it ran.
+ */
+function buildHarnessPlan({ repoRoot, manifests, detectedEntry, args, exec }) {
+  const name = detectedEntry.name;
+
+  if (!detectedEntry.detected) {
+    return { name, detected: false, cliVersion: null, manifest: null, state: null, action: null, steps: [], nextSteps: [], error: null, installedVersionBefore: null };
+  }
+
+  const manifest = manifests[name];
+  if (!manifest || manifest.error) {
+    return {
+      name,
+      detected: true,
+      cliVersion: detectedEntry.cliVersion,
+      manifest: null,
+      state: null,
+      action: "blocked",
+      steps: [],
+      nextSteps: [],
+      error: `Could not read this repo's ${name} manifests (${manifest ? manifest.error : "missing manifest block"}).`,
+      installedVersionBefore: null,
+    };
+  }
+
+  const pluginId = `${manifest.pluginName}@${manifest.marketplaceName}`;
+  const state = readHarnessState(exec, name, { marketplaceName: manifest.marketplaceName, pluginId });
+  const mode = args.uninstall ? "uninstall" : "install";
+  const planFn = name === "claude" ? planClaude : planCodex;
+  const planInput = { repoRoot, manifest, state, mode, purgeMarketplace: args.purgeMarketplace };
+  if (name === "codex") planInput.force = args.force;
+
+  const plan = planFn(planInput);
+  return { name, detected: true, cliVersion: detectedEntry.cliVersion, manifest, state, ...plan };
+}
+
 function main() {
   const args = parseCliArgs(process.argv.slice(2));
 
@@ -970,12 +1401,78 @@ function main() {
     return;
   }
 
-  // Planning is implemented (planClaude/planCodex/validateForceSelection —
-  // Task 4) but not yet wired in here. Execution and full CLI wiring
-  // (manifests → detect → validateForceSelection → state → plan → execute
-  // → render → exit) are added in Tasks 5-6 of
-  // docs/superpowers/plans/2026-07-25-harness-installer.md. Nothing else
-  // happens yet — see the "Implementation status" note above.
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const manifests = readRepoManifests(repoRoot);
+  const detected = detectHarnesses(args.harnesses);
+
+  // Must run after detection (codex's presence is only knowable now) and
+  // before any planning — rejecting late means we never spend time building
+  // plans for a --force that was never going to be valid (Task 4/§9).
+  validateForceSelection(args, detected);
+
+  const exec = defaultExec;
+  const plans = detected.map((entry) => buildHarnessPlan({ repoRoot, manifests, detectedEntry: entry, args, exec }));
+
+  const executed = executePlan(
+    plans.filter((p) => p.detected),
+    { exec, dryRun: args.dryRun }
+  );
+  const executedByName = new Map(executed.map((e) => [e.name, e]));
+
+  const harnesses = plans.map((p) => {
+    if (!p.detected) {
+      return {
+        name: p.name,
+        detected: false,
+        cliVersion: null,
+        action: null,
+        installedVersionBefore: null,
+        repoVersion: null,
+        marketplace: null,
+        status: "not-detected",
+        hookBlocked: false,
+        commands: [],
+        nextSteps: [],
+        error: null,
+      };
+    }
+    const e = executedByName.get(p.name);
+    return {
+      name: p.name,
+      detected: true,
+      cliVersion: p.cliVersion,
+      action: p.action,
+      installedVersionBefore: p.installedVersionBefore,
+      repoVersion: p.manifest ? p.manifest.pluginVersion : null,
+      marketplace: p.manifest
+        ? { name: p.manifest.marketplaceName, expectedSource: repoRoot, actualSource: p.state ? p.state.marketplaceSource : null }
+        : null,
+      status: e.status,
+      hookBlocked: e.hookBlocked,
+      commands: e.commands,
+      nextSteps: p.nextSteps,
+      error: p.error,
+    };
+  });
+
+  const result = {
+    repoRoot,
+    dryRun: args.dryRun,
+    uninstall: args.uninstall,
+    versionDrift: manifests.drift,
+    harnesses,
+    error: harnesses.some((h) => h.detected) ? null : NO_HARNESS_DETECTED_ERROR,
+  };
+  result.summary = computeSummary(harnesses);
+  const exitCode = computeExitCode(result);
+
+  if (args.json) {
+    process.stdout.write(JSON.stringify(buildJson(result), null, 2) + "\n");
+  } else {
+    process.stdout.write(renderReport(result));
+  }
+
+  process.exitCode = exitCode;
 }
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

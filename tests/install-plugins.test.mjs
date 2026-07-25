@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -19,6 +20,12 @@ import {
   bumpCachebuster,
   applyCachebuster,
   hasDevCachebuster,
+  executePlan,
+  renderReport,
+  buildJson,
+  computeExitCode,
+  STATE_TIMEOUT_MS,
+  MUTATION_TIMEOUT_MS,
 } from "../scripts/install-plugins.mjs";
 import { captureBinaryVersion } from "../scripts/baseline-capture.mjs";
 
@@ -924,5 +931,607 @@ describe("applyCachebuster (Task 5 — the installer's one sanctioned repo write
     const result = applyCachebuster(pluginRoot);
     assert.match(result.to, /^0\.1\.0\+codex\.[a-z0-9-]+$/);
     assert.notEqual(result.to, "0.1.0");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// executePlan / renderReport / buildJson / computeExitCode (Task 6) — the
+// final assembly of the installer. `executePlan` is exercised with an
+// injected `exec` spy so no real `claude`/`codex` binaries are needed for
+// these; `renderReport`/`buildJson`/`computeExitCode` are exercised against
+// hand-built aggregate `result` objects, matching the shape main() builds.
+// A small number of real-subprocess tests at the bottom prove main()'s own
+// wiring (parse → manifests → detect → validateForceSelection → state →
+// plan → execute → render → exit), using --dry-run so they run zero
+// mutations against this actual checkout.
+// ---------------------------------------------------------------------------
+
+function makeExecSpy(responder) {
+  const calls = [];
+  const exec = (argv, opts) => {
+    calls.push({ argv, opts });
+    return responder(argv, opts);
+  };
+  exec.calls = calls;
+  return exec;
+}
+
+describe("executePlan", () => {
+  it("dry-run: never invokes exec for a mutating step; each is marked skipped/dry-run but keeps its literal argv", () => {
+    const exec = makeExecSpy(() => {
+      throw new Error("exec must not be called in dry-run for a mutating step");
+    });
+    const plans = [
+      {
+        name: "claude",
+        error: null,
+        steps: [
+          { label: "register marketplace", argv: ["claude", "plugin", "marketplace", "add", "/repo"], mutating: true },
+          { label: "install", argv: ["claude", "plugin", "install", "gateway@agent-gateway"], mutating: true },
+        ],
+      },
+    ];
+
+    const [result] = executePlan(plans, { exec, dryRun: true });
+
+    assert.equal(exec.calls.length, 0, "no mutating step's argv should ever reach exec in dry-run");
+    assert.equal(result.status, "ok");
+    assert.equal(result.commands.length, 2);
+    for (const cmd of result.commands) {
+      assert.equal(cmd.skipped, true);
+      assert.equal(cmd.executed, false);
+      assert.equal(cmd.skipReason, "dry-run");
+    }
+    assert.deepEqual(result.commands[0].argv, ["claude", "plugin", "marketplace", "add", "/repo"]);
+    assert.deepEqual(result.commands[1].argv, ["claude", "plugin", "install", "gateway@agent-gateway"]);
+  });
+
+  it("command failure: exitStatus 1 -> status failed, remaining steps of THAT harness are skipped, the OTHER harness's plan still runs in full", () => {
+    const exec = makeExecSpy((argv) => {
+      if (argv[0] === "claude") {
+        return { exitStatus: 1, stdout: "", stderr: "boom", timedOut: false, durationMs: 5 };
+      }
+      return { exitStatus: 0, stdout: "ok", stderr: "", timedOut: false, durationMs: 5 };
+    });
+
+    const plans = [
+      {
+        name: "claude",
+        error: null,
+        steps: [
+          { label: "step1", argv: ["claude", "plugin", "marketplace", "add", "/repo"], mutating: true },
+          { label: "step2", argv: ["claude", "plugin", "install", "gateway@agent-gateway"], mutating: true },
+        ],
+      },
+      {
+        name: "codex",
+        error: null,
+        steps: [{ label: "add", argv: ["codex", "plugin", "add", "gateway-codex@agent-gateway"], mutating: true }],
+      },
+    ];
+
+    const [claudeResult, codexResult] = executePlan(plans, { exec, dryRun: false });
+
+    assert.equal(claudeResult.status, "failed");
+    assert.equal(claudeResult.commands.length, 2);
+    assert.equal(claudeResult.commands[0].exitStatus, 1);
+    assert.equal(claudeResult.commands[0].executed, true);
+    assert.equal(claudeResult.commands[1].skipped, true);
+    assert.equal(claudeResult.commands[1].skipReason, "previous-step-failed");
+    assert.equal(claudeResult.commands[1].executed, false);
+
+    assert.equal(codexResult.status, "ok");
+    assert.equal(codexResult.commands[0].executed, true);
+    assert.equal(codexResult.commands[0].exitStatus, 0);
+
+    // Exactly 2 real invocations: claude's step1 + codex's one step. claude
+    // step2 must never be called.
+    assert.equal(exec.calls.length, 2);
+  });
+
+  it("timeout: timedOut:true is reported as a failure (never as skipped) — the step really was executed", () => {
+    const exec = makeExecSpy(() => ({ exitStatus: null, stdout: "", stderr: "", timedOut: true, durationMs: 120000 }));
+    const plans = [
+      {
+        name: "codex",
+        error: null,
+        steps: [{ label: "add", argv: ["codex", "plugin", "add", "gateway-codex@agent-gateway"], mutating: true }],
+      },
+    ];
+
+    const [result] = executePlan(plans, { exec, dryRun: false });
+
+    assert.equal(result.status, "failed");
+    assert.equal(result.commands[0].timedOut, true);
+    assert.equal(result.commands[0].skipped, false);
+    assert.equal(result.commands[0].executed, true);
+    assert.equal(result.commands[0].timeoutMs, MUTATION_TIMEOUT_MS);
+  });
+
+  it("stderr carrying a permissionDecision/BLOCKED: marker sets hookBlockDetected on the command and hookBlocked on the harness result", () => {
+    const exec = makeExecSpy(() => ({
+      exitStatus: 1,
+      stdout: "",
+      stderr: '{"permissionDecision":"deny"}',
+      timedOut: false,
+      durationMs: 3,
+    }));
+    const plans = [
+      {
+        name: "codex",
+        error: null,
+        steps: [{ label: "add", argv: ["codex", "plugin", "add", "gateway-codex@agent-gateway"], mutating: true }],
+      },
+    ];
+
+    const [result] = executePlan(plans, { exec, dryRun: false });
+
+    assert.equal(result.hookBlocked, true);
+    assert.equal(result.commands[0].hookBlockDetected, true);
+  });
+
+  it("a plan-level error (mismatch/blocked) short-circuits to status failed with zero commands; exec is never called", () => {
+    const exec = makeExecSpy(() => {
+      throw new Error("exec must not be called for a plan that already errored during planning");
+    });
+    const plans = [{ name: "claude", error: "marketplace mismatch", steps: [] }];
+
+    const [result] = executePlan(plans, { exec, dryRun: false });
+
+    assert.equal(result.status, "failed");
+    assert.deepEqual(result.commands, []);
+    assert.equal(exec.calls.length, 0);
+  });
+
+  it("an argv:null cachebuster step calls applyCachebuster directly (never exec) and actually bumps the manifest on disk", () => {
+    const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), "install-plugins-execplan-cachebuster-"));
+    fs.mkdirSync(path.join(pluginRoot, ".codex-plugin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginRoot, ".codex-plugin", "plugin.json"),
+      JSON.stringify({ name: "gateway-codex", version: "0.1.0" }, null, 2) + "\n"
+    );
+
+    try {
+      // This spy must NOT throw on the real-argv "add" step — it's supposed
+      // to run normally. What it must never see is the argv:null step's
+      // payload (asserted below via exec.calls).
+      const exec = makeExecSpy(() => ({ exitStatus: 0, stdout: "ok", stderr: "", timedOut: false, durationMs: 5 }));
+      const plans = [
+        {
+          name: "codex",
+          error: null,
+          steps: [
+            { label: "bump the Codex plugin manifest's cachebuster", argv: null, mutating: true, pluginRoot },
+            { label: "add", argv: ["codex", "plugin", "add", "gateway-codex@agent-gateway"], mutating: true },
+          ],
+        },
+      ];
+
+      const [result] = executePlan(plans, { exec, dryRun: false });
+
+      assert.equal(exec.calls.length, 1, "only the second (real argv) step should reach exec");
+      assert.deepEqual(exec.calls[0].argv, ["codex", "plugin", "add", "gateway-codex@agent-gateway"]);
+
+      assert.equal(result.commands[0].executed, true);
+      assert.equal(result.commands[0].exitStatus, 0);
+      const written = JSON.parse(fs.readFileSync(path.join(pluginRoot, ".codex-plugin", "plugin.json"), "utf8"));
+      assert.match(written.version, /^0\.1\.0\+codex\./);
+    } finally {
+      fs.rmSync(pluginRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("an argv:null cachebuster step in --dry-run is skipped like any other mutating step: the file is NOT written", () => {
+    const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), "install-plugins-execplan-cachebuster-dryrun-"));
+    fs.mkdirSync(path.join(pluginRoot, ".codex-plugin"), { recursive: true });
+    const manifestPath = path.join(pluginRoot, ".codex-plugin", "plugin.json");
+    const original = JSON.stringify({ name: "gateway-codex", version: "0.1.0" }, null, 2) + "\n";
+    fs.writeFileSync(manifestPath, original);
+
+    try {
+      const exec = makeExecSpy(() => {
+        throw new Error("exec must not be called for a mutating step in dry-run");
+      });
+      const plans = [
+        {
+          name: "codex",
+          error: null,
+          steps: [{ label: "bump cachebuster", argv: null, mutating: true, pluginRoot }],
+        },
+      ];
+
+      const [result] = executePlan(plans, { exec, dryRun: true });
+
+      assert.equal(result.commands[0].skipped, true);
+      assert.equal(result.commands[0].skipReason, "dry-run");
+      assert.equal(fs.readFileSync(manifestPath, "utf8"), original, "dry-run must not write the manifest");
+    } finally {
+      fs.rmSync(pluginRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+function harnessResult(overrides = {}) {
+  return {
+    name: "claude",
+    detected: true,
+    cliVersion: "2.1.3",
+    action: "unchanged",
+    installedVersionBefore: "0.5.4",
+    repoVersion: "0.5.4",
+    marketplace: { name: "agent-gateway", expectedSource: "/repo", actualSource: "/repo" },
+    status: "ok",
+    hookBlocked: false,
+    commands: [],
+    nextSteps: ["Run /reload-plugins in any open Claude Code session (or restart it)."],
+    error: null,
+    ...overrides,
+  };
+}
+
+function baseResult(overrides = {}) {
+  return {
+    repoRoot: "/repo",
+    dryRun: false,
+    uninstall: false,
+    versionDrift: { detected: false, values: {} },
+    harnesses: [harnessResult()],
+    error: null,
+    ...overrides,
+  };
+}
+
+describe("computeExitCode", () => {
+  it("no harness detected (both entries detected:false) -> 1", () => {
+    const result = baseResult({
+      harnesses: [
+        { name: "claude", detected: false },
+        { name: "codex", detected: false },
+      ],
+    });
+    assert.equal(computeExitCode(result), 1);
+  });
+
+  it("an empty harnesses array -> 1", () => {
+    assert.equal(computeExitCode(baseResult({ harnesses: [] })), 1);
+  });
+
+  it("a top-level result.error -> 1 regardless of any harness status", () => {
+    assert.equal(computeExitCode(baseResult({ error: "boom" })), 1);
+  });
+
+  it("any detected harness with status 'failed' -> 1 (command failure, timeout, or mismatch/blocked)", () => {
+    const result = baseResult({
+      harnesses: [harnessResult({ name: "claude", status: "ok" }), harnessResult({ name: "codex", status: "failed" })],
+    });
+    assert.equal(computeExitCode(result), 1);
+  });
+
+  it("all detected harnesses 'ok' — including action 'unchanged' — -> 0", () => {
+    const result = baseResult({
+      harnesses: [
+        harnessResult({ name: "claude", action: "unchanged", status: "ok" }),
+        harnessResult({ name: "codex", action: "unchanged", status: "ok" }),
+      ],
+    });
+    assert.equal(computeExitCode(result), 0);
+  });
+});
+
+describe("buildJson", () => {
+  it("is JSON-serializable and conforms to the schema: schemaVersion, harnesses[].commands[].argv, summary, exitCode", () => {
+    const result = baseResult({
+      harnesses: [
+        harnessResult({
+          commands: [
+            {
+              label: "install",
+              argv: ["claude", "plugin", "install", "gateway@agent-gateway"],
+              mutating: true,
+              executed: true,
+              skipped: false,
+              exitStatus: 0,
+              stdout: "",
+              stderr: "",
+              timedOut: false,
+              durationMs: 10,
+              timeoutMs: 120000,
+              hookBlockDetected: false,
+            },
+          ],
+        }),
+      ],
+    });
+
+    const json = buildJson(result);
+    const roundTripped = JSON.parse(JSON.stringify(json));
+
+    assert.equal(roundTripped.schemaVersion, 1);
+    assert.ok(Array.isArray(roundTripped.harnesses));
+    assert.ok(Array.isArray(roundTripped.harnesses[0].commands));
+    assert.ok("argv" in roundTripped.harnesses[0].commands[0]);
+    assert.deepEqual(roundTripped.harnesses[0].commands[0].argv, [
+      "claude",
+      "plugin",
+      "install",
+      "gateway@agent-gateway",
+    ]);
+    assert.ok(typeof roundTripped.summary === "object" && roundTripped.summary !== null);
+    assert.equal(typeof roundTripped.exitCode, "number");
+  });
+
+  it("exitCode is always recomputed via computeExitCode, never trusted from a stale field on result", () => {
+    const result = baseResult({ exitCode: 0, error: "no harness detected" });
+    assert.equal(buildJson(result).exitCode, 1);
+  });
+
+  it("surfaces version drift in the JSON output when readRepoManifests reports it", () => {
+    const drift = {
+      detected: true,
+      values: {
+        packageVersion: { value: "0.5.4", path: "package.json" },
+        pluginVersion: { value: "0.5.3", path: "plugins/gateway/.claude-plugin/plugin.json" },
+      },
+    };
+    const json = buildJson(baseResult({ versionDrift: drift }));
+    assert.equal(json.versionDrift.detected, true);
+    assert.equal(json.versionDrift.values.pluginVersion.value, "0.5.3");
+  });
+
+  it("no harness detected -> exitCode 1 in the JSON", () => {
+    const result = baseResult({
+      harnesses: [
+        { name: "claude", detected: false },
+        { name: "codex", detected: false },
+      ],
+      error: "No harness detected on this machine (looked for: claude, codex).",
+    });
+    assert.equal(buildJson(result).exitCode, 1);
+  });
+
+  it("all harnesses unchanged -> exitCode 0", () => {
+    const result = baseResult({
+      harnesses: [
+        harnessResult({ name: "claude", action: "unchanged", status: "ok" }),
+        harnessResult({ name: "codex", action: "unchanged", status: "ok" }),
+      ],
+    });
+    assert.equal(buildJson(result).exitCode, 0);
+  });
+});
+
+describe("renderReport", () => {
+  it("dry-run: the rendered text contains the literal argv line for a skipped mutating step", () => {
+    const report = renderReport(
+      baseResult({
+        dryRun: true,
+        harnesses: [
+          harnessResult({
+            commands: [
+              {
+                label: "install",
+                argv: ["claude", "plugin", "install", "gateway@agent-gateway"],
+                mutating: true,
+                executed: false,
+                skipped: true,
+                skipReason: "dry-run",
+                exitStatus: null,
+                stdout: null,
+                stderr: null,
+                timedOut: false,
+                durationMs: null,
+                timeoutMs: null,
+                hookBlockDetected: false,
+              },
+            ],
+          }),
+        ],
+      })
+    );
+    assert.ok(report.includes("claude plugin install gateway@agent-gateway"));
+  });
+
+  it("a failed command's stderr and exit status are rendered, with a hand-run suggestion", () => {
+    const report = renderReport(
+      baseResult({
+        harnesses: [
+          harnessResult({
+            status: "failed",
+            commands: [
+              {
+                label: "install",
+                argv: ["claude", "plugin", "install", "gateway@agent-gateway"],
+                mutating: true,
+                executed: true,
+                skipped: false,
+                exitStatus: 1,
+                stdout: "",
+                stderr: "boom",
+                timedOut: false,
+                durationMs: 5,
+                timeoutMs: 120000,
+                hookBlockDetected: false,
+              },
+            ],
+          }),
+        ],
+      })
+    );
+    assert.match(report, /FAILED/);
+    assert.match(report, /exit status 1/);
+    assert.match(report, /boom/);
+    assert.match(report, /run this by hand in your terminal/);
+  });
+
+  it("a timed-out command is reported with the literal 'timed out after 120000ms' message, never as skipped", () => {
+    const report = renderReport(
+      baseResult({
+        harnesses: [
+          harnessResult({
+            status: "failed",
+            commands: [
+              {
+                label: "add",
+                argv: ["codex", "plugin", "add", "gateway-codex@agent-gateway"],
+                mutating: true,
+                executed: true,
+                skipped: false,
+                exitStatus: null,
+                stdout: "",
+                stderr: "",
+                timedOut: true,
+                durationMs: 120000,
+                timeoutMs: 120000,
+                hookBlockDetected: false,
+              },
+            ],
+          }),
+        ],
+      })
+    );
+    assert.ok(report.includes("timed out after 120000ms"));
+    assert.ok(!report.includes("SKIPPED"));
+  });
+
+  it("a hook-blocked command's report includes the wrapper/hook interception note", () => {
+    const report = renderReport(
+      baseResult({
+        harnesses: [
+          harnessResult({
+            status: "failed",
+            commands: [
+              {
+                label: "add",
+                argv: ["codex", "plugin", "add", "gateway-codex@agent-gateway"],
+                mutating: true,
+                executed: true,
+                skipped: false,
+                exitStatus: 1,
+                stdout: "",
+                stderr: '{"permissionDecision":"deny"}',
+                timedOut: false,
+                durationMs: 5,
+                timeoutMs: 120000,
+                hookBlockDetected: true,
+              },
+            ],
+          }),
+        ],
+      })
+    );
+    assert.match(report, /wrapper\/hook/);
+    assert.match(report, /terminal/);
+  });
+
+  it("no harness detected: the report names both claude and codex and surfaces the error", () => {
+    const report = renderReport(
+      baseResult({
+        harnesses: [
+          { name: "claude", detected: false },
+          { name: "codex", detected: false },
+        ],
+        error:
+          "No harness detected on this machine (looked for: claude, codex). Install at least one of them and re-run, or check PATH.",
+      })
+    );
+    assert.match(report, /claude/);
+    assert.match(report, /codex/);
+    assert.match(report, /No harness detected/);
+  });
+
+  it("version drift is surfaced in the human report with the fields and their source paths", () => {
+    const report = renderReport(
+      baseResult({
+        versionDrift: {
+          detected: true,
+          values: {
+            packageVersion: { value: "0.5.4", path: "package.json" },
+            pluginVersion: { value: "0.5.3", path: "plugins/gateway/.claude-plugin/plugin.json" },
+          },
+        },
+      })
+    );
+    assert.match(report, /drift/i);
+    assert.ok(report.includes("0.5.4"));
+    assert.ok(report.includes("0.5.3"));
+    assert.ok(report.includes("plugins/gateway/.claude-plugin/plugin.json"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// main() — real end-to-end wiring. Spawns the actual script as a subprocess
+// (real argv, real process exit code) against this real checkout. Only
+// --dry-run is used, so these run zero mutating commands (spec §7.5) —
+// safe to run against the real repo and the real claude/codex binaries if
+// present on this machine.
+// ---------------------------------------------------------------------------
+
+const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../scripts/install-plugins.mjs");
+
+function runInstaller(args, { env } = {}) {
+  return spawnSync(process.execPath, [SCRIPT_PATH, ...args], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: env || process.env,
+  });
+}
+
+describe("main() end-to-end wiring (real subprocess, --dry-run only: zero mutations)", () => {
+  it("--dry-run --json: stdout is pure JSON (no human text mixed in), shaped per schema, and the process exit code equals the JSON's own exitCode", () => {
+    const result = runInstaller(["--dry-run", "--json"]);
+    let parsed;
+    assert.doesNotThrow(() => {
+      parsed = JSON.parse(result.stdout);
+    }, `stdout should be pure JSON; got: ${result.stdout}\nstderr: ${result.stderr}`);
+
+    assert.equal(parsed.schemaVersion, 1);
+    assert.equal(parsed.dryRun, true);
+    assert.ok(Array.isArray(parsed.harnesses));
+    assert.deepEqual(
+      parsed.harnesses.map((h) => h.name).sort(),
+      ["claude", "codex"]
+    );
+    for (const h of parsed.harnesses) {
+      assert.ok(Array.isArray(h.commands));
+      for (const cmd of h.commands) {
+        assert.ok("argv" in cmd);
+      }
+    }
+    assert.ok(typeof parsed.summary === "object");
+    assert.equal(typeof parsed.exitCode, "number");
+    assert.equal(result.status, parsed.exitCode, "process exit code must match the JSON's own exitCode");
+  });
+
+  it("--dry-run (human) runs to completion without crashing, and --help is unmodified (regression)", () => {
+    const help = runInstaller(["--help"]);
+    assert.equal(help.status, 0);
+    assert.equal(help.stdout, HELP_TEXT);
+
+    const dryRun = runInstaller(["--dry-run"]);
+    assert.equal(typeof dryRun.status, "number");
+    assert.match(dryRun.stdout, /gateway-plugin-cc installer/);
+  });
+});
+
+describe("validateForceSelection is wired into main() end-to-end (not merely unit-tested in isolation)", () => {
+  it("--force with no --harness, and codex made unavailable via PATH, exits non-zero naming codex", () => {
+    const which = spawnSync("which", ["codex"], { encoding: "utf8" });
+    const codexPath = which.status === 0 ? which.stdout.trim() : null;
+
+    const env = { ...process.env };
+    if (codexPath) {
+      const codexDir = path.resolve(path.dirname(codexPath));
+      env.PATH = (process.env.PATH || "")
+        .split(path.delimiter)
+        .filter((p) => p && path.resolve(p) !== codexDir)
+        .join(path.delimiter);
+    }
+    // If codex genuinely isn't installed on this machine, no PATH surgery
+    // is needed — it is already "not detected" and the same assertion holds.
+
+    const result = runInstaller(["--force"], { env });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /--force only applies to codex/);
   });
 });

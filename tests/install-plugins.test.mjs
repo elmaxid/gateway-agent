@@ -5,7 +5,16 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseCliArgs, VALID_HARNESSES, HELP_TEXT, readRepoManifests } from "../scripts/install-plugins.mjs";
+import {
+  parseCliArgs,
+  VALID_HARNESSES,
+  HELP_TEXT,
+  readRepoManifests,
+  detectHarnesses,
+  parseClaudeState,
+  parseCodexState,
+} from "../scripts/install-plugins.mjs";
+import { captureBinaryVersion } from "../scripts/baseline-capture.mjs";
 
 const DEFAULTS = Object.freeze({
   global: false,
@@ -271,5 +280,268 @@ describe("readRepoManifests", () => {
     assert.equal(result.codex.marketplaceName, "agent-gateway");
     assert.equal(result.claude.error, undefined);
     assert.equal(result.codex.error, undefined);
+  });
+});
+
+describe("detectHarnesses", () => {
+  const NOT_FOUND = Object.freeze({ found: false, exitStatus: null, firstLine: null });
+
+  function found(firstLine, exitStatus = 0) {
+    return { found: true, exitStatus, firstLine };
+  }
+
+  it("neither binary present -> both entries detected:false, no throw", () => {
+    const probe = () => NOT_FOUND;
+    assert.deepStrictEqual(detectHarnesses(null, { probe }), [
+      { name: "claude", detected: false, cliVersion: null },
+      { name: "codex", detected: false, cliVersion: null },
+    ]);
+  });
+
+  it("only claude present", () => {
+    const probe = (cmd) => (cmd === "claude" ? found("2.1.3 (Claude Code)") : NOT_FOUND);
+    assert.deepStrictEqual(detectHarnesses(null, { probe }), [
+      { name: "claude", detected: true, cliVersion: "2.1.3 (Claude Code)" },
+      { name: "codex", detected: false, cliVersion: null },
+    ]);
+  });
+
+  it("only codex present", () => {
+    const probe = (cmd) => (cmd === "codex" ? found("codex-cli 0.5.1") : NOT_FOUND);
+    assert.deepStrictEqual(detectHarnesses(null, { probe }), [
+      { name: "claude", detected: false, cliVersion: null },
+      { name: "codex", detected: true, cliVersion: "codex-cli 0.5.1" },
+    ]);
+  });
+
+  it("both present", () => {
+    const probe = (cmd) => found(`${cmd}-version`);
+    assert.deepStrictEqual(detectHarnesses(null, { probe }), [
+      { name: "claude", detected: true, cliVersion: "claude-version" },
+      { name: "codex", detected: true, cliVersion: "codex-version" },
+    ]);
+  });
+
+  it("explicit --harness codex with codex absent -> throws, naming codex (no silent skip)", () => {
+    const probe = () => NOT_FOUND;
+    assert.throws(() => detectHarnesses(["codex"], { probe }), /codex/);
+  });
+
+  it("explicit --harness codex with codex present -> does not throw and returns only that entry", () => {
+    const probe = (cmd) => (cmd === "codex" ? found("0.5.1") : NOT_FOUND);
+    assert.deepStrictEqual(detectHarnesses(["codex"], { probe }), [
+      { name: "codex", detected: true, cliVersion: "0.5.1" },
+    ]);
+  });
+
+  it("explicit --harness claude,codex with only codex missing -> throws naming just codex", () => {
+    const probe = (cmd) => (cmd === "claude" ? found("2.1.3") : NOT_FOUND);
+    assert.throws(() => detectHarnesses(["claude", "codex"], { probe }), /codex/);
+  });
+
+  it("smoke: production default probe (captureBinaryVersion, no probe injected) has the right shape", () => {
+    const result = detectHarnesses(null);
+    assert.equal(result.length, 2);
+    for (const entry of result) {
+      assert.ok(VALID_HARNESSES.includes(entry.name));
+      assert.equal(typeof entry.detected, "boolean");
+      assert.ok(entry.cliVersion === null || typeof entry.cliVersion === "string");
+    }
+  });
+
+  it("smoke: detectHarnesses(selection, {probe: captureBinaryVersion}) matches captureBinaryVersion's own contract", () => {
+    const result = detectHarnesses(null, { probe: captureBinaryVersion });
+    assert.equal(result.length, 2);
+    for (const entry of result) {
+      assert.ok(VALID_HARNESSES.includes(entry.name));
+      assert.equal(typeof entry.detected, "boolean");
+    }
+  });
+});
+
+describe("parseClaudeState", () => {
+  // Verbatim shapes captured live against real `claude` installs in Task 0
+  // (docs/superpowers/plans/2026-07-25-harness-installer.md, Task 0 §Paso 2.2/2.3).
+  const MARKETPLACE_LIST_STDOUT = JSON.stringify([
+    { name: "agent-gateway", source: "directory", path: "/opt/agent-plugin-cc", installLocation: "/opt/agent-plugin-cc" },
+  ]);
+  const PLUGIN_LIST_STDOUT = JSON.stringify([
+    {
+      id: "gateway@agent-gateway",
+      version: "0.5.2",
+      scope: "user",
+      enabled: true,
+      installPath: "/root/.claude/plugins/cache/agent-gateway/gateway/0.5.2",
+      installedAt: "2026-06-08T20:20:57.873Z",
+      lastUpdated: "2026-07-20T23:11:47.295Z",
+    },
+  ]);
+  const KEYS = { marketplaceName: "agent-gateway", pluginId: "gateway@agent-gateway" };
+
+  it("extracts installed version and marketplace source from real captured JSON", () => {
+    const result = parseClaudeState(
+      { marketplaceListStdout: MARKETPLACE_LIST_STDOUT, pluginListStdout: PLUGIN_LIST_STDOUT },
+      KEYS
+    );
+    assert.deepStrictEqual(result, {
+      marketplaceRegistered: true,
+      marketplaceSource: "/opt/agent-plugin-cc",
+      installedVersion: "0.5.2",
+      parseError: null,
+    });
+  });
+
+  it("tolerates version:'unknown' (seen on 3 real plugins in Task 0) without treating it as a parse failure", () => {
+    const pluginListStdout = JSON.stringify([{ id: "gateway@agent-gateway", version: "unknown" }]);
+    const result = parseClaudeState({ marketplaceListStdout: MARKETPLACE_LIST_STDOUT, pluginListStdout }, KEYS);
+    assert.equal(result.installedVersion, "unknown");
+    assert.equal(result.parseError, null);
+  });
+
+  it("agent-gateway absent from marketplace list -> marketplaceRegistered:false", () => {
+    const result = parseClaudeState(
+      { marketplaceListStdout: "[]", pluginListStdout: PLUGIN_LIST_STDOUT },
+      KEYS
+    );
+    assert.equal(result.marketplaceRegistered, false);
+    assert.equal(result.marketplaceSource, null);
+  });
+
+  it("plugin id absent from plugin list -> installedVersion:null (not yet installed)", () => {
+    const result = parseClaudeState(
+      { marketplaceListStdout: MARKETPLACE_LIST_STDOUT, pluginListStdout: "[]" },
+      KEYS
+    );
+    assert.equal(result.installedVersion, null);
+    assert.equal(result.marketplaceRegistered, true);
+  });
+
+  it("marketplace source pointing at another path is reported as-is (classification is Task 4's job)", () => {
+    const marketplaceListStdout = JSON.stringify([
+      { name: "agent-gateway", source: "directory", path: "/some/other/checkout", installLocation: "/some/other/checkout" },
+    ]);
+    const result = parseClaudeState({ marketplaceListStdout, pluginListStdout: PLUGIN_LIST_STDOUT }, KEYS);
+    assert.equal(result.marketplaceRegistered, true);
+    assert.equal(result.marketplaceSource, "/some/other/checkout");
+  });
+
+  it("non-JSON marketplace list stdout -> parseError set, does not throw", () => {
+    let result;
+    assert.doesNotThrow(() => {
+      result = parseClaudeState(
+        { marketplaceListStdout: "not json at all", pluginListStdout: PLUGIN_LIST_STDOUT },
+        KEYS
+      );
+    });
+    assert.equal(typeof result.parseError, "string");
+    assert.ok(result.parseError.length > 0);
+    assert.equal(result.marketplaceRegistered, false);
+    assert.equal(result.installedVersion, null);
+  });
+
+  it("non-JSON plugin list stdout -> parseError set, does not throw", () => {
+    let result;
+    assert.doesNotThrow(() => {
+      result = parseClaudeState(
+        { marketplaceListStdout: MARKETPLACE_LIST_STDOUT, pluginListStdout: "{ not valid" },
+        KEYS
+      );
+    });
+    assert.equal(typeof result.parseError, "string");
+  });
+});
+
+describe("parseCodexState", () => {
+  // Verbatim shapes captured live against real `codex` installs in Task 0
+  // (docs/superpowers/plans/2026-07-25-harness-installer.md, Task 0 §Paso 2.4).
+  const MARKETPLACE_LIST_STDOUT = JSON.stringify({
+    marketplaces: [
+      { name: "agent-gateway", root: "/opt/agent-plugin-cc", marketplaceSource: { sourceType: "local", source: "/opt/agent-plugin-cc" } },
+    ],
+  });
+  const PLUGIN_LIST_STDOUT = JSON.stringify({
+    installed: [
+      {
+        pluginId: "gateway-codex@agent-gateway",
+        name: "gateway-codex",
+        marketplaceName: "agent-gateway",
+        version: "0.1.0",
+        installed: true,
+        enabled: true,
+        source: { source: "local", path: "/opt/agent-plugin-cc/plugins/gateway-codex" },
+        marketplaceSource: { sourceType: "local", source: "/opt/agent-plugin-cc" },
+        installPolicy: "AVAILABLE",
+        authPolicy: "ON_INSTALL",
+      },
+    ],
+    available: [],
+  });
+  const KEYS = { marketplaceName: "agent-gateway", pluginId: "gateway-codex@agent-gateway" };
+
+  it("extracts installed version and marketplace source from real captured JSON", () => {
+    const result = parseCodexState(
+      { marketplaceListStdout: MARKETPLACE_LIST_STDOUT, pluginListStdout: PLUGIN_LIST_STDOUT },
+      KEYS
+    );
+    assert.deepStrictEqual(result, {
+      marketplaceRegistered: true,
+      marketplaceSource: "/opt/agent-plugin-cc",
+      installedVersion: "0.1.0",
+      parseError: null,
+    });
+  });
+
+  it("agent-gateway absent from marketplace list -> marketplaceRegistered:false", () => {
+    const result = parseCodexState(
+      { marketplaceListStdout: JSON.stringify({ marketplaces: [] }), pluginListStdout: PLUGIN_LIST_STDOUT },
+      KEYS
+    );
+    assert.equal(result.marketplaceRegistered, false);
+    assert.equal(result.marketplaceSource, null);
+  });
+
+  it("plugin only in 'available' (offered, not yet installed) -> installedVersion:null even though marketplace is registered", () => {
+    const pluginListStdout = JSON.stringify({
+      installed: [],
+      available: [{ pluginId: "gateway-codex@agent-gateway", name: "gateway-codex", version: "0.1.0" }],
+    });
+    const result = parseCodexState(
+      { marketplaceListStdout: MARKETPLACE_LIST_STDOUT, pluginListStdout },
+      KEYS
+    );
+    assert.equal(result.marketplaceRegistered, true);
+    assert.equal(result.installedVersion, null);
+  });
+
+  it("marketplace root pointing at another path is reported as-is (classification is Task 4's job)", () => {
+    const marketplaceListStdout = JSON.stringify({
+      marketplaces: [{ name: "agent-gateway", root: "/some/other/checkout", marketplaceSource: { sourceType: "local", source: "/some/other/checkout" } }],
+    });
+    const result = parseCodexState({ marketplaceListStdout, pluginListStdout: PLUGIN_LIST_STDOUT }, KEYS);
+    assert.equal(result.marketplaceRegistered, true);
+    assert.equal(result.marketplaceSource, "/some/other/checkout");
+  });
+
+  it("non-JSON marketplace list stdout -> parseError set, does not throw", () => {
+    let result;
+    assert.doesNotThrow(() => {
+      result = parseCodexState(
+        { marketplaceListStdout: "not json", pluginListStdout: PLUGIN_LIST_STDOUT },
+        KEYS
+      );
+    });
+    assert.equal(typeof result.parseError, "string");
+    assert.ok(result.parseError.length > 0);
+  });
+
+  it("non-JSON plugin list stdout -> parseError set, does not throw", () => {
+    let result;
+    assert.doesNotThrow(() => {
+      result = parseCodexState(
+        { marketplaceListStdout: MARKETPLACE_LIST_STDOUT, pluginListStdout: "{ not valid" },
+        KEYS
+      );
+    });
+    assert.equal(typeof result.parseError, "string");
   });
 });

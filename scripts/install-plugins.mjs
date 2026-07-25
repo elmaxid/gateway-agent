@@ -22,12 +22,13 @@
 //   node scripts/install-plugins.mjs --help      # full flag reference
 //
 // Implementation status: this file currently implements CLI argument
-// parsing (`parseCliArgs`, `--help` text — Task 1) and manifest reading +
-// version drift detection (`readRepoManifests` — Task 2). Harness
-// detection, planning, and execution land in Tasks 3-6 of that plan.
-// Running this script today parses its args and, with `-h`/`--help`,
-// prints usage; it does not yet install or update anything — that's a
-// deliberate scope boundary for this task, not a bug.
+// parsing (`parseCliArgs`, `--help` text — Task 1), manifest reading +
+// version drift detection (`readRepoManifests` — Task 2), and harness
+// detection + state parsing (`detectHarnesses`, `parseClaudeState`,
+// `parseCodexState` — Task 3). Planning and execution land in Tasks 4-6 of
+// that plan. Running this script today parses its args and, with
+// `-h`/`--help`, prints usage; it does not yet install or update
+// anything — that's a deliberate scope boundary for this task, not a bug.
 //
 // Style precedent: same pattern as scripts/make-build-info.mjs and
 // scripts/baseline-capture.mjs — ESM, node:* builtins only, and a main()
@@ -37,6 +38,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { captureBinaryVersion } from "./baseline-capture.mjs";
 
 // zero is deliberately excluded: it has no plugin of its own (its setup is
 // a credentials step, `gateway-companion setup zero-init`), so it is never
@@ -361,6 +364,194 @@ export function readRepoManifests(repoRoot) {
   return { claude, codex, packageVersion, drift };
 }
 
+// ---------------------------------------------------------------------------
+// Harness detection + state parsing (Task 3)
+// ---------------------------------------------------------------------------
+//
+// Two independent, pure-with-respect-to-side-effects concerns:
+//
+//   - detectHarnesses: is the CLI even on PATH, and what version does it
+//     report? This is exactly captureBinaryVersion()'s job (see
+//     scripts/baseline-capture.mjs), imported rather than duplicated (spec
+//     §6.1). `probe` is injectable for tests; production wiring defaults it
+//     to the real captureBinaryVersion.
+//
+//   - parseClaudeState / parseCodexState: given stdout the caller already
+//     captured from each harness's own `plugin list --json` /
+//     `plugin marketplace list --json`, extract what Task 4's planning
+//     needs. Neither spawns a process — that split matters because Claude
+//     and Codex disagree on what happens when state can't be read: Claude
+//     aborts that harness (no guessing), Codex degrades to "install/update
+//     anyway" because `codex plugin add` is idempotent (spec §6.4). Setting
+//     `parseError` and returning, rather than throwing, is what lets the
+//     caller make that harness-specific call instead of this function
+//     deciding for it.
+
+/**
+ * Find the entry in an already-parsed `plugin list --json` /
+ * `plugin marketplace list --json` array matching `matcher`. Tolerates
+ * `list` not being an array (returns undefined) so a well-formed-but-wrong
+ * shape degrades to "not found" instead of throwing here.
+ */
+function findEntry(list, matcher) {
+  return Array.isArray(list) ? list.find(matcher) : undefined;
+}
+
+/**
+ * Detect which harness CLIs are present on this machine and what version
+ * each reports.
+ *
+ * `selection` mirrors `parseCliArgs`' `harnesses` field: `null` (or empty)
+ * means "every harness this installer knows about" (`VALID_HARNESSES`), and
+ * a harness not being found is just reported — nothing was explicitly
+ * requested, so "not installed" is a fact, not an error. A non-empty
+ * selection is a restriction: only those harnesses are probed, and if any
+ * of them isn't detected this throws — naming a harness explicitly means
+ * the caller expected it to be there (spec §5/§6.1: "pedir un harness que
+ * no está instalado es error, no skip silencioso").
+ *
+ * @param {string[]|null} selection
+ * @param {{probe?: (cmd: string) => {found: boolean, exitStatus: number|null, firstLine: string|null}}} [options]
+ * @returns {{name: string, detected: boolean, cliVersion: string|null}[]}
+ */
+export function detectHarnesses(selection, { probe = captureBinaryVersion } = {}) {
+  const names = selection && selection.length > 0 ? selection : VALID_HARNESSES;
+
+  const results = names.map((name) => {
+    const probed = probe(name);
+    return {
+      name,
+      detected: Boolean(probed.found),
+      cliVersion: probed.found ? probed.firstLine : null,
+    };
+  });
+
+  if (selection && selection.length > 0) {
+    const missing = results.filter((entry) => !entry.detected);
+    if (missing.length > 0) {
+      throw new Error(
+        `Requested harness${missing.length > 1 ? "es" : ""} not detected on this machine: ` +
+          `${missing.map((entry) => entry.name).join(", ")}. ` +
+          `Install the missing CLI, or remove it from --harness.`
+      );
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Parse Claude Code's install state from already-captured stdout of
+ * `claude plugin marketplace list --json` and `claude plugin list --json`
+ * (spec §6.4). Pure: never spawns a process.
+ *
+ * Real shapes captured in Task 0 (see
+ * docs/superpowers/plans/2026-07-25-harness-installer.md, Task 0 §Paso 2):
+ * marketplace entries are `{name, source, path?, installLocation}` (a
+ * `directory`-sourced entry has `path` === `installLocation`; non-local
+ * sources have neither `source: "directory"` nor a `path` — irrelevant
+ * here beyond "not our marketplace"). Plugin entries are
+ * `{id: "<plugin>@<marketplace>", version, ...}` — `version` can be the
+ * literal string `"unknown"` (seen on 3 real plugins); never assume semver.
+ *
+ * @param {{marketplaceListStdout: string, pluginListStdout: string}} stdouts
+ * @param {{marketplaceName: string, pluginId: string}} keys
+ * @returns {{marketplaceRegistered: boolean, marketplaceSource: string|null, installedVersion: string|null, parseError: string|null}}
+ */
+export function parseClaudeState({ marketplaceListStdout, pluginListStdout }, { marketplaceName, pluginId }) {
+  let marketplaceList;
+  let pluginList;
+  const parseErrors = [];
+
+  try {
+    marketplaceList = JSON.parse(marketplaceListStdout);
+  } catch (err) {
+    parseErrors.push(`plugin marketplace list --json: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  try {
+    pluginList = JSON.parse(pluginListStdout);
+  } catch (err) {
+    parseErrors.push(`plugin list --json: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (parseErrors.length > 0) {
+    return {
+      marketplaceRegistered: false,
+      marketplaceSource: null,
+      installedVersion: null,
+      parseError: `could not parse claude state (${parseErrors.join("; ")})`,
+    };
+  }
+
+  const marketplaceEntry = findEntry(marketplaceList, (entry) => entry.name === marketplaceName);
+  const pluginEntry = findEntry(pluginList, (entry) => entry.id === pluginId);
+
+  return {
+    marketplaceRegistered: Boolean(marketplaceEntry),
+    marketplaceSource: marketplaceEntry ? marketplaceEntry.installLocation ?? marketplaceEntry.path ?? null : null,
+    installedVersion: pluginEntry ? pluginEntry.version : null,
+    parseError: null,
+  };
+}
+
+/**
+ * Parse Codex's install state from already-captured stdout of
+ * `codex plugin marketplace list --json` and `codex plugin list --json`
+ * (spec §6.4, plan Task 0 §Paso 2.4 — both commands were confirmed to
+ * exist and were captured live; the original spec draft only named
+ * `plugin list --json` before that verification). Pure: never spawns a
+ * process.
+ *
+ * Real shapes captured in Task 0: marketplace entries are
+ * `{name, root, marketplaceSource: {sourceType, source}}`. Plugin entries
+ * live under two arrays, `installed` and `available`
+ * (`{pluginId, version, marketplaceSource, ...}` each) — a plugin only in
+ * `available` is offered by a registered marketplace but not installed
+ * yet, so `installedVersion` stays `null` for it even though
+ * `marketplaceRegistered` is `true`.
+ *
+ * @param {{marketplaceListStdout: string, pluginListStdout: string}} stdouts
+ * @param {{marketplaceName: string, pluginId: string}} keys
+ * @returns {{marketplaceRegistered: boolean, marketplaceSource: string|null, installedVersion: string|null, parseError: string|null}}
+ */
+export function parseCodexState({ marketplaceListStdout, pluginListStdout }, { marketplaceName, pluginId }) {
+  let marketplaceList;
+  let pluginList;
+  const parseErrors = [];
+
+  try {
+    marketplaceList = JSON.parse(marketplaceListStdout);
+  } catch (err) {
+    parseErrors.push(`plugin marketplace list --json: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  try {
+    pluginList = JSON.parse(pluginListStdout);
+  } catch (err) {
+    parseErrors.push(`plugin list --json: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (parseErrors.length > 0) {
+    return {
+      marketplaceRegistered: false,
+      marketplaceSource: null,
+      installedVersion: null,
+      parseError: `could not parse codex state (${parseErrors.join("; ")})`,
+    };
+  }
+
+  const marketplaceEntry = findEntry(marketplaceList && marketplaceList.marketplaces, (entry) => entry.name === marketplaceName);
+  const installedEntry = findEntry(pluginList && pluginList.installed, (entry) => entry.pluginId === pluginId);
+
+  return {
+    marketplaceRegistered: Boolean(marketplaceEntry),
+    marketplaceSource: marketplaceEntry ? marketplaceEntry.root ?? null : null,
+    installedVersion: installedEntry ? installedEntry.version : null,
+    parseError: null,
+  };
+}
+
 function main() {
   const args = parseCliArgs(process.argv.slice(2));
 
@@ -369,10 +560,11 @@ function main() {
     return;
   }
 
-  // Harness detection, planning, and execution are added in Tasks 3-6 of
+  // Planning and execution are added in Tasks 4-6 of
   // docs/superpowers/plans/2026-07-25-harness-installer.md.
-  // readRepoManifests (Task 2) is implemented but not yet wired in here —
-  // that's Task 3+'s job. Nothing else happens yet — see the
+  // readRepoManifests (Task 2) and detectHarnesses/parseClaudeState/
+  // parseCodexState (Task 3) are implemented but not yet wired in here —
+  // that's Task 4+'s job. Nothing else happens yet — see the
   // "Implementation status" note above.
 }
 

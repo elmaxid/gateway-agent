@@ -685,6 +685,26 @@ describe("planClaude", () => {
     assert.ok(plan.error.includes("claude plugin marketplace remove agent-gateway"));
   });
 
+  it("Finding 2 regression: a Windows-style cache path (backslash separators) is still recognized as remote/git source, not mislabeled as a plain local mismatch", () => {
+    const plan = planClaude({
+      repoRoot: REPO_ROOT,
+      manifest: CLAUDE_MANIFEST,
+      state: baseState({
+        marketplaceRegistered: true,
+        marketplaceSource: "C:\\Users\\dev\\.claude\\plugins\\marketplaces\\agent-gateway",
+        installedVersion: "0.5.4",
+      }),
+      mode: "install",
+    });
+    assert.equal(plan.action, "mismatch");
+    assert.match(plan.error, /remote\/git source/i);
+    assert.doesNotMatch(
+      plan.error,
+      /worktree/i,
+      "a Windows-path cache location should get the same remote/git hint as its POSIX equivalent, not the worktree hint"
+    );
+  });
+
   it("scenario 5: uninstall -> [plugin uninstall]; with purgeMarketplace also removes the marketplace", () => {
     const plain = planClaude({
       repoRoot: REPO_ROOT,
@@ -765,6 +785,7 @@ describe("planCodex", () => {
     assert.ok(/cachebuster/i.test(plan.steps[0].label));
     assert.deepEqual(plan.steps[1].argv, ["codex", "plugin", "add", "gateway-codex@agent-gateway"]);
     assert.equal(plan.action, "forced");
+    assert.equal(plan.warning, null, "the forced branch must not silently gain a warning either");
   });
 
   it("scenario 9: uninstall -> [plugin remove]; with purgeMarketplace also removes the marketplace", () => {
@@ -798,7 +819,7 @@ describe("planCodex", () => {
     assert.notDeepEqual(codexPlan.nextSteps, claudePlan.nextSteps);
   });
 
-  it("scenario 12: state.parseError -> still runs [plugin add], installedVersionBefore null, no error", () => {
+  it("scenario 12: state.parseError -> still runs [plugin add], installedVersionBefore null, no error, but the diagnostic surfaces as a non-blocking warning", () => {
     let plan;
     assert.doesNotThrow(() => {
       plan = planCodex({
@@ -812,6 +833,7 @@ describe("planCodex", () => {
     assert.equal(plan.installedVersionBefore, null);
     assert.equal(plan.error, null);
     assert.equal(plan.action, "installed-or-refreshed");
+    assert.equal(plan.warning, "could not parse codex state (boom)", "the parseError diagnostic must flow through as warning, not be dropped");
   });
 
   it("marketplace points at another path (mirrors claude's scenario 4) -> steps:[], actionable error", () => {
@@ -1153,6 +1175,42 @@ describe("readHarnessState (Finding 3: probe diagnostics must not be discarded o
     assert.ok(!state.parseError.includes("line 39"), "stderr should be truncated, not dumped in full");
   });
 
+  it("Bug fix: exit 0, no stderr, but genuinely unparseable stdout on one probe -> diagnostics identify THAT probe with its raw output, not silently 'nothing to add'", () => {
+    const exec = makeExecSpy((argv) => {
+      const isMarketplaceProbe = argv.includes("marketplace");
+      if (isMarketplaceProbe) {
+        return { exitStatus: 0, stdout: "<html>not json</html>", stderr: "", timedOut: false, durationMs: 5 };
+      }
+      return { exitStatus: 0, stdout: "[]", stderr: "", timedOut: false, durationMs: 5 };
+    });
+    const state = readHarnessState(exec, "claude", HARNESS_STATE_KEYS);
+    assert.ok(state.parseError, "should have a parseError — the marketplace probe's stdout is not valid JSON");
+    assert.match(
+      state.parseError,
+      /probe diagnostics/i,
+      "the exit-0/no-stderr probe must still surface a diagnostic instead of being silently skipped"
+    );
+    assert.match(
+      state.parseError,
+      /<html>not json<\/html>/,
+      "raw stdout of the failing probe should be included, per spec §6.4.1 fail-loud"
+    );
+  });
+
+  it("Bug fix: a probe reports timedOut even though its (partial) stdout happens to parse as valid JSON -> state must not be trusted as clean", () => {
+    const exec = makeExecSpy((argv) => {
+      const isMarketplaceProbe = argv.includes("marketplace");
+      if (isMarketplaceProbe) {
+        // Killed mid-flight, but what little it wrote back happens to be valid (empty-array) JSON.
+        return { exitStatus: null, stdout: "[]", stderr: "", timedOut: true, durationMs: STATE_TIMEOUT_MS };
+      }
+      return { exitStatus: 0, stdout: "[]", stderr: "", timedOut: false, durationMs: 5 };
+    });
+    const state = readHarnessState(exec, "claude", HARNESS_STATE_KEYS);
+    assert.ok(state.parseError, "a timed-out probe must not be trusted just because its stdout happened to parse");
+    assert.match(state.parseError, /timed out/i);
+  });
+
   it("a clean, successfully-parsed probe pair carries no diagnostics noise (parseError stays null)", () => {
     const exec = makeExecSpy((argv) => {
       const isMarketplaceProbe = argv.includes("marketplace");
@@ -1444,6 +1502,7 @@ function harnessResult(overrides = {}) {
     commands: [],
     nextSteps: ["Run /reload-plugins in any open Claude Code session (or restart it)."],
     error: null,
+    warning: null,
     ...overrides,
   };
 }
@@ -1513,6 +1572,13 @@ describe("computeExitCode", () => {
       harnesses: [harnessResult({ name: "codex", status: "failed" })],
     });
     assert.equal(computeExitCode(result), 1);
+  });
+
+  it("a per-harness warning is informational only — status 'ok' with a warning set -> still 0", () => {
+    const result = baseResult({
+      harnesses: [harnessResult({ name: "codex", status: "ok", warning: "could not parse codex state (boom)" })],
+    });
+    assert.equal(computeExitCode(result), 0);
   });
 });
 
@@ -1607,6 +1673,16 @@ describe("buildJson", () => {
   it("devCachebusterWarning absent on result defaults to {detected:false, version:null}", () => {
     const json = buildJson(baseResult());
     assert.deepEqual(json.devCachebusterWarning, { detected: false, version: null });
+  });
+
+  it("passes a per-harness warning through to the JSON output", () => {
+    const json = buildJson(
+      baseResult({
+        harnesses: [harnessResult({ name: "codex", status: "ok", warning: "could not parse codex state (boom)" })],
+      })
+    );
+    const roundTripped = JSON.parse(JSON.stringify(json));
+    assert.equal(roundTripped.harnesses[0].warning, "could not parse codex state (boom)");
   });
 });
 
@@ -1787,6 +1863,16 @@ describe("renderReport", () => {
     const report = renderReport(baseResult());
     assert.ok(!report.includes("dev cachebuster suffix"));
   });
+
+  it("a per-harness warning is rendered on its own 'warning:' line, without being mistaken for an 'error:' line", () => {
+    const report = renderReport(
+      baseResult({
+        harnesses: [harnessResult({ name: "codex", status: "ok", error: null, warning: "some diagnostic" })],
+      })
+    );
+    assert.ok(report.includes("warning: some diagnostic"));
+    assert.ok(!report.includes("error:"));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1841,6 +1927,51 @@ describe("main() end-to-end wiring (real subprocess, --dry-run only: zero mutati
     const dryRun = runInstaller(["--dry-run"]);
     assert.equal(typeof dryRun.status, "number");
     assert.match(dryRun.stdout, /gateway-plugin-cc installer/);
+  });
+
+  it("a degraded Codex state's parseError diagnostic survives planning -> assembly -> JSON as a non-blocking warning", () => {
+    const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "install-plugins-codex-fake-"));
+    const fakeCodexPath = path.join(fakeBinDir, "codex");
+    try {
+      fs.writeFileSync(
+        fakeCodexPath,
+        [
+          "#!/bin/sh",
+          'case "$*" in',
+          '  "--version") echo "codex-fake 0.0.0" ;;',
+          '  *"marketplace list"*) echo "not json"; echo "unknown command \'marketplace\'" >&2; exit 1 ;;',
+          '  *"plugin list"*)      echo "not json"; echo "unknown command \'list\'" >&2;        exit 1 ;;',
+          "  *) exit 0 ;;",
+          "esac",
+          "",
+        ].join("\n")
+      );
+      fs.chmodSync(fakeCodexPath, 0o755);
+
+      const env = {
+        ...process.env,
+        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH || ""}`,
+      };
+
+      const result = runInstaller(["--dry-run", "--json", "--harness", "codex"], { env });
+
+      let parsed;
+      assert.doesNotThrow(() => {
+        parsed = JSON.parse(result.stdout);
+      }, `stdout should be pure JSON; got: ${result.stdout}\nstderr: ${result.stderr}`);
+
+      const codex = parsed.harnesses.find((h) => h.name === "codex");
+      assert.ok(codex, "codex harness entry must be present");
+      assert.ok(
+        codex.warning && codex.warning.includes("unknown command 'marketplace'"),
+        `expected codex.warning to contain the enriched diagnostic; got: ${codex.warning}`
+      );
+      assert.equal(codex.error, null);
+      assert.equal(codex.action, "installed-or-refreshed");
+      assert.equal(parsed.exitCode, 0);
+    } finally {
+      fs.rmSync(fakeBinDir, { recursive: true, force: true });
+    }
   });
 });
 

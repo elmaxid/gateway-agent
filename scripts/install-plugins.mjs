@@ -597,7 +597,7 @@ const CODEX_NEXT_STEPS = [
 // under `~/.codex/plugins/marketplaces/<name>` too. Matching on that shape
 // (rather than requiring the real homedir) keeps this a plain string check,
 // independent of whose home directory the mismatch was captured from.
-const MARKETPLACE_CACHE_PATH_PATTERN = /\/\.(?:claude|codex)\/plugins\/marketplaces\//;
+const MARKETPLACE_CACHE_PATH_PATTERN = /[\\/]\.(?:claude|codex)[\\/]plugins[\\/]marketplaces[\\/]/;
 
 function looksLikeMarketplaceCachePath(actualPath) {
   return typeof actualPath === "string" && MARKETPLACE_CACHE_PATH_PATTERN.test(actualPath);
@@ -657,7 +657,7 @@ function mismatchError(harnessCmd, marketplaceName, expectedPath, actualPath) {
  *   mode: "install"|"uninstall",
  *   purgeMarketplace?: boolean,
  * }} args
- * @returns {{action: string|null, steps: {label: string, argv: string[]|null, mutating: boolean}[], nextSteps: string[], error: string|null, installedVersionBefore: string|null}}
+ * @returns {{action: string|null, steps: {label: string, argv: string[]|null, mutating: boolean}[], nextSteps: string[], error: string|null, warning: string|null, installedVersionBefore: string|null}}
  */
 export function planClaude({ repoRoot, manifest, state, mode, purgeMarketplace = false }) {
   const pluginId = `${manifest.pluginName}@${manifest.marketplaceName}`;
@@ -678,6 +678,7 @@ export function planClaude({ repoRoot, manifest, state, mode, purgeMarketplace =
       steps,
       nextSteps: CLAUDE_NEXT_STEPS,
       error: null,
+      warning: null,
       installedVersionBefore: state.installedVersion,
     };
   }
@@ -695,6 +696,7 @@ export function planClaude({ repoRoot, manifest, state, mode, purgeMarketplace =
         `Could not read Claude's current plugin/marketplace state (${state.parseError}). ` +
         `Not guessing whether ${pluginId} is already installed — run these manually to check, then re-run this installer: ` +
         `claude plugin marketplace list --json && claude plugin list --json`,
+      warning: null,
       installedVersionBefore: state.installedVersion,
     };
   }
@@ -705,6 +707,7 @@ export function planClaude({ repoRoot, manifest, state, mode, purgeMarketplace =
       steps: [],
       nextSteps: [],
       error: mismatchError("claude", manifest.marketplaceName, repoRoot, state.marketplaceSource),
+      warning: null,
       installedVersionBefore: state.installedVersion,
     };
   }
@@ -743,6 +746,7 @@ export function planClaude({ repoRoot, manifest, state, mode, purgeMarketplace =
     steps,
     nextSteps: CLAUDE_NEXT_STEPS,
     error: null,
+    warning: null,
     installedVersionBefore: state.installedVersion,
   };
 }
@@ -759,7 +763,7 @@ export function planClaude({ repoRoot, manifest, state, mode, purgeMarketplace =
  *   force?: boolean,
  *   purgeMarketplace?: boolean,
  * }} args
- * @returns {{action: string|null, steps: {label: string, argv: string[]|null, mutating: boolean, pluginRoot?: string}[], nextSteps: string[], error: string|null, installedVersionBefore: string|null}}
+ * @returns {{action: string|null, steps: {label: string, argv: string[]|null, mutating: boolean, pluginRoot?: string}[], nextSteps: string[], error: string|null, warning: string|null, installedVersionBefore: string|null}}
  */
 export function planCodex({ repoRoot, manifest, state, mode, force = false, purgeMarketplace = false }) {
   const pluginId = `${manifest.pluginName}@${manifest.marketplaceName}`;
@@ -778,6 +782,7 @@ export function planCodex({ repoRoot, manifest, state, mode, force = false, purg
       steps,
       nextSteps: CODEX_NEXT_STEPS,
       error: null,
+      warning: null,
       installedVersionBefore: state.installedVersion,
     };
   }
@@ -796,6 +801,7 @@ export function planCodex({ repoRoot, manifest, state, mode, force = false, purg
       steps: [{ label: `add/refresh ${pluginId}`, argv: ["codex", "plugin", "add", pluginId], mutating: true }],
       nextSteps: CODEX_NEXT_STEPS,
       error: null,
+      warning: state.parseError,
       installedVersionBefore: state.installedVersion,
     };
   }
@@ -806,6 +812,7 @@ export function planCodex({ repoRoot, manifest, state, mode, force = false, purg
       steps: [],
       nextSteps: [],
       error: mismatchError("codex", manifest.marketplaceName, repoRoot, state.marketplaceSource),
+      warning: null,
       installedVersionBefore: state.installedVersion,
     };
   }
@@ -844,6 +851,7 @@ export function planCodex({ repoRoot, manifest, state, mode, force = false, purg
       steps,
       nextSteps: CODEX_NEXT_STEPS,
       error: null,
+      warning: null,
       installedVersionBefore: state.installedVersion,
     };
   }
@@ -864,6 +872,7 @@ export function planCodex({ repoRoot, manifest, state, mode, force = false, purg
     steps,
     nextSteps: CODEX_NEXT_STEPS,
     error: null,
+    warning: null,
     installedVersionBefore: state.installedVersion,
   };
 }
@@ -1369,6 +1378,7 @@ export function renderReport(result) {
       lines.push(`  plugin action: ${h.action}${h.installedVersionBefore ? ` (was ${h.installedVersionBefore})` : ""}`);
     }
     if (h.error) lines.push(`  error: ${h.error}`);
+    if (h.warning) lines.push(`  warning: ${h.warning}`);
 
     for (const cmd of h.commands || []) {
       lines.push(...renderCommandLine(cmd));
@@ -1417,7 +1427,13 @@ function describeProbeFailure(label, result, timeoutMs) {
   if (result.exitStatus !== 0) {
     return `${label} exited ${result.exitStatus} with no stderr output`;
   }
-  return null;
+  try {
+    JSON.parse(result.stdout || "");
+    return null;
+  } catch {
+    const stdoutText = firstNLines((result.stdout || "").trim(), MATRIX_OUTPUT_MAX_LINES) || "(empty output)";
+    return `${label} exited 0 but produced unparseable output — raw: ${stdoutText}`;
+  }
 }
 
 /**
@@ -1449,16 +1465,27 @@ export function readHarnessState(exec, harnessCmd, keys) {
   };
   const state = harnessCmd === "claude" ? parseClaudeState(stdouts, keys) : parseCodexState(stdouts, keys);
 
-  if (!state.parseError) return state;
+  // A probe that didn't complete cleanly (killed by timeout, or a non-zero
+  // exit) is never trustworthy, even if whatever it wrote to stdout before
+  // that happened to parse as valid JSON — don't let an accidental parse
+  // success mask a real probe failure.
+  const probeDidNotCompleteCleanly = (result) => Boolean(result && (result.timedOut || result.exitStatus !== 0));
+  const parseError =
+    state.parseError ||
+    (probeDidNotCompleteCleanly(marketplaceResult) || probeDidNotCompleteCleanly(pluginResult)
+      ? "one or more state probes did not complete cleanly, despite producing parseable output"
+      : null);
+
+  if (!parseError) return state;
 
   const diagnostics = [
     describeProbeFailure("plugin marketplace list --json", marketplaceResult, STATE_TIMEOUT_MS),
     describeProbeFailure("plugin list --json", pluginResult, STATE_TIMEOUT_MS),
   ].filter(Boolean);
 
-  if (diagnostics.length === 0) return state;
+  if (diagnostics.length === 0) return { ...state, parseError };
 
-  return { ...state, parseError: `${state.parseError} — probe diagnostics: ${diagnostics.join("; ")}` };
+  return { ...state, parseError: `${parseError} — probe diagnostics: ${diagnostics.join("; ")}` };
 }
 
 /**
@@ -1472,7 +1499,7 @@ function buildHarnessPlan({ repoRoot, manifests, detectedEntry, args, exec }) {
   const name = detectedEntry.name;
 
   if (!detectedEntry.detected) {
-    return { name, detected: false, cliVersion: null, manifest: null, state: null, action: null, steps: [], nextSteps: [], error: null, installedVersionBefore: null };
+    return { name, detected: false, cliVersion: null, manifest: null, state: null, action: null, steps: [], nextSteps: [], error: null, warning: null, installedVersionBefore: null };
   }
 
   const manifest = manifests[name];
@@ -1487,6 +1514,7 @@ function buildHarnessPlan({ repoRoot, manifests, detectedEntry, args, exec }) {
       steps: [],
       nextSteps: [],
       error: `Could not read this repo's ${name} manifests (${manifest ? manifest.error : "missing manifest block"}).`,
+      warning: null,
       installedVersionBefore: null,
     };
   }
@@ -1553,6 +1581,7 @@ function main() {
         commands: [],
         nextSteps: [],
         error: null,
+        warning: null,
       };
     }
     const e = executedByName.get(p.name);
@@ -1571,6 +1600,7 @@ function main() {
       commands: e.commands,
       nextSteps: p.nextSteps,
       error: p.error,
+      warning: p.warning ?? null,
     };
   });
 

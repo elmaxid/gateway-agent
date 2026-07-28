@@ -1,6 +1,6 @@
 {
   "name": "gateway-plugin-cc",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "private": true,
   "type": "module",
   "description": "Claude Code plugin that routes reviews, tasks, and multi-model debates to Ollama, DeepSeek, MiniMax, and other OpenAI-compatible endpoints. Includes 6 specialized personas, triple-harness execution (claude/codex/zero), prompt shaping, and auto-routing.",

@@ -4,7 +4,7 @@ Claude Code plugin que delega code reviews y tareas a endpoints LLM alternativos
 
 ## Qué hace
 
-Agrega 12 comandos `/gateway:*` a Claude Code. Siete operaciones principales:
+Agrega 13 comandos `/gateway:*` a Claude Code. Siete operaciones principales:
 
 | Operación | Backend | Cuándo usar |
 |-----------|---------|-------------|

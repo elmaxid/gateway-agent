@@ -763,11 +763,14 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── gateway-debugger.md          # Debug/test failures (codex harness)
 │   │   ├── gateway-reviewer.md          # Code review/audit (claude harness, read-only)
 │   │   ├── gateway-researcher.md        # Research/exploración (claude harness, read-only)
-│   │   └── gateway-dispatcher.md        # Forwarder de dispatch (thin, sin prompt-shaping)
+│   │   ├── gateway-dispatcher.md        # Forwarder de dispatch (thin, sin prompt-shaping)
+│   │   └── research-planner.md          # Research/spec/plan, opus fijo, read-only (usado por spec-plan)
 │   ├── hooks/hooks.json                 # SessionStart / SessionEnd / Stop
 │   ├── skills/
 │   │   ├── gateway-cli-runtime/SKILL.md # Contrato de runtime para gateway-rescue (cómo invocar gateway-companion.mjs)
-│   │   └── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio para agentes gateway-coder/debugger/reviewer/researcher
+│   │   ├── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio para agentes gateway-coder/debugger/reviewer/researcher
+│   │   ├── spec-plan/SKILL.md           # Fase research→spec→plan: intake forzado, decompose, prioridad de fuente
+│   │   └── implement-plan/SKILL.md      # Fase de ejecución: split&route por modelo/persona, review multi-modelo, árbitro
 │   └── scripts/
 │       ├── gateway-companion.mjs        # CLI principal (~1000 líneas)
 │       ├── bootstrap-profiles.mjs       # Setup de perfiles en máquina nueva (--url --api-key)
@@ -815,32 +818,35 @@ Los nombres son exactos — sin prefijos adicionales.
     └── integration.test.mjs         # Live gateway — connectivity, review, task (claude+codex)
 ```
 
-## Desarrollo de este repo
+## Skills: spec-plan + implement-plan
 
-Estos skills/agents son **project-scoped** — viven en `.claude/` de este checkout, no se distribuyen con el plugin (`plugins/gateway/`, `plugins/gateway-codex/`). Solo aplican a quien co-desarrolla `agent-plugin-cc` mismo, no a quien instala el plugin en otro proyecto.
+Dos skills que se instalan con el plugin (`plugins/gateway/skills/`, `plugins/gateway/agents/research-planner.md`) — disponibles en cualquier proyecto donde tengas el plugin instalado, no son específicos de este repo.
 
-- **`.claude/agents/research-planner.md`** — agente de investigación/spec/plan, modelo Opus fijo, read-only (nunca `Edit`). Nunca implementa, solo escribe prosa (specs, planes, findings).
-- **`.claude/skills/spec-plan/SKILL.md`** — fase research → spec → plan. Envuelve a `research-planner` con: intake forzado (pregunta específica, profundidad del entregable, override de modelo/agente si el prompt lo pide), descomposición en 3-5 sub-preguntas antes de buscar, prioridad de fuente determinística (código/graph de este repo → context7 → web), y revisión multi-modelo opcional del spec/plan (mismo patrón reviewer+árbitro que `implement-plan`, solo si se pide explícito).
-- **`.claude/skills/implement-plan/SKILL.md`** — fase de ejecución de un plan ya escrito. Divide el plan en tareas, rutea cada una a modelo+persona (backend: Claude nativo sonnet/opus; frontend: gateway `gpt56-terra`/`gpt56-sol`), corre un review multi-modelo (pool fijo: `gpt56-sol`, `gpt56-terra`, `minimax`, `glm`, + 1 reviewer nativo), y un árbitro dedicado (opus) valida cada hallazgo contra el código real antes de aplicar cualquier fix.
+- **`research-planner`** (agent) — investigación/spec/plan, modelo Opus fijo, read-only (nunca `Edit`). Nunca implementa, solo escribe prosa (specs, planes, findings).
+- **`spec-plan`** (skill) — fase research → spec → plan. Envuelve a `research-planner` con: intake forzado (pregunta específica, profundidad del entregable, override de modelo/agente si el prompt lo pide), descomposición en 3-5 sub-preguntas antes de buscar, prioridad de fuente determinística (graph/MCP de código si está disponible → context7 si está disponible → web), y revisión multi-modelo opcional del spec/plan (mismo patrón reviewer+árbitro que `implement-plan`, solo si se pide explícito).
+- **`implement-plan`** (skill) — fase de ejecución de un plan ya escrito. Divide el plan en tareas, rutea cada una a modelo+persona (backend: Claude nativo sonnet/opus, persona `octo:personas:*` si está disponible; frontend: el perfil de gateway configurado en esa instalación — nunca un nombre fijo, se descubre con `setup list`), corre un review multi-modelo (fan-out a los perfiles que estén configurados, tolera los que fallen, + 1 reviewer nativo), y un árbitro dedicado (opus) valida cada hallazgo contra el código real antes de aplicar cualquier fix.
 
-Orden de uso: `research-planner`/`spec-plan` primero (investigan y escriben el plan), `implement-plan` lo ejecuta después. Ver `.claude/CLAUDE.md` para la tabla de routing completa del proyecto.
+Ni las personas `octo:personas:*` ni un MCP de graph/docs (`code-review-graph`, `context7`) son dependencias duras — si no están instaladas en tu puesto, ambos skills degradan a juicio simple sin persona/tier extra en vez de fallar.
+
+Orden de uso: `spec-plan` primero (investiga y escribe el plan), `implement-plan` lo ejecuta después.
 
 ### Cómo se usan
 
-Se invocan por nombre (`/spec-plan ...`, `/implement-plan ...`) o simplemente pidiendo la tarea en lenguaje natural — Claude Code los carga solo si la descripción del skill matchea el pedido.
+Se invocan por nombre (`/gateway:spec-plan ...`, `/gateway:implement-plan ...`) o simplemente pidiendo la tarea en lenguaje natural — Claude Code los carga solo si la descripción del skill matchea el pedido.
 
 Flujo típico:
 
 ```
 1. "investigá dónde conviene meter backoff exponencial en dispatch y armá spec+plan"
    → carga spec-plan: intake (pregunta ya específica, sigue directo) → decompone en
-     sub-preguntas → busca primero en el código/graph de este repo → research-planner
-     (opus) escribe el spec/plan a un archivo → cierra con "next: implement-plan on <archivo>"
+     sub-preguntas → busca primero en el código/graph de este repo (si hay MCP) →
+     research-planner (opus) escribe el spec/plan a un archivo → cierra con
+     "next: implement-plan on <archivo>"
 
-2. "dale, implementalo"  (o: /implement-plan docs/.../plan.md)
-   → carga implement-plan: split & route (backend Claude nativo, frontend gateway) →
-     implementa → review multi-modelo (pool fijo) → árbitro (opus) → aplica solo lo
-     confirmado
+2. "dale, implementalo"  (o: /gateway:implement-plan docs/.../plan.md)
+   → carga implement-plan: split & route (backend Claude nativo, frontend el perfil
+     de gateway configurado) → implementa → review multi-modelo (perfiles que estén
+     configurados) → árbitro (opus) → aplica solo lo confirmado
 ```
 
 Si en el paso 1 el pedido amerita revisión multi-modelo del spec en sí (decisión de arquitectura contestada), pedilo explícito ("spec+plan+review multi-modelo") — `spec-plan` corre esa fase solo si se pide, no por defecto.

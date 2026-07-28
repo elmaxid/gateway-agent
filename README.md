@@ -825,6 +825,26 @@ Estos skills/agents son **project-scoped** — viven en `.claude/` de este check
 
 Orden de uso: `research-planner`/`spec-plan` primero (investigan y escriben el plan), `implement-plan` lo ejecuta después. Ver `.claude/CLAUDE.md` para la tabla de routing completa del proyecto.
 
+### Cómo se usan
+
+Se invocan por nombre (`/spec-plan ...`, `/implement-plan ...`) o simplemente pidiendo la tarea en lenguaje natural — Claude Code los carga solo si la descripción del skill matchea el pedido.
+
+Flujo típico:
+
+```
+1. "investigá dónde conviene meter backoff exponencial en dispatch y armá spec+plan"
+   → carga spec-plan: intake (pregunta ya específica, sigue directo) → decompone en
+     sub-preguntas → busca primero en el código/graph de este repo → research-planner
+     (opus) escribe el spec/plan a un archivo → cierra con "next: implement-plan on <archivo>"
+
+2. "dale, implementalo"  (o: /implement-plan docs/.../plan.md)
+   → carga implement-plan: split & route (backend Claude nativo, frontend gateway) →
+     implementa → review multi-modelo (pool fijo) → árbitro (opus) → aplica solo lo
+     confirmado
+```
+
+Si en el paso 1 el pedido amerita revisión multi-modelo del spec en sí (decisión de arquitectura contestada), pedilo explícito ("spec+plan+review multi-modelo") — `spec-plan` corre esa fase solo si se pide, no por defecto.
+
 ## Observabilidad y provenance (v0.5.2)
 
 - **`version` / `version --json`** — reporta la provenance del build: `pluginVersion`, `commit`, `commitSource` (`build-info` | `git` | `unknown`), `pluginRoot` y `node`. Si no hay `build-info.json` y `pluginRoot` no es un checkout git, `commitSource` queda en `unknown` y se emite un warning por stderr.

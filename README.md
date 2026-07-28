@@ -815,6 +815,16 @@ Los nombres son exactos — sin prefijos adicionales.
     └── integration.test.mjs         # Live gateway — connectivity, review, task (claude+codex)
 ```
 
+## Desarrollo de este repo
+
+Estos skills/agents son **project-scoped** — viven en `.claude/` de este checkout, no se distribuyen con el plugin (`plugins/gateway/`, `plugins/gateway-codex/`). Solo aplican a quien co-desarrolla `agent-plugin-cc` mismo, no a quien instala el plugin en otro proyecto.
+
+- **`.claude/agents/research-planner.md`** — agente de investigación/spec/plan, modelo Opus fijo, read-only (nunca `Edit`). Nunca implementa, solo escribe prosa (specs, planes, findings).
+- **`.claude/skills/spec-plan/SKILL.md`** — fase research → spec → plan. Envuelve a `research-planner` con: intake forzado (pregunta específica, profundidad del entregable, override de modelo/agente si el prompt lo pide), descomposición en 3-5 sub-preguntas antes de buscar, prioridad de fuente determinística (código/graph de este repo → context7 → web), y revisión multi-modelo opcional del spec/plan (mismo patrón reviewer+árbitro que `implement-plan`, solo si se pide explícito).
+- **`.claude/skills/implement-plan/SKILL.md`** — fase de ejecución de un plan ya escrito. Divide el plan en tareas, rutea cada una a modelo+persona (backend: Claude nativo sonnet/opus; frontend: gateway `gpt56-terra`/`gpt56-sol`), corre un review multi-modelo (pool fijo: `gpt56-sol`, `gpt56-terra`, `minimax`, `glm`, + 1 reviewer nativo), y un árbitro dedicado (opus) valida cada hallazgo contra el código real antes de aplicar cualquier fix.
+
+Orden de uso: `research-planner`/`spec-plan` primero (investigan y escriben el plan), `implement-plan` lo ejecuta después. Ver `.claude/CLAUDE.md` para la tabla de routing completa del proyecto.
+
 ## Observabilidad y provenance (v0.5.2)
 
 - **`version` / `version --json`** — reporta la provenance del build: `pluginVersion`, `commit`, `commitSource` (`build-info` | `git` | `unknown`), `pluginRoot` y `node`. Si no hay `build-info.json` y `pluginRoot` no es un checkout git, `commitSource` queda en `unknown` y se emite un warning por stderr.

@@ -66,6 +66,7 @@ codex plugin add gateway-codex@agent-gateway
 
 | Tarea | Herramienta |
 |-------|-------------|
+| No sé qué comando/agente/skill usar para X | `Skill(gateway:pick-tool)` — mapa por categoría de todo lo que expone el plugin, elige un punto de entrada (no ejecuta nada) |
 | Research / investigación / spec / planes (multi-task, con routing propio) | `Skill(gateway:spec-plan)` — envuelve `Task(research-planner)` con intake forzado + decompose + prioridad de fuente + review multi-modelo opcional |
 | Research / investigación / spec / planes (uso directo, sin wrapper) | `Task(gateway:research-planner)` — model Opus fijo, no gastar tokens de gateway ahí |
 | Ejecutar un plan ya escrito (multi-task, backend+frontend) | `Skill(gateway:implement-plan)` — split&route por modelo/persona + review multi-modelo + árbitro antes de fix |

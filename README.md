@@ -48,7 +48,7 @@ Dentro de Claude Code:
 /gateway:dispatch --task "explica qué hace config.mjs:minimax" --dry-run
 ```
 
-De acá en adelante, cada comando tiene su propia sección más abajo con flags completos y ejemplos. `/gateway:work "<lo que necesites>"` es el punto de entrada más simple si no estás seguro de qué comando usar — hace auto-routing por keywords.
+De acá en adelante, cada comando tiene su propia sección más abajo con flags completos y ejemplos. `/gateway:work "<lo que necesites>"` es el punto de entrada más simple si no estás seguro de qué comando usar — hace auto-routing por keywords. Si preferís elegir vos (o querés ver el mapa completo de comandos, agentes y skills), `/gateway:pick-tool "<lo que necesites>"` te enruta sin ejecutar nada.
 
 ### Personas especializadas
 
@@ -744,11 +744,12 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── researcher.md
 │   │   ├── reviewer.md
 │   │   └── security.md
-│   ├── commands/                        # 12 comandos slash
+│   ├── commands/                        # 13 comandos slash
 │   │   ├── review.md
 │   │   ├── adversarial-review.md
 │   │   ├── staged-review.md            # Review 2-fases: spec compliance + adversarial
 │   │   ├── task.md
+│   │   ├── task-review.md              # Task + cross-review automático con otro perfil
 │   │   ├── dispatch.md                 # Distribuye tareas de un plan entre modelos en paralelo
 │   │   ├── work.md                     # Auto-routing por keywords → persona correcta
 │   │   ├── debate.md                   # Debate multi-modelo con preflight + quorum
@@ -770,7 +771,8 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── gateway-cli-runtime/SKILL.md # Contrato de runtime para gateway-rescue (cómo invocar gateway-companion.mjs)
 │   │   ├── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio para agentes gateway-coder/debugger/reviewer/researcher
 │   │   ├── spec-plan/SKILL.md           # Fase research→spec→plan: intake forzado, decompose, prioridad de fuente
-│   │   └── implement-plan/SKILL.md      # Fase de ejecución: split&route por modelo/persona, review multi-modelo, árbitro
+│   │   ├── implement-plan/SKILL.md      # Fase de ejecución: split&route por modelo/persona, review multi-modelo, árbitro
+│   │   └── pick-tool/SKILL.md           # Router: mapa de comandos/agentes/skills/personas y cuál usar para qué
 │   └── scripts/
 │       ├── gateway-companion.mjs        # CLI principal (~1000 líneas)
 │       ├── bootstrap-profiles.mjs       # Setup de perfiles en máquina nueva (--url --api-key)
@@ -818,21 +820,22 @@ Los nombres son exactos — sin prefijos adicionales.
     └── integration.test.mjs         # Live gateway — connectivity, review, task (claude+codex)
 ```
 
-## Skills: spec-plan + implement-plan
+## Skills: pick-tool + spec-plan + implement-plan
 
-Dos skills que se instalan con el plugin (`plugins/gateway/skills/`, `plugins/gateway/agents/research-planner.md`) — disponibles en cualquier proyecto donde tengas el plugin instalado, no son específicos de este repo.
+Tres skills que se instalan con el plugin (`plugins/gateway/skills/`, `plugins/gateway/agents/research-planner.md`) — disponibles en cualquier proyecto donde tengas el plugin instalado, no son específicos de este repo.
 
+- **`pick-tool`** (skill) — router de todo lo que el plugin expone: tabla por categoría (review, delegación, orquestación multi-modelo, planning, jobs/setup) con qué hace cada comando/agente/skill/persona y cuándo elegirlo en vez de su alternativa más parecida (`review` vs `adversarial-review` vs `staged-review`, `task` vs `dispatch`, `spec-plan` vs `implement-plan`, …). Read-only: no corre modelos, solo decide el punto de entrada. Útil sobre todo recién instalado el plugin.
 - **`research-planner`** (agent) — investigación/spec/plan, modelo Opus fijo, read-only (nunca `Edit`). Nunca implementa, solo escribe prosa (specs, planes, findings).
 - **`spec-plan`** (skill) — fase research → spec → plan. Envuelve a `research-planner` con: intake forzado (pregunta específica, profundidad del entregable, override de modelo/agente si el prompt lo pide), descomposición en 3-5 sub-preguntas antes de buscar, prioridad de fuente determinística (graph/MCP de código si está disponible → context7 si está disponible → web), y revisión multi-modelo opcional del spec/plan (mismo patrón reviewer+árbitro que `implement-plan`, solo si se pide explícito).
 - **`implement-plan`** (skill) — fase de ejecución de un plan ya escrito. Divide el plan en tareas, rutea cada una a modelo+persona (backend: Claude nativo sonnet/opus, persona `octo:personas:*` si está disponible; frontend: el perfil de gateway configurado en esa instalación — nunca un nombre fijo, se descubre con `setup list`), corre un review multi-modelo (fan-out a los perfiles que estén configurados, tolera los que fallen, + 1 reviewer nativo), y un árbitro dedicado (opus) valida cada hallazgo contra el código real antes de aplicar cualquier fix.
 
 Ni las personas `octo:personas:*` ni un MCP de graph/docs (`code-review-graph`, `context7`) son dependencias duras — si no están instaladas en tu puesto, ambos skills degradan a juicio simple sin persona/tier extra en vez de fallar.
 
-Orden de uso: `spec-plan` primero (investiga y escribe el plan), `implement-plan` lo ejecuta después.
+Orden de uso: `spec-plan` primero (investiga y escribe el plan), `implement-plan` lo ejecuta después. `pick-tool` es transversal: se usa cuando no sabés cuál de los tres (o cuál comando/agente) corresponde.
 
 ### Cómo se usan
 
-Se invocan por nombre (`/gateway:spec-plan ...`, `/gateway:implement-plan ...`) o simplemente pidiendo la tarea en lenguaje natural — Claude Code los carga solo si la descripción del skill matchea el pedido.
+Se invocan por nombre (`/gateway:pick-tool ...`, `/gateway:spec-plan ...`, `/gateway:implement-plan ...`) o simplemente pidiendo la tarea en lenguaje natural — Claude Code los carga solo si la descripción del skill matchea el pedido.
 
 Flujo típico:
 

@@ -21,6 +21,8 @@ Default engine is the bundled `research-planner` agent (opus, fixed, read-only �
 
 Get concrete answers before researching anything — infer from an already-specific request instead of re-asking if it's already unambiguous:
 
+**Facts are looked up, decisions are asked.** Anything you can determine yourself — what the code already does, which profiles/tools this installation has configured, what the git history says, what convention the repo follows — is a fact: go read it, never spend a question on it. Only genuine decisions reach the user: scope, priority, which tradeoff to take, what counts as done. A question whose answer was already on disk costs a round trip and signals you didn't look.
+
 1. **The question, specific.** Vague in = vague out. If the ask is broad ("mejorá el sistema de X"), push back once: name the angle (architecture? bug root cause? feature scope? tradeoff between options?).
 2. **Deliverable depth** — one of: research findings only / spec / spec+plan / spec+plan+multi-model review. Default spec+plan unless the ask is clearly narrower.
 3. **Model/agent** — default the bundled `research-planner` agent. If the prompt names a different model/agent explicitly, use that instead — no separate override mechanism needed, the prompt IS the override.
@@ -48,6 +50,7 @@ Same reviewer+arbiter shape as implement-plan's Phases 3-4, applied to the draft
 ## Phase 6 — Close out (audit + handoff)
 
 Before calling it done:
+- **No file:line references, no pasted code in the spec.** Describe *what* changes and *why* in prose that stays true after the code changes shape — a `lib/foo.mjs:214` citation or a copied snippet is wrong the first time someone moves that function. Name the component, behavior or deliverable, not the location. Only exception: a prototype produced something prose genuinely can't encode (an exact wire format, a measured number) — include that, nothing else.
 - State what was NOT found or stayed uncertain — never pad over a gap.
 - Note which source tier (Phase 3) each key claim came from, so a reader can tell what's grounded in this repo vs. external docs vs. the open web.
 - Name the exact output file and hand off explicitly: "next: implement-plan on `<file>`".

@@ -1,4 +1,5 @@
 {
+  "_note": "kind 'openai-chat' profiles: work for review always, work for task/dispatch only with --harness codex (native OpenAI wire protocol); rejected by task's default --harness claude and by dispatch without --harness codex. See gateway-companion.mjs setup doctor. ':cloud' model suffix is Ollama-specific tag syntax -- drop it for non-Ollama gateway kinds, your backend's /v1/models list is the source of truth for exact model IDs.",
   "profiles": {
     "ollama-local": {
       "kind": "claude-gateway",
@@ -9,13 +10,13 @@
     "my-gateway": {
       "kind": "claude-gateway",
       "baseUrl": "http://YOUR_GATEWAY_HOST:PORT",
-      "defaultModel": "deepseek-v4-pro:cloud",
+      "defaultModel": "YOUR_MODEL_NAME",
       "apiKey": "sk-YOUR_API_KEY"
     },
     "my-gateway-fast": {
       "kind": "openai-chat",
       "baseUrl": "http://YOUR_GATEWAY_HOST:PORT",
-      "defaultModel": "deepseek-v4-flash:cloud",
+      "defaultModel": "YOUR_FAST_MODEL_NAME",
       "apiKey": "sk-YOUR_API_KEY"
     }
   },

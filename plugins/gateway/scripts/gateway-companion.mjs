@@ -1738,8 +1738,12 @@ async function handleDispatch(argv) {
   // --assign mappings, and --model-override profile:model all flow into
   // tasks[].profile via buildTaskList(); the --cross-review profile is added
   // explicitly below. Per spec §3.1, every one of these must exist in config
-  // AND have kind === "claude-gateway" — checked here, in preflight, before
-  // any task starts executing.
+  // AND have kind === "claude-gateway" -- checked here, in preflight, before
+  // any task starts executing. Exception: kind "openai-chat" is allowed when
+  // --harness codex, since runCodexTask (codex-harness.mjs) talks the OpenAI
+  // wire protocol natively and ignores profile.kind -- verified live 2026-08-03
+  // (task --harness codex --profile gpt54 succeeds). claude-subprocess.mjs is
+  // Anthropic-wire-only, so harness "claude" keeps the hard requirement.
   const profileNames = [...new Set(tasks.map((t) => t.profile).filter(Boolean))];
   if (options["cross-review"]) profileNames.push(options["cross-review"]);
 
@@ -1762,8 +1766,10 @@ async function handleDispatch(argv) {
     } catch (err) {
       validationError(err.message);
     }
-    if (profile.kind !== "claude-gateway") {
-      validationError(`Profile "${name}" has kind "${profile.kind}" — dispatch requires kind "claude-gateway".`);
+    const kindCompatible = profile.kind === "claude-gateway"
+      || (profile.kind === "openai-chat" && harness === "codex");
+    if (!kindCompatible) {
+      validationError(`Profile "${name}" has kind "${profile.kind}" — dispatch requires kind "claude-gateway" (or "openai-chat" with --harness codex).`);
     }
   }
 

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
 
 import { parseArgs, splitRawArgumentString, validateTimeoutOption } from "./lib/args.mjs";
 import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJson, profileSecrets, sanitizeError } from "./lib/api-client.mjs";
@@ -12,6 +13,8 @@ import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
 import { runTask, extractCodexFailure } from "./lib/codex-harness.mjs";
 import { runZeroTask, isZeroAvailable, getZeroProvider, zeroPreflightError, urlsMatch } from "./lib/zero-harness.mjs";
+import { runKimiTask, isKimiAvailable, getKimiConfigPath, readKimiConfig, kimiPreflightError, getKimiProviderApiKey } from "./lib/kimi-harness.mjs";
+import { runClineTask, isClineAvailable, getClineConfigPath, readClineConfig, clinePreflightError, getClineProviderApiKey } from "./lib/cline-harness.mjs";
 import { loadTranscript, parseTranscript, buildMessages } from "./lib/claude-session-transfer.mjs";
 import { runDebate, renderDebateOutput, preflightProfiles } from "./lib/debate.mjs";
 import {
@@ -89,18 +92,18 @@ function printUsage() {
   console.log(
     [
       "Usage:",
-      "  gateway-companion setup <add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model|doctor|models|zero-init> [args]",
+      "  gateway-companion setup <add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model|doctor|models|wizard|zero-init> [args]",
       "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json]",
       "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [focus]",
       "  gateway-companion staged-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [intent]",
-      "  gateway-companion task [--profile NAME] [--model MODEL] [--harness claude|codex|zero] [--as PERSONA] [--background] [--write|--no-write] [--prompt-file FILE] [prompt]",
+      "  gateway-companion task [--profile NAME] [--model MODEL] [--harness claude|codex|zero|kimi|cline] [--as PERSONA] [--background] [--write|--no-write] [--prompt-file FILE] [prompt]",
   `                          PERSONA: ${getValidPersonas().join("|")}`,
-      "  gateway-companion task-worker --job-id ID [--profile NAME] [--model MODEL] [--harness claude|codex|zero] [--write|--no-write] [prompt]",
+      "  gateway-companion task-worker --job-id ID [--profile NAME] [--model MODEL] [--harness claude|codex|zero|kimi|cline] [--write|--no-write] [prompt]",
       "  gateway-companion debate [--models P1,P2,...] [--rounds N] [--synthesizer NAME] [--mode relaxed|strict]",
       "                           [--timeout MS] [--max-concurrency N] [--base REF] [--scope auto|working-tree|branch]",
       "                           [--include-diff] [--json] [question]",
       "  gateway-companion dispatch [--plan FILE|--task PROMPT:PROFILE...] [--assign RANGES] [--model-override PROF:MODEL...]",
-      "                             [--max-concurrency N] [--timeout MS] [--harness claude|codex|zero] [--write|--no-write]",
+      "                             [--max-concurrency N] [--timeout MS] [--harness claude|codex|zero|kimi|cline] [--write|--no-write]",
       "                             [--cross-review PROFILE] [--cross-review-model MODEL] [--fail-fast] [--dry-run] [--json]",
       "                             [--background (not yet implemented)]",
       "  gateway-companion transfer [--profile NAME] [--turns N] [prompt]",
@@ -440,6 +443,30 @@ async function handleSetup(argv) {
       const claudeCheck = checkBinary("claude");
       const codexCheck  = checkBinary("codex");
       const zeroCheck = checkBinary("zero");
+      const kimiCheck = checkBinary("kimi");
+      let kimiNote = null;
+      if (kimiCheck.ok) {
+        const kimiConfigText = readKimiConfig(getKimiConfigPath());
+        const claudeGwProfiles = profileNames.filter((n) => config.profiles[n]?.kind === "claude-gateway");
+        const offenders = claudeGwProfiles.filter((n) =>
+          kimiPreflightError(config.profiles[n], config.profiles[n].defaultModel, kimiConfigText) != null
+        );
+        if (offenders.length > 0) {
+          kimiNote = `provider/model misaligned or undeclared for profile(s): ${offenders.join(", ")} — see README (Kimi harness setup)`;
+        }
+      }
+      const clineCheck = checkBinary("cline");
+      let clineNote = null;
+      if (clineCheck.ok) {
+        const clineConfigText = readClineConfig(getClineConfigPath());
+        const claudeGwProfiles = profileNames.filter((n) => config.profiles[n]?.kind === "claude-gateway");
+        const offenders = claudeGwProfiles.filter((n) =>
+          clinePreflightError(config.profiles[n], clineConfigText) != null
+        );
+        if (offenders.length > 0) {
+          clineNote = `provider misaligned for profile(s): ${offenders.join(", ")} — see README (Cline harness setup)`;
+        }
+      }
       let zeroNote = null;
       let zeroUpdateLine = null;
       if (zeroCheck.ok) {
@@ -497,6 +524,12 @@ async function handleSetup(argv) {
                 ...(zeroUpdateLine && { update: zeroUpdateLine }),
               }
             : { ok: false, warning: "not found — --harness zero unavailable" },
+          kimi: kimiCheck.ok
+            ? { ok: true, version: kimiCheck.version, ...(kimiNote && { warning: kimiNote }) }
+            : { ok: false, warning: "not found — --harness kimi unavailable" },
+          cline: clineCheck.ok
+            ? { ok: true, version: clineCheck.version, ...(clineNote && { warning: clineNote }) }
+            : { ok: false, warning: "not found — --harness cline unavailable" },
         };
         outputResult({ checks, profiles: profilesMap, roles }, true);
       } else {
@@ -508,6 +541,8 @@ async function handleSetup(argv) {
         lines.push(`  codex   ${codexCheck.ok ? ok : warn}  ${codexCheck.ok ? codexCheck.version : "not found (fallback: claude harness active)"}`);
         lines.push(`  zero    ${zeroCheck.ok ? (zeroNote ? warn : ok) : warn}  ${zeroCheck.ok ? zeroCheck.version + (zeroNote ? `  (${zeroNote})` : "") : "not found (--harness zero unavailable)"}`);
         if (zeroUpdateLine) lines.push(`          ${zeroUpdateLine}`);
+        lines.push(`  kimi    ${kimiCheck.ok ? (kimiNote ? warn : ok) : warn}  ${kimiCheck.ok ? kimiCheck.version + (kimiNote ? `  (${kimiNote})` : "") : "not found (--harness kimi unavailable)"}`);
+        lines.push(`  cline   ${clineCheck.ok ? (clineNote ? warn : ok) : warn}  ${clineCheck.ok ? clineCheck.version + (clineNote ? `  (${clineNote})` : "") : "not found (--harness cline unavailable)"}`);
 
         lines.push("");
         lines.push("[profiles]");
@@ -588,6 +623,155 @@ async function handleSetup(argv) {
             console.log(`  ${m}${marker}`);
           }
         }
+      }
+      break;
+    }
+
+    case "wizard": {
+      const { options } = parseArgs(rest, { valueOptions: ["source"] });
+      const config = loadConfig();
+
+      let source;
+      try {
+        source = resolveProfile(options.source, config);
+      } catch (err) {
+        console.error(`No source profile to browse models from — add one first (setup add) or pass --source NAME. (${err.message})`);
+        process.exitCode = 2;
+        break;
+      }
+
+      const secrets = profileSecrets(source);
+      const safeBaseUrl = redactText(source.baseUrl, secrets);
+
+      let models;
+      try {
+        models = await listModels(source);
+      } catch (err) {
+        console.error(`Failed to list models from ${safeBaseUrl}: ${sanitizeError(err, secrets)}`);
+        process.exitCode = 1;
+        break;
+      }
+
+      if (models.length === 0) {
+        console.log(`No models returned by ${source.name} (${safeBaseUrl}).`);
+        break;
+      }
+
+      // model id -> name of the existing profile already using it at this baseUrl
+      const configuredBy = new Map();
+      for (const [name, p] of Object.entries(config.profiles)) {
+        if (urlsMatch(p.baseUrl, source.baseUrl)) configuredBy.set(p.defaultModel, name);
+      }
+
+      // A fresh ask() call per prompt loses queued answers when stdin
+      // is piped (Node hangs/exits after the first question — not just a TTY
+      // quirk, see readline's known non-terminal-input limitation). Pull
+      // lines from one persistent async iterator instead, which works for
+      // both piped and interactive stdin.
+      const rl = createInterface({ input: process.stdin });
+      const lines = rl[Symbol.asyncIterator]();
+      async function ask(promptText) {
+        process.stdout.write(promptText);
+        const { value, done } = await lines.next();
+        return done ? "" : value;
+      }
+      try {
+        console.log(`Models at ${source.name} (${safeBaseUrl}):`);
+        models.forEach((m, i) => {
+          const existing = configuredBy.get(m);
+          console.log(`  ${String(i + 1).padStart(3)}. ${m}${existing ? `  ← already configured (${existing})` : ""}`);
+        });
+
+        const rawSelection = (await ask("\nModels to add (comma-separated numbers, Enter to cancel): ")).trim();
+        if (!rawSelection) {
+          console.log("Nothing selected, no changes.");
+          break;
+        }
+
+        const tokens = [...new Set(rawSelection.split(",").map((s) => s.trim()).filter(Boolean))];
+        const picked = [];
+        for (const token of tokens) {
+          const n = Number(token);
+          if (!Number.isInteger(n) || n < 1 || n > models.length) {
+            console.error(`Ignoring invalid selection: "${token}"`);
+            continue;
+          }
+          const model = models[n - 1];
+          if (configuredBy.has(model)) {
+            console.error(`Ignoring "${model}" — already configured as "${configuredBy.get(model)}".`);
+            continue;
+          }
+          picked.push(model);
+        }
+
+        if (picked.length === 0) {
+          console.log("Nothing to add.");
+          break;
+        }
+
+        let updatedConfig = config;
+        const added = [];
+        for (const model of picked) {
+          const defaultName = model
+            .replace(/^codex-/, "")
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-+|-+$/g, "");
+          const defaultKind = model.startsWith("codex-") ? "openai-chat" : "claude-gateway";
+
+          let name = (await ask(`Profile name for "${model}" [${defaultName}]: `)).trim() || defaultName;
+          while (updatedConfig.profiles[name] || added.some((a) => a.name === name)) {
+            console.error(`"${name}" already exists.`);
+            name = (await ask(`Profile name for "${model}" [${defaultName}]: `)).trim() || defaultName;
+          }
+
+          let kind = (await ask(`Kind for "${name}" (claude-gateway/openai-chat) [${defaultKind}]: `)).trim() || defaultKind;
+          while (!["claude-gateway", "openai-chat"].includes(kind)) {
+            console.error(`Invalid kind "${kind}". Must be "claude-gateway" or "openai-chat".`);
+            kind = (await ask(`Kind for "${name}" (claude-gateway/openai-chat) [${defaultKind}]: `)).trim() || defaultKind;
+          }
+
+          const profileData = {
+            kind,
+            baseUrl: source.baseUrl,
+            defaultModel: model,
+            ...(source.authToken && { authToken: source.authToken }),
+            ...(source.apiKey && { apiKey: source.apiKey })
+          };
+
+          const validation = validateProfile(profileData);
+          if (!validation.valid) {
+            console.error(`Profile "${name}" invalid, skipped: ${validation.errors.join(", ")}`);
+            continue;
+          }
+
+          updatedConfig = addProfile(updatedConfig, name, profileData);
+          added.push({ name, model });
+        }
+
+        if (added.length === 0) {
+          console.log("No profiles added.");
+          break;
+        }
+
+        const defaultAnswer = (await ask(
+          `\nDefault profile? (${added.map((a) => a.name).join(", ")}, Enter to keep current): `
+        )).trim();
+        if (defaultAnswer) {
+          if (updatedConfig.profiles[defaultAnswer]) {
+            updatedConfig.defaultProfile = defaultAnswer;
+          } else {
+            console.error(`"${defaultAnswer}" not found, default unchanged.`);
+          }
+        }
+
+        saveConfig(updatedConfig);
+        warnIncompatibleTaskKinds(updatedConfig);
+
+        console.log(`\nAdded ${added.length} profile(s): ${added.map((a) => a.name).join(", ")}`);
+        console.log(`Default profile: ${updatedConfig.defaultProfile ?? "(none)"}`);
+      } finally {
+        rl.close();
       }
       break;
     }
@@ -684,7 +868,7 @@ async function handleSetup(argv) {
     }
 
     default:
-      throw new Error(`Unknown setup action: ${action}. Use add, remove, list, test, set-default, set-review-profile, set-task-profile, set-model, doctor, models, or zero-init.`);
+      throw new Error(`Unknown setup action: ${action}. Use add, remove, list, test, set-default, set-review-profile, set-task-profile, set-model, doctor, models, wizard, or zero-init.`);
   }
 }
 
@@ -992,15 +1176,25 @@ async function executeTaskRun(request) {
   request.onProgress?.({ message: `Delegating task to ${profile.name} (${model})...`, phase: "starting" });
 
   const harness = request.harness || "claude";
-  const VALID_HARNESSES = new Set(["claude", "codex", "zero"]);
+  const VALID_HARNESSES = new Set(["claude", "codex", "zero", "kimi", "cline"]);
   if (!VALID_HARNESSES.has(harness)) {
     throw new Error(`Unknown --harness "${harness}". Valid: ${[...VALID_HARNESSES].join(", ")}`);
   }
-  // zero is fail-loud by design: no silent fallback to claude (spec rev 2).
+  // zero/kimi/cline are fail-loud by design: no silent fallback to claude (spec rev 2).
   if (harness === "zero" && !isZeroAvailable()) {
     throw new Error("--harness zero requires the zero CLI. Install: npm i -g @gitlawb/zero");
   }
-  const taskRunner = harness === "codex" ? runTask : harness === "zero" ? runZeroTask : runClaudeTask;
+  if (harness === "kimi" && !isKimiAvailable()) {
+    throw new Error("--harness kimi requires the kimi-code CLI. Install: see https://moonshotai.github.io/kimi-code/");
+  }
+  if (harness === "cline" && !isClineAvailable()) {
+    throw new Error("--harness cline requires the cline CLI. Install: see https://docs.cline.bot/");
+  }
+  const taskRunner = harness === "codex" ? runTask
+    : harness === "zero" ? runZeroTask
+    : harness === "kimi" ? runKimiTask
+    : harness === "cline" ? runClineTask
+    : runClaudeTask;
   const prompt = applyPersona(request.prompt, request.persona);
 
   const result = await taskRunner(profile, prompt, {
@@ -1020,18 +1214,31 @@ async function executeTaskRun(request) {
   const rawStderr = result.stderr || "";
   const exitStatus = result.exitCode ?? (result.signal ? 1 : 0);
 
+  // kimi's/cline's own credential lives in their own config file, never in
+  // the profile or env (unlike every other harness) — fold it into this
+  // run's redaction set so an unexpected echo from the CLI itself still gets
+  // scrubbed. Nothing else in the codebase's secret-collection knows this key exists.
+  let secrets = request.secrets;
+  if (harness === "kimi") {
+    const kimiApiKey = getKimiProviderApiKey(readKimiConfig(getKimiConfigPath()));
+    if (kimiApiKey) secrets = [...(request.secrets ?? []), kimiApiKey];
+  } else if (harness === "cline") {
+    const clineApiKey = getClineProviderApiKey(readClineConfig(getClineConfigPath()));
+    if (clineApiKey) secrets = [...(request.secrets ?? []), clineApiKey];
+  }
+
   if (exitStatus !== 0) {
     // FAIL-LOUD, LEAK-SAFE failure path (parity with the claude/main() error
     // contract): a redacted one-line message on the agent-visible surfaces and a
     // 0600 log holding the COMPLETE raw material — never the raw codex JSON
     // stream or the backend catalog on an agent-visible stream.
-    return shapeTaskFailure({ request, harness, rawOutput, rawStderr, exitStatus, write });
+    return shapeTaskFailure({ request: { ...request, secrets }, harness, rawOutput, rawStderr, exitStatus, write });
   }
 
   // Success: return the model output verbatim (unchanged behavior). Harness
   // stderr can still carry non-fatal noise — redact secrets and bound it before
   // it becomes agent-visible via payload.stderr.
-  const failureMessage = truncateOutput(redactText(rawStderr.trim(), request.secrets));
+  const failureMessage = truncateOutput(redactText(rawStderr.trim(), secrets));
 
   const rendered = renderTaskResult(
     { rawOutput, failureMessage },
@@ -1154,10 +1361,27 @@ async function handleTask(argv) {
 
   const write = options["no-write"] ? false : (options.write !== undefined ? Boolean(options.write) : true);
   const harness = options.harness || "claude";
-  // Pre-queue check: a --background zero job must not report "queued" and then
-  // die in the detached worker — fail loud in the parent (spec: fail-loud).
+  // Pre-queue check: a --background zero/kimi/cline job must not report
+  // "queued" and then die in the detached worker — fail loud in the parent (spec: fail-loud).
   if (harness === "zero" && !isZeroAvailable()) {
     console.error("--harness zero requires the zero CLI. Install: npm i -g @gitlawb/zero");
+    process.exitCode = 2;
+    return;
+  }
+  if (harness === "kimi") {
+    if (!isKimiAvailable()) {
+      console.error("--harness kimi requires the kimi-code CLI. Install: see https://moonshotai.github.io/kimi-code/");
+      process.exitCode = 2;
+      return;
+    }
+    if (!write) {
+      console.error("--harness kimi does not support --no-write (no CLI-level read-only mode).");
+      process.exitCode = 2;
+      return;
+    }
+  }
+  if (harness === "cline" && !isClineAvailable()) {
+    console.error("--harness cline requires the cline CLI. Install: see https://docs.cline.bot/");
     process.exitCode = 2;
     return;
   }
@@ -1700,12 +1924,15 @@ async function handleDispatch(argv) {
   }
 
   const harness = options.harness || "codex";
-  if (!["claude", "codex", "zero"].includes(harness)) {
-    validationError(`Unknown --harness "${harness}". Valid: claude, codex, zero.`);
+  if (!["claude", "codex", "zero", "kimi", "cline"].includes(harness)) {
+    validationError(`Unknown --harness "${harness}". Valid: claude, codex, zero, kimi, cline.`);
   }
 
   if (options.write && options["no-write"]) validationError("--write y --no-write son mutuamente excluyentes.");
   const write = options["no-write"] ? false : true;
+  if (harness === "kimi" && !write) {
+    validationError("--harness kimi does not support --no-write (no CLI-level read-only mode).");
+  }
   const config = loadConfig();
   let defaultProfile;
   try {
@@ -1796,6 +2023,47 @@ async function handleDispatch(argv) {
     }
   }
 
+  if (harness === "kimi") {
+    if (!isKimiAvailable()) {
+      process.exitCode = 2;
+      throw new Error("--harness kimi requires the kimi-code CLI. Install: see https://moonshotai.github.io/kimi-code/");
+    }
+    // kimi's provider/model config is global per machine: validate every TASK
+    // profile+model against it ONCE, pre-dispatch (parity with the zero block above).
+    const kimiConfigText = readKimiConfig(getKimiConfigPath());
+    const offenders = new Set();
+    for (const t of tasks) {
+      const profile = resolveProfile(t.profile, config);
+      const model = t.model || profile.defaultModel;
+      const failure = kimiPreflightError(profile, model, kimiConfigText);
+      if (failure) offenders.add(`${t.profile}/${model}: ${failure}`);
+    }
+    if (offenders.size > 0) {
+      process.exitCode = 2;
+      throw new Error(`--harness kimi provider preflight failed:\n  ${[...offenders].join("\n  ")}`);
+    }
+  }
+
+  if (harness === "cline") {
+    if (!isClineAvailable()) {
+      process.exitCode = 2;
+      throw new Error("--harness cline requires the cline CLI. Install: see https://docs.cline.bot/");
+    }
+    // cline's provider config is global per machine: validate every TASK
+    // profile against it ONCE, pre-dispatch (parity with the zero/kimi blocks above).
+    const clineConfigText = readClineConfig(getClineConfigPath());
+    const offenders = new Set();
+    for (const t of tasks) {
+      const profile = resolveProfile(t.profile, config);
+      const failure = clinePreflightError(profile, clineConfigText);
+      if (failure) offenders.add(`${t.profile}: ${failure}`);
+    }
+    if (offenders.size > 0) {
+      process.exitCode = 2;
+      throw new Error(`--harness cline provider preflight failed:\n  ${[...offenders].join("\n  ")}`);
+    }
+  }
+
   // --- Dry run ---
   if (options["dry-run"]) {
     const matrix = tasks.map((t) => ({ id: t.id, prompt: shorten(t.prompt, 80), profile: t.profile, model: t.model || "(default)" }));
@@ -1839,9 +2107,24 @@ async function handleDispatch(argv) {
   if (!options.json) console.error(`[dispatch] Starting ${tasks.length} tasks across ${new Set(tasks.map((t) => t.profile)).size} profiles (max-concurrency: ${maxConcurrency}/endpoint)`);
 
   const resolveProfileFn = (name) => resolveProfile(name, config);
-  const taskRunnerFn = harness === "codex" ? runTask : harness === "zero" ? runZeroTask : runClaudeTask;
+  const taskRunnerFn = harness === "codex" ? runTask
+    : harness === "zero" ? runZeroTask
+    : harness === "kimi" ? runKimiTask
+    : harness === "cline" ? runClineTask
+    : runClaudeTask;
   if (typeof resolveProfileFn !== "function") throw new Error("Internal error: resolveProfileFn is not a function.");
   if (typeof taskRunnerFn !== "function") throw new Error(`Internal error: no task runner available for harness "${harness}".`);
+
+  // kimi's/cline's own credential lives in their own config file, not in any
+  // profile/env — fold it into dispatch's redaction set too (parity with executeTaskRun).
+  let dispatchSecrets = collectConfigSecrets(config);
+  if (harness === "kimi") {
+    const kimiApiKey = getKimiProviderApiKey(readKimiConfig(getKimiConfigPath()));
+    if (kimiApiKey) dispatchSecrets = [...dispatchSecrets, kimiApiKey];
+  } else if (harness === "cline") {
+    const clineApiKey = getClineProviderApiKey(readClineConfig(getClineConfigPath()));
+    if (clineApiKey) dispatchSecrets = [...dispatchSecrets, clineApiKey];
+  }
 
   const result = await runDispatch(tasks, {
     cwd,
@@ -1852,7 +2135,7 @@ async function handleDispatch(argv) {
     failFast: options["fail-fast"],
     taskRunner: taskRunnerFn,
     resolveProfileFn,
-    secrets: collectConfigSecrets(config),
+    secrets: dispatchSecrets,
     onProgress: options.json ? null : (evt) => console.error(`[dispatch] ${evt.message}`),
   });
 

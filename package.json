@@ -3,7 +3,7 @@
   "version": "0.5.7",
   "private": true,
   "type": "module",
-  "description": "Claude Code plugin that routes reviews, tasks, and multi-model debates to Ollama, DeepSeek, MiniMax, and other OpenAI-compatible endpoints. Includes 6 specialized personas, triple-harness execution (claude/codex/zero), prompt shaping, and auto-routing.",
+  "description": "Claude Code plugin that routes reviews, tasks, and multi-model debates to Ollama, DeepSeek, MiniMax, and other OpenAI-compatible endpoints. Includes 6 specialized personas, 5-harness execution (claude/codex/zero/kimi/cline), prompt shaping, and auto-routing.",
   "author": "elmaxi",
   "license": "MIT",
   "bin": {

@@ -10,7 +10,7 @@ Agrega 13 comandos `/gateway:*` a Claude Code. Siete operaciones principales:
 |-----------|---------|-------------|
 | **Review** | HTTP + agentic loop (tool-use multi-turn) | Revisar código; modelo explora repo con git/fs tools |
 | **Staged Review** | HTTP directo 2-fases | Fase 1: spec compliance, Fase 2: code quality adversarial |
-| **Task** | Subprocess `claude -p`, `codex exec` o `zero` (triple-harness) | Delegación completa con herramientas |
+| **Task** | Subprocess `claude -p`, `codex exec`, `zero`, `kimi` o `cline` (5 harnesses) | Delegación completa con herramientas |
 | **Dispatch** | Worktrees git paralelas, un task runner (claude/codex) por tarea | Distribuir varias tareas de un plan across modelos en paralelo, con cross-review opcional |
 | **Work** | Auto-routing → persona especializada | Detecta tipo de tarea por keywords |
 | **Debate** | HTTP paralelo multi-modelo con preflight + quorum | Posiciones independientes + crítica cruzada + síntesis |
@@ -65,15 +65,17 @@ De acá en adelante, cada comando tiene su propia sección más abajo con flags 
 
 Las personas están definidas en archivos `personas/*.md` con frontmatter YAML. Cada archivo declara `name`, `description`, `activation_keywords` y el cuerpo del system prompt. Para agregar una nueva persona basta con crear un archivo `.md` nuevo — no requiere cambios en código.
 
-### Triple-harness
+### Harnesses
 
 | Harness | Comando | Ventaja |
 |---------|---------|---------|
 | **claude** | `claude -p --bare` | Stateless, rápido, 0 overhead |
 | **codex** | `codex exec --json` | Threads persistentes, reasoning traces, sandbox real |
 | **zero** | `zero` (one-shot) | Tool whitelist fijo, fail-loud (sin fallback) |
+| **kimi** | `kimi -p --output-format stream-json` | CLI agentic de Moonshot, resume vía `-c` |
+| **cline** | `cline --json --provider litellm` | Único harness con read-only real (`--auto-approve false`) |
 
-En `task`/`task-worker`, si codex no está instalado hay fallback automático a claude (para perfiles claude-gateway). En `dispatch` **no** hay fallback: si falta el CLI de codex o de zero, el comando preflight-falla (exit 2). Zero nunca tiene fallback: si falta, falla explícito.
+En `task`/`task-worker`, si codex no está instalado hay fallback automático a claude (para perfiles claude-gateway). En `dispatch` **no** hay fallback: si falta el CLI de codex, zero, kimi o cline, el comando preflight-falla (exit 2). Zero, kimi y cline nunca tienen fallback: si faltan, fallan explícito.
 
 ### Zero harness
 
@@ -92,6 +94,61 @@ Prompt convention for long analysis tasks (reviews, research): zero's `stdout` i
 stands") and the real content stays in the stream. Ask explicitly: *"your final message must
 contain the complete output"*. The full stream survives either way in the task log (`rawJsonl`).
 
+### Kimi harness
+
+[Kimi Code](https://moonshotai.github.io/kimi-code/) como cuarto harness: `--harness kimi` en
+`task`, `task-worker` y `dispatch`. Requiere el CLI `kimi` instalado y un provider OpenAI-compatible
+llamado exactamente `gateway` configurado a mano en `~/.kimi-code/config.toml` (no hay `setup
+kimi-init` automatizado — el CLI de kimi no expone un comando para agregar un endpoint suelto, solo
+importa providers desde un registry manifest):
+
+```toml
+[providers.gateway]
+type = "openai"
+base_url = "http://TU_GATEWAY:4000/v1"
+api_key = "sk-..."
+
+[models."gateway/<modelo-del-perfil>"]
+provider = "gateway"
+model = "<modelo-del-perfil>"
+```
+
+Cada modelo que uses vía `--harness kimi` debe tener su propia entrada `[models."gateway/<modelo>"]`
+— si falta, kimi falla con un error claro (validado en preflight antes de spawnear, no en runtime).
+`setup doctor` valida esto por perfil y avisa qué perfiles quedan desalineados.
+
+Fail-loud: no hay fallback si kimi no está instalado, igual que zero. No soporta `--no-write`
+(kimi no tiene un flag de sandbox/read-only a nivel CLI) — pasar `--no-write` con `--harness kimi`
+falla antes de encolar/ejecutar. `--fork` tampoco está soportado. `resume` (interno, sin flag propio
+en `task` todavía) usa `-c` (continue-last-for-cwd), no session IDs explícitos.
+
+### Cline harness
+
+[Cline](https://docs.cline.bot/) como quinto harness: `--harness cline` en `task`, `task-worker`
+y `dispatch`. Requiere el CLI `cline` instalado y su provider builtin `litellm` (el nombre no es
+elegible — es el tipo de provider fijo de cline para endpoints OpenAI-compatibles custom)
+configurado a mano:
+
+```bash
+cline auth --provider litellm --baseurl http://TU_GATEWAY:4000/v1 --apikey sk-... --modelid <modelo-del-perfil>
+```
+
+A diferencia de kimi, el modelo NO necesita declaración previa — `--model` selecciona dinámicamente
+cualquier modelo que el endpoint exponga (validado en vivo por litellm, no localmente).
+
+Fail-loud: no hay fallback si cline no está instalado, igual que zero/kimi. `resume` (`--id`) no
+está soportado — está roto en el CLI instalado cuando se combina con modo `--json` no-interactivo
+(falla igual con el `taskId` del stream o el `sessionId` real de `cline history`, sin importar el
+orden de flags). `--fork` tampoco.
+
+**Único harness con read-only real:** a diferencia de kimi, `--no-write` SÍ funciona — cline corre
+con `--auto-approve false`, cada tool call falla con un error limpio en vez de ejecutar, y el proceso
+igual termina con una respuesta normal. Caveat verificado en vivo: un prompt en modo read-only que
+pide explícitamente usar una herramienta puede agotar los reintentos y abortar el run completo
+(`finishReason: "aborted"`, texto vacío, exit 0) — el harness lo detecta y falla ruidoso en vez de
+devolver un "éxito" vacío. Prompts de análisis/review que no exigen herramientas (el uso típico de
+`--no-write`) funcionan bien siempre.
+
 ## Requisitos
 
 - **Node.js** ≥ 18.18.0
@@ -101,6 +158,8 @@ contain the complete output"*. The full stream survives either way in the task l
   > ⚠️ **Nota:** Codex requiere que el directorio de trabajo sea un repositorio git. Si no lo es, ejecutar `git init` antes de usar harness codex.
   > Codex también puede ser **cliente** del plugin (no solo harness de ejecución) — ver sección [Codex](#codex) más abajo.
 - **Opcional:** [Zero CLI](https://github.com/Gitlawb/zero) (`npm i -g @gitlawb/zero`) para el harness zero (sin fallback: fail-loud si no está instalado)
+- **Opcional:** [Kimi Code CLI](https://moonshotai.github.io/kimi-code/) para el harness kimi (sin fallback: fail-loud si no está instalado; requiere configurar el provider `gateway` a mano — ver [sección Kimi harness](#kimi-harness))
+- **Opcional:** [Cline CLI](https://docs.cline.bot/) para el harness cline (sin fallback: fail-loud si no está instalado; requiere `cline auth --provider litellm ...` a mano — ver [sección Cline harness](#cline-harness))
 
 ## Instalación
 
@@ -227,7 +286,31 @@ Crea los 11 perfiles estándar con roles correctos de una vez:
 
 También acepta variables de entorno: `GATEWAY_URL` y `GATEWAY_API_KEY`.
 
-### Opción B: configurar vía comandos
+### Opción B: wizard interactivo (para elegir modelos fuera de los 11 estándar)
+
+El gateway suele exponer más modelos que los 11 de la Opción A. `setup wizard`
+lista todos, marca los ya configurados, y agrega por número — sin escribir un
+`setup add` por modelo.
+
+Necesita un perfil ya conectado para poder listar modelos, así que primero un
+bootstrap manual de uno solo:
+
+```
+/gateway:setup add --profile minimax --url http://GATEWAY:4000 --model minimax-m3:cloud --kind claude-gateway --api-key sk-...
+```
+
+Después, el wizard — es interactivo (pide input por stdin), así que corre
+**directo en una terminal real**, no vía slash command:
+
+```bash
+node plugins/gateway/scripts/gateway-companion.mjs setup wizard --source minimax
+```
+
+(o `!node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" setup wizard --source minimax`
+desde el prompt de Claude Code — el `!` corre en tu shell real, no por el Bash
+tool del modelo)
+
+### Opción C: agregar perfiles uno por uno a mano
 
 Desde Claude Code, usar `/gateway:setup add` para cada endpoint:
 
@@ -391,7 +474,7 @@ Review de 2 fases: Fase 1 evalúa spec compliance (¿el código hace lo que dice
 
 ### `/gateway:task`
 
-Delega una tarea al LLM via subprocess. Soporta triple-harness (claude, codex o zero).
+Delega una tarea al LLM via subprocess. Soporta 5 harnesses (claude, codex, zero, kimi o cline).
 
 ```
 /gateway:task "explica qué hace este proyecto"
@@ -400,6 +483,8 @@ Delega una tarea al LLM via subprocess. Soporta triple-harness (claude, codex o 
 /gateway:task --no-write "analiza la arquitectura sin hacer cambios"
 /gateway:task --harness codex "debug este test que falla"
 /gateway:task --harness zero "resume los cambios de este PR"
+/gateway:task --profile kimi-code --harness kimi "implementa el fix de auth.mjs"
+/gateway:task --profile glm --harness cline --no-write "revisa la arquitectura de dispatch.mjs"
 ```
 
 **Flags:**
@@ -407,7 +492,7 @@ Delega una tarea al LLM via subprocess. Soporta triple-harness (claude, codex o 
 - `--wait` — foreground bloqueante (default)
 - `--profile NAME` — perfil a usar (debe ser `claude-gateway`)
 - `--model MODEL` — override del modelo
-- `--harness claude|codex|zero` — harness de ejecución (default: claude). Codex ofrece threads persistentes y sandbox real; zero es one-shot fail-loud (sin fallback)
+- `--harness claude|codex|zero|kimi|cline` — harness de ejecución (default: claude). Codex ofrece threads persistentes y sandbox real; zero, kimi y cline son fail-loud (sin fallback); kimi no soporta `--no-write`, cline sí (único harness con read-only real)
 - `--as PERSONA` — inyecta system prompt de una persona antes de la tarea (`reviewer`, `debugger`, `security`, `researcher`, `coder`). Si no se especifica, se intenta auto-match: el prompt se compara contra `activation_keywords` de cada persona y se selecciona la de mayor score (vía `matchPersona()`). Usar `--as` explícito para forzar una persona concreta.
 - `--write` — permite escritura de archivos (default)
 - `--no-write` — modo lectura, sin edits
@@ -455,7 +540,7 @@ Distribuye varias tareas de implementación across múltiples modelos gateway en
 - `--assign RANGES` — asigna rangos de task IDs a perfiles, ej. `1-3:minimax,4-6:glm`. Solo válido con `--plan`
 - `--model-override PROF:MODEL` — override de modelo para un perfil (repetible)
 - `--max-concurrency N` — máximo de tareas concurrentes por endpoint (1-16, default 3)
-- `--harness claude|codex|zero` — harness de ejecución por tarea (default `codex`; codex y zero requieren su CLI instalado)
+- `--harness claude|codex|zero|kimi|cline` — harness de ejecución por tarea (default `codex`; codex, zero, kimi y cline requieren su CLI instalado; kimi no soporta `--no-write`)
 - `--timeout MS` — timeout por tarea en ms. Si expira, esa tarea se marca `FAILED (timeout)` (no aborta las demás)
 - `--cross-review PROFILE` — tras completar, revisa el diff de cada tarea con este perfil y agrega los findings al manifest
 - `--cross-review-model MODEL` — override de modelo para el cross-review
@@ -537,7 +622,7 @@ Distribuye varias tareas de implementación across múltiples modelos gateway en
 - `--plan` y `--task` juntos, o ninguno de los dos → son mutuamente excluyentes, uno es obligatorio.
 - `--assign` sin `--plan` → solo tiene sentido con un plan file.
 - `--write` y `--no-write` juntos → mutuamente excluyentes.
-- `--max-concurrency` fuera de 1-16, o `--harness` que no sea `claude`/`codex`/`zero`.
+- `--max-concurrency` fuera de 1-16, o `--harness` que no sea `claude`/`codex`/`zero`/`kimi`/`cline`.
 - Un perfil (de `--task`, `--assign`, `--model-override` o `--cross-review`) no existe en config, o existe pero no es `kind: claude-gateway`.
 - El archivo de `--plan` no se puede leer.
 - `--model-override` referencia un perfil que ninguna tarea usa realmente → no es error fatal, pero avisa por stderr (`Warning: --model-override references profile "X" which is not used by any task`) — típico de un typo en el nombre del perfil.

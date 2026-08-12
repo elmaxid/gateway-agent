@@ -8,7 +8,7 @@
 node scripts/install-plugins.mjs
 ```
 
-Detecta los harnesses presentes (`claude`, `codex`) e instala/actualiza el plugin en cada uno — mismo comando para la primera instalación y para resincronizar después de un `git pull`. `--dry-run` muestra el plan sin ejecutar nada. No configura perfiles ni credenciales (pasos 2/2-bis/3 más abajo). Ver `node scripts/install-plugins.mjs --help` para el resto de flags.
+Detecta los harnesses presentes (`claude`, `codex`) e instala/actualiza el plugin en cada uno — mismo comando para la primera instalación y para resincronizar después de un `git pull`. `--dry-run` muestra el plan sin ejecutar nada. No configura perfiles ni credenciales (pasos 2/2-bis/2-ter/3 más abajo). Ver `node scripts/install-plugins.mjs --help` para el resto de flags.
 
 Los pasos manuales de abajo siguen disponibles para quien quiera entender/controlar cada paso por separado.
 
@@ -38,6 +38,20 @@ node plugins/gateway/scripts/gateway-companion.mjs setup zero-init
 > Crea el provider de zero apuntando al gateway con la key referenciada por env var
 > (`GATEWAY_API_KEY`, inyectada por el harness en cada spawn — no se duplica en disco).
 > No correr `zero-init` mientras haya un dispatch `--harness zero` activo.
+
+### 2-ter. (Opcional) Agregar más modelos con el wizard interactivo
+
+El gateway suele exponer más modelos que los dos del paso 2. En vez de repetir
+`setup add` a mano por cada uno, `setup wizard` lista todos los del endpoint,
+marca los ya configurados, y agregás por número:
+
+```bash
+node plugins/gateway/scripts/gateway-companion.mjs setup wizard --source profile-a
+```
+
+Es interactivo (necesita stdin real) — correrlo directo en terminal, nunca vía
+`/gateway:setup wizard` (esa slash command forwardea a Bash sin stdin
+interactivo y quedaría colgada).
 
 ### 3. Verificar conectividad
 ```bash

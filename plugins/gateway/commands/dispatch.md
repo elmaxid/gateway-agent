@@ -1,6 +1,6 @@
 ---
 description: Distribute tasks across multiple gateway LLM models in parallel with optional cross-review
-argument-hint: "[--plan <file>|--task <prompt:profile>...] [--assign <ranges>] [--harness claude|codex|zero] [--cross-review <profile>] [--dry-run] [--json] [natural language description]"
+argument-hint: "[--plan <file>|--task <prompt:profile>...] [--assign <ranges>] [--harness claude|codex|zero|kimi|cline] [--cross-review <profile>] [--dry-run] [--json] [natural language description]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 

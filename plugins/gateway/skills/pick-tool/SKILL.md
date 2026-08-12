@@ -35,7 +35,7 @@ All three take `--include-diff`, `--profile`, `--base`, `--scope auto\|branch\|w
 
 | Entry point | What it does | Reach for it when |
 |---|---|---|
-| `/gateway:task` | Delegates one task to a gateway model (`--harness claude\|codex\|zero`, `--as <persona>`, `--write\|--no-write`, `--background\|--wait`) | One bounded task you want off your own context |
+| `/gateway:task` | Delegates one task to a gateway model (`--harness claude\|codex\|zero\|kimi\|cline`, `--as <persona>`, `--write\|--no-write`, `--background\|--wait`) | One bounded task you want off your own context |
 | `/gateway:task-review` | Runs a task, then cross-reviews the resulting changes with a **different** profile (`--review <profile>` required) | The task is worth doing but you don't trust one model's output unreviewed |
 | `/gateway:work` | Keyword auto-routing to the right persona agent, then delegates | You know what you need done but not which persona/agent fits — simplest entry point |
 | `/gateway:dispatch` | Splits a plan (or explicit `--task` list) across several models in parallel, optional worktrees and `--cross-review` | Several independent tasks at once; one model would be the bottleneck. Supports `--dry-run` |
@@ -83,6 +83,8 @@ All three take `--include-diff`, `--profile`, `--base`, `--scope auto\|branch\|w
 | `/gateway:setup` | Profile config: `add`, `remove`, `list`, `test`, `set-default`, `set-review-profile`, `set-task-profile`, `set-model`, `doctor`, `models`, `zero-init` | Anything gateway-routed fails, or you're setting up / switching a model |
 
 First stop for "it isn't working": `/gateway:setup test --profile <name>` and `/gateway:setup doctor`.
+
+Interactive model picker (browse every model an endpoint offers, pick several by number, name a profile for each, choose a default) is `setup wizard` — needs live stdin, so it only works run directly in a terminal, e.g. `!node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" setup wizard`, never via the `/gateway:setup` slash command.
 
 ## Not user-invocable
 

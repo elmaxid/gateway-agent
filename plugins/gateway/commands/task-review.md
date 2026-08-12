@@ -1,6 +1,6 @@
 ---
 description: Run a task then automatically cross-review the changes with a different model
-argument-hint: "--review <review-profile> [--profile <task-profile>] [--model <model>] [--harness claude|codex|zero] [--as persona] [--write|--no-write] [--prompt-file <path>] [what to do]"
+argument-hint: "--review <review-profile> [--profile <task-profile>] [--model <model>] [--harness claude|codex|zero|kimi|cline] [--as persona] [--write|--no-write] [--prompt-file <path>] [what to do]"
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 

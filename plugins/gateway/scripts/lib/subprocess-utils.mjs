@@ -32,3 +32,46 @@ export function sanitizeSubprocessEnv(subprocessEnv) {
   for (const key of DANGEROUS_SUBPROCESS_ENV_KEYS) delete safe[key];
   return safe;
 }
+
+// Shared by kimi-harness.mjs and cline-harness.mjs: both read a globally
+// configured, externally-authored base_url (kimi's config.toml, cline's
+// providers.json) that — like any OpenAI-SDK client convention — carries a
+// "/v1" suffix, while this repo's profile.baseUrl never does. An exact-path
+// match (like zero-harness's urlsMatch) would report every real profile as
+// misaligned. Accept only an empty path or exactly "/v1" on the external
+// tool's side (never on the profile side), so a tool repointed at a
+// different path on the same host:port (e.g. a different tenant/route)
+// still fails preflight instead of silently passing.
+export function sameOriginAllowingV1(externalBaseUrl, profileBaseUrl) {
+  try {
+    const eu = new URL(externalBaseUrl);
+    const pu = new URL(profileBaseUrl);
+    const port = (u) => u.port || (u.protocol === "https:" ? "443" : "80");
+    const externalPath = eu.pathname.replace(/\/+$/, "");
+    const profilePath = pu.pathname.replace(/\/+$/, "");
+    return eu.protocol === pu.protocol
+      && eu.hostname.toLowerCase() === pu.hostname.toLowerCase()
+      && port(eu) === port(pu)
+      && profilePath === ""
+      && (externalPath === "" || externalPath === "/v1");
+  } catch {
+    return false;
+  }
+}
+
+// Origin only (protocol+host+port) — never echo a config-derived URL
+// verbatim into an agent-visible error message. Values read from an
+// external tool's own config are operator-authored today (no
+// userinfo/query token observed in practice), but nothing prevents one
+// from carrying credentials, and these messages reach the unredacted
+// live-progress stream (gateway-companion.mjs runForegroundCommand keeps
+// that stream byte-identical by design) — so strip anything beyond origin
+// defensively, at zero cost.
+export function originOnly(url) {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ""}`;
+  } catch {
+    return "(unparseable URL)";
+  }
+}

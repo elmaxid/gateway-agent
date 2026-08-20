@@ -4,10 +4,12 @@
  */
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
 import { chatCompletion, extractJson } from "./api-client.mjs";
+import { buildTargetInventory } from "./git.mjs";
 
 const MAX_OUTPUT_BYTES = 32 * 1024;
 const TOOL_TIMEOUT_MS = 10_000;
@@ -35,12 +37,10 @@ export const GIT_TOOLS = [
     type: "function",
     function: {
       name: "git_diff",
-      description: "Show git diff for the review target. Use paths[] to filter to specific files when the diff is large.",
+      description: "Show the diff for the resolved review target (staged and unstaged changes). Use paths[] to filter to specific files when the diff is large.",
       parameters: {
         type: "object",
         properties: {
-          base: { type: "string", description: "Base ref to diff against (e.g. 'main', 'HEAD~1')" },
-          staged: { type: "boolean", description: "Show staged (cached) changes only" },
           paths: { type: "array", items: { type: "string" }, description: "Limit diff to these file paths" },
         },
       },
@@ -50,12 +50,10 @@ export const GIT_TOOLS = [
     type: "function",
     function: {
       name: "list_changed_files",
-      description: "List files changed in the review target with their change type (M/A/D/R).",
+      description: "List files in the resolved review target with their index and worktree state, renames, and untracked files.",
       parameters: {
         type: "object",
-        properties: {
-          base: { type: "string", description: "Base ref to compare against" },
-        },
+        properties: {},
       },
     },
   },
@@ -143,8 +141,67 @@ function runCommand(cmd, args, cwd) {
   });
 }
 
-async function dispatchTool(name, args, cwd, repoRoot) {
+function formatInventory(inventory) {
+  return inventory
+    .map((entry) => {
+      const status = entry.untracked ? "??" : `${entry.index ?? " "}${entry.worktree ?? " "}`;
+      const displayPath = entry.renameFrom ? `${entry.renameFrom} -> ${entry.path}` : entry.path;
+      return `${status}\t${displayPath}`;
+    })
+    .join("\n") + (inventory.length ? "\n" : "");
+}
+
+function validatePaths(filePaths) {
+  if (!filePaths?.length) return { ok: true, pathArgs: [] };
+  for (const p of filePaths) {
+    if (!VALID_PATH_COMPONENT.test(p)) return { ok: false, error: "Error: invalid path in paths[]" };
+    if (p.includes("..") || path.isAbsolute(p)) return { ok: false, error: "Error: invalid path in paths[]" };
+  }
+  return { ok: true, pathArgs: ["--", ...filePaths] };
+}
+
+// Fingerprint of the working tree used to detect mid-review mutation. Covers the porcelain
+// status (structural changes and untracked files), the staged and unstaged diffs (content
+// changes to tracked files that keep the same status code), and the size+mtime of every
+// untracked file. That last part is not redundant: an untracked file's bytes appear in no diff
+// and its status code stays "??" no matter what changes inside it, yet the system prompt tells
+// the model to read every untracked file with read_file — so without this, the one class of
+// file the model is told to rely on is the one class the guard could not see.
+async function captureTreeFingerprint(repoRoot) {
+  const status = await runCommand("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], repoRoot);
+  const staged = await runCommand("git", ["diff", "--cached"], repoRoot);
+  const unstaged = await runCommand("git", ["diff"], repoRoot);
+  const untracked = await runCommand("git", ["ls-files", "--others", "--exclude-standard", "-z"], repoRoot);
+  const hash = createHash("sha256")
+    .update(status)
+    .update("\u0000")
+    .update(staged)
+    .update("\u0000")
+    .update(unstaged);
+  // Size and mtime rather than contents: this runs on every tool call, and a full re-read of
+  // every untracked file would make the guard cost more than the review it protects.
+  for (const rel of untracked.split("\u0000").filter(Boolean).sort()) {
+    let stamp = "missing";
+    try {
+      const st = await fs.stat(path.join(repoRoot, rel));
+      stamp = `${st.size}:${st.mtimeMs}`;
+    } catch {
+      /* raced with a delete — "missing" is itself a change worth hashing */
+    }
+    hash.update("\u0000").update(rel).update(":").update(stamp);
+  }
+  return hash.digest("hex");
+}
+
+async function dispatchTool(name, args, cwd, repoRoot, target, treeFingerprint) {
   try {
+    if (treeFingerprint !== undefined) {
+      const current = await captureTreeFingerprint(repoRoot);
+      if (current !== treeFingerprint) {
+        return "Error: the working tree changed during the review. The resolved target is no longer valid; re-run the review against the current tree.";
+      }
+    }
+
     switch (name) {
       case "read_file": {
         const { path: filePath, start_line, end_line } = args;
@@ -178,27 +235,23 @@ async function dispatchTool(name, args, cwd, repoRoot) {
       }
 
       case "git_diff": {
-        const { base, staged, paths: filePaths } = args;
-        if (base !== undefined && !VALID_REF.test(base)) return "Error: invalid ref";
-        const gitArgs = ["diff"];
-        if (staged) gitArgs.push("--cached");
-        if (base) gitArgs.push(`${base}..HEAD`);
-        if (filePaths?.length) {
-          for (const p of filePaths) {
-            if (!VALID_PATH_COMPONENT.test(p)) return "Error: invalid path in paths[]";
-            if (p.includes('..') || path.isAbsolute(p)) return "Error: invalid path in paths[]";
-          }
-          gitArgs.push("--", ...filePaths);
+        const { paths: filePaths } = args;
+        const { ok, error, pathArgs } = validatePaths(filePaths);
+        if (!ok) return error;
+        // repoRoot, not cwd: the paths the model filters by come from the inventory, which is
+        // repo-root-relative. Resolved against a subdirectory they match nothing, and git exits
+        // 0 on a pathspec that matches nothing — a silent empty diff over a valid-looking path.
+        if (target.mode === "working-tree") {
+          const staged = await runCommand("git", ["diff", "--cached", ...pathArgs], repoRoot);
+          const unstaged = await runCommand("git", ["diff", ...pathArgs], repoRoot);
+          return [staged, unstaged].filter((out) => out.trim() !== "").join("\n");
         }
-        return runCommand("git", gitArgs, cwd);
+        const range = `${target.mergeBase}..${target.headCommit}`;
+        return runCommand("git", ["diff", range, ...pathArgs], repoRoot);
       }
 
       case "list_changed_files": {
-        const { base } = args;
-        if (base !== undefined && !VALID_REF.test(base)) return "Error: invalid ref";
-        const gitArgs = ["diff", "--name-status"];
-        if (base) gitArgs.push(`${base}..HEAD`);
-        return runCommand("git", gitArgs, cwd);
+        return formatInventory(buildTargetInventory(repoRoot, target));
       }
 
       case "git_log": {
@@ -224,6 +277,9 @@ async function dispatchTool(name, args, cwd, repoRoot) {
     return err.message === "timeout" ? "Error: timeout" : `Error: ${err.message}`;
   }
 }
+
+// Minimal test seam for characterization coverage; production callers use runToolLoop.
+export { dispatchTool as dispatchToolForTest, captureTreeFingerprint as captureTreeFingerprintForTest };
 
 // ---------------------------------------------------------------------------
 // Tool loop
@@ -315,7 +371,7 @@ export async function runToolLoop(profile, messages, tools, opts = {}) {
       catch { args = null; }
       const result = args === null
         ? "Error: malformed JSON arguments"
-        : await dispatchTool(tc.function.name, args, opts.cwd, opts.repoRoot);
+        : await dispatchTool(tc.function.name, args, opts.cwd, opts.repoRoot, opts.target, opts.treeFingerprint);
       msgs = [...msgs, { role: "tool", tool_call_id: tc.id, content: String(result) }];
     }
   }
@@ -335,6 +391,11 @@ Workflow:
 2. For each significant file, call git_diff (filtered by path) or read_file for deeper context.
 3. Call git_log or git_show to understand intent when commit history is relevant.
 4. When you have sufficient evidence, stop calling tools and respond with valid JSON only.
+
+list_changed_files returns one line per file in the resolved target. Each line has two status
+columns — the index state and the worktree state — followed by the path. A rename shows both
+paths as "old -> new". Untracked files are marked "??"; they are not part of git_diff, so read
+their content with read_file.
 
 Output schema (respond with ONLY this JSON — no markdown fences, no prose):
 {
@@ -357,7 +418,7 @@ Output schema (respond with ONLY this JSON — no markdown fences, no prose):
 Rules:
 - Always use start_line/end_line when reading large files — never request the whole file if you only need a section.
 - Use paths[] in git_diff to filter to the file(s) you care about.
-- Always use the base ref provided in the initial message for git_diff and list_changed_files.
+- Read the content of every untracked ("??") file with read_file — git_diff does not include them.
 - Your final message must be valid JSON only — the caller will JSON.parse it directly.`;
 
 /**
@@ -372,9 +433,9 @@ export async function runAgenticReview(profile, cwd, target, opts = {}) {
   const repoRoot = (await runCommand("git", ["rev-parse", "--show-toplevel"], cwd)).trim();
   if (!repoRoot || repoRoot.startsWith("Error:")) throw new Error("Not a git repository: " + cwd);
 
-  const baseInstruction = target.baseRef
-    ? `For all git_diff and list_changed_files calls use base="${target.baseRef}".`
-    : "Compare against the working tree (no base ref provided).";
+  const treeFingerprint = target.mode === "working-tree"
+    ? await captureTreeFingerprint(repoRoot)
+    : undefined;
 
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
@@ -386,7 +447,6 @@ export async function runAgenticReview(profile, cwd, target, opts = {}) {
         target.baseRef ? `Base ref: ${target.baseRef}` : null,
         target.targetRef ? `Target ref: ${target.targetRef}` : null,
         "",
-        baseInstruction,
         "Start by calling list_changed_files to understand the scope.",
       ].filter(Boolean).join("\n"),
     },
@@ -396,5 +456,7 @@ export async function runAgenticReview(profile, cwd, target, opts = {}) {
     ...opts,
     cwd,
     repoRoot,
+    target,
+    treeFingerprint,
   });
 }

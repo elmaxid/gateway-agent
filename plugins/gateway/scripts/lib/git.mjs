@@ -16,10 +16,6 @@ function gitChecked(cwd, args, options = {}) {
   return runCommandChecked("git", args, { cwd, ...options });
 }
 
-function listUniqueFiles(...groups) {
-  return [...new Set(groups.flat().filter(Boolean))].sort();
-}
-
 function normalizeMaxInlineFiles(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -65,12 +61,31 @@ function measureCombinedGitOutputBytes(cwd, argSets, maxBytes) {
   return totalBytes;
 }
 
-function buildBranchComparison(cwd, baseRef) {
-  const mergeBase = gitChecked(cwd, ["merge-base", "HEAD", baseRef]).stdout.trim();
+function getHeadCommit(cwd) {
+  return gitChecked(cwd, ["rev-parse", "HEAD"]).stdout.trim();
+}
+
+function buildBranchComparison(cwd, baseRef, target) {
+  // target is always a resolved branch target, and buildBranchTarget always sets mergeBase —
+  // no fallback re-resolution, which would defeat the point of pinning it at resolution time.
+  const mergeBase = target.mergeBase;
   return {
     mergeBase,
     commitRange: `${mergeBase}..HEAD`,
     reviewRange: `${baseRef}...HEAD`
+  };
+}
+
+function buildBranchTarget(cwd, baseRef, explicit) {
+  const mergeBase = gitChecked(cwd, ["merge-base", "HEAD", baseRef]).stdout.trim();
+  const headCommit = getHeadCommit(cwd);
+  return {
+    mode: "branch",
+    label: `branch diff against ${baseRef}`,
+    baseRef,
+    mergeBase,
+    headCommit,
+    explicit
   };
 }
 
@@ -140,12 +155,7 @@ export function resolveReviewTarget(cwd, options = {}) {
   const supportedScopes = new Set(["auto", "working-tree", "branch"]);
 
   if (baseRef) {
-    return {
-      mode: "branch",
-      label: `branch diff against ${baseRef}`,
-      baseRef,
-      explicit: true
-    };
+    return buildBranchTarget(cwd, baseRef, true);
   }
 
   if (requestedScope === "working-tree") {
@@ -163,13 +173,7 @@ export function resolveReviewTarget(cwd, options = {}) {
   }
 
   if (requestedScope === "branch") {
-    const detectedBase = detectDefaultBranch(cwd);
-    return {
-      mode: "branch",
-      label: `branch diff against ${detectedBase}`,
-      baseRef: detectedBase,
-      explicit: true
-    };
+    return buildBranchTarget(cwd, detectDefaultBranch(cwd), true);
   }
 
   if (state.isDirty) {
@@ -180,13 +184,110 @@ export function resolveReviewTarget(cwd, options = {}) {
     };
   }
 
-  const detectedBase = detectDefaultBranch(cwd);
-  return {
-    mode: "branch",
-    label: `branch diff against ${detectedBase}`,
-    baseRef: detectedBase,
-    explicit: false
-  };
+  return buildBranchTarget(cwd, detectDefaultBranch(cwd), false);
+}
+
+function parsePorcelainStatusZ(output) {
+  const entries = [];
+  const fields = output.split("\0");
+  let i = 0;
+  while (i < fields.length) {
+    const record = fields[i];
+    if (record === "") {
+      i += 1;
+      continue;
+    }
+    const indexCode = record[0];
+    const worktreeCode = record[1];
+    const path = record.slice(3);
+    if (indexCode === "R" || indexCode === "C" || worktreeCode === "R" || worktreeCode === "C") {
+      // A rename record must carry its source path in the next NUL field. Defaulting to "" here
+      // would turn truncated git output into an inventory entry with a blank path — this module
+      // treats git as authoritative, so malformed output fails instead of being invented around.
+      const renameFrom = fields[i + 1];
+      if (renameFrom === undefined || renameFrom === "") {
+        throw new Error(`Malformed git status record: rename "${path}" has no source path`);
+      }
+      entries.push({ indexCode, worktreeCode, path, renameFrom });
+      i += 2;
+    } else {
+      entries.push({ indexCode, worktreeCode, path, renameFrom: null });
+      i += 1;
+    }
+  }
+  return entries;
+}
+
+function parseNameStatusZ(output) {
+  const entries = [];
+  const fields = output.split("\0");
+  let i = 0;
+  while (i < fields.length) {
+    const status = fields[i];
+    if (status === "") {
+      i += 1;
+      continue;
+    }
+    const code = status[0];
+    if (code === "R" || code === "C") {
+      const renameFrom = fields[i + 1];
+      const renamePath = fields[i + 2];
+      if (!renameFrom || !renamePath) {
+        throw new Error(`Malformed git name-status record: rename "${status}" is missing a path`);
+      }
+      entries.push({ code, renameFrom, path: renamePath });
+      i += 3;
+    } else {
+      const path = fields[i + 1];
+      if (!path) {
+        throw new Error(`Malformed git name-status record: "${status}" has no path`);
+      }
+      entries.push({ code, renameFrom: null, path });
+      i += 2;
+    }
+  }
+  return entries;
+}
+
+function sortInventory(entries) {
+  return entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+function buildWorkingTreeInventory(cwd) {
+  const output = gitChecked(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]).stdout;
+  const entries = parsePorcelainStatusZ(output).map(({ indexCode, worktreeCode, path, renameFrom }) => ({
+    path,
+    index: indexCode === " " || indexCode === "?" ? null : indexCode,
+    worktree: worktreeCode === " " || worktreeCode === "?" ? null : worktreeCode,
+    renameFrom,
+    untracked: indexCode === "?" && worktreeCode === "?"
+  }));
+  return sortInventory(entries);
+}
+
+// Branch mode passes --find-renames explicitly, which overrides the ambient diff.renames
+// config; the working-tree side deliberately does not, so it still honors status.renames.
+// The asymmetry is a recorded decision, not an oversight: a review of a branch should see a
+// rename as a rename regardless of how the operator configured git, while the working-tree
+// view stays faithful to what the operator's own `git status` would show them.
+function buildBranchInventory(cwd, target) {
+  const commitRange = `${target.mergeBase}..${target.headCommit}`;
+  const output = gitChecked(cwd, ["diff", "--name-status", "-z", "--find-renames", commitRange]).stdout;
+  const entries = parseNameStatusZ(output).map(({ code, path, renameFrom }) => ({
+    path,
+    index: code,
+    worktree: null,
+    renameFrom,
+    untracked: false
+  }));
+  return sortInventory(entries);
+}
+
+export function buildTargetInventory(cwd, target) {
+  if (target.mode === "working-tree") {
+    return buildWorkingTreeInventory(cwd);
+  }
+  return buildBranchInventory(cwd, target);
 }
 
 function formatSection(title, body) {
@@ -221,61 +322,53 @@ function formatUntrackedFile(cwd, relativePath) {
   return [`### ${relativePath}`, "```", buffer.toString("utf8").trimEnd(), "```"].join("\n");
 }
 
-function collectWorkingTreeContext(cwd, state, options = {}) {
+function collectWorkingTreeContext(cwd, inventory, options = {}) {
   const includeDiff = options.includeDiff !== false;
   const status = gitChecked(cwd, ["status", "--short", "--untracked-files=all"]).stdout.trim();
-  const changedFiles = listUniqueFiles(state.staged, state.unstaged, state.untracked);
+  const changedFiles = inventory.map((entry) => entry.path);
+  const staged = inventory.filter((entry) => entry.index !== null);
+  const unstaged = inventory.filter((entry) => entry.worktree !== null);
+  const untracked = inventory.filter((entry) => entry.untracked);
 
-  let parts;
-  if (includeDiff) {
-    const stagedDiff = gitChecked(cwd, ["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
-    const unstagedDiff = gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
-    const untrackedBody = state.untracked.map((file) => formatUntrackedFile(cwd, file)).join("\n\n");
-    parts = [
-      formatSection("Git Status", status),
-      formatSection("Staged Diff", stagedDiff),
-      formatSection("Unstaged Diff", unstagedDiff),
-      formatSection("Untracked Files", untrackedBody)
-    ];
-  } else {
-    const stagedStat = gitChecked(cwd, ["diff", "--shortstat", "--cached"]).stdout.trim();
-    const unstagedStat = gitChecked(cwd, ["diff", "--shortstat"]).stdout.trim();
-    const untrackedBody = state.untracked.map((file) => formatUntrackedFile(cwd, file)).join("\n\n");
-    parts = [
-      formatSection("Git Status", status),
-      formatSection("Staged Diff Stat", stagedStat),
-      formatSection("Unstaged Diff Stat", unstagedStat),
-      formatSection("Changed Files", changedFiles.join("\n")),
-      formatSection("Untracked Files", untrackedBody)
-    ];
-  }
+  // Unconditional since the evidence contract landed: collectReviewContext refuses before
+  // reaching here when the diff cannot be sent whole, so there is no stats-only mode left.
+  const stagedDiff = gitChecked(cwd, ["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
+  const unstagedDiff = gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
+  const untrackedBody = untracked.map((entry) => formatUntrackedFile(cwd, entry.path)).join("\n\n");
+  const parts = [
+    formatSection("Git Status", status),
+    formatSection("Staged Diff", stagedDiff),
+    formatSection("Unstaged Diff", unstagedDiff),
+    formatSection("Untracked Files", untrackedBody)
+  ];
 
   return {
     mode: "working-tree",
-    summary: `Reviewing ${state.staged.length} staged, ${state.unstaged.length} unstaged, and ${state.untracked.length} untracked file(s).`,
+    summary: `Reviewing ${staged.length} staged, ${unstaged.length} unstaged, and ${untracked.length} untracked file(s).`,
     content: parts.join("\n"),
     changedFiles
   };
 }
 
-function collectBranchContext(cwd, baseRef, options = {}) {
+function collectBranchContext(cwd, target, options = {}) {
   const includeDiff = options.includeDiff !== false;
-  const comparison = options.comparison ?? buildBranchComparison(cwd, baseRef);
+  const comparison = options.comparison ?? buildBranchComparison(cwd, target.baseRef, target);
   const currentBranch = getCurrentBranch(cwd);
-  const changedFiles = gitChecked(cwd, ["diff", "--name-only", comparison.commitRange]).stdout.trim().split("\n").filter(Boolean);
-  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", comparison.commitRange]).stdout.trim();
-  const diffStat = gitChecked(cwd, ["diff", "--stat", comparison.commitRange]).stdout.trim();
+  const commitRange = `${target.mergeBase}..${target.headCommit}`;
+  const changedFiles = options.inventory.map((entry) => entry.path);
+  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", commitRange]).stdout.trim();
+  const diffStat = gitChecked(cwd, ["diff", "--stat", commitRange]).stdout.trim();
 
   return {
     mode: "branch",
-    summary: `Reviewing branch ${currentBranch} against ${baseRef} from merge-base ${comparison.mergeBase}.`,
+    summary: `Reviewing branch ${currentBranch} against ${target.baseRef} from merge-base ${comparison.mergeBase}.`,
     content: includeDiff
       ? [
           formatSection("Commit Log", logOutput),
           formatSection("Diff Stat", diffStat),
           formatSection(
             "Branch Diff",
-            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", comparison.commitRange]).stdout
+            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", commitRange]).stdout
           )
         ].join("\n")
       : [
@@ -288,12 +381,22 @@ function collectBranchContext(cwd, baseRef, options = {}) {
   };
 }
 
-function buildAdversarialCollectionGuidance(options = {}) {
-  if (options.includeDiff !== false) {
-    return "Use the repository context below as primary evidence.";
+/**
+ * Refuse a review target that contains nothing to review.
+ *
+ * Lives here rather than inside collectReviewContext alone because the default agentic route
+ * never calls the collector: it hands the model tools and lets it gather evidence itself. A
+ * guard that only covered collector callers left the most-travelled route able to return an
+ * approving verdict with exit 0 over an empty target — the exact outcome it exists to prevent.
+ *
+ * `inventory` is optional; pass it when the caller already built one to avoid a second walk.
+ */
+export function assertReviewTargetNonEmpty(repoRoot, target, inventory = null) {
+  const entries = inventory ?? buildTargetInventory(repoRoot, target);
+  if (entries.length === 0) {
+    throw new Error(buildEmptyTargetError(target));
   }
-
-  return "The repository context below is a lightweight summary. Inspect the target diff yourself with read-only git commands before finalizing findings.";
+  return entries;
 }
 
 export function collectReviewContext(cwd, target, options = {}) {
@@ -301,12 +404,13 @@ export function collectReviewContext(cwd, target, options = {}) {
   const currentBranch = getCurrentBranch(repoRoot);
   const maxInlineFiles = normalizeMaxInlineFiles(options.maxInlineFiles);
   const maxInlineDiffBytes = normalizeMaxInlineDiffBytes(options.maxInlineDiffBytes);
+  const inventory = buildTargetInventory(repoRoot, target);
+  assertReviewTargetNonEmpty(repoRoot, target, inventory);
   let details;
   let includeDiff;
   let diffBytes;
 
   if (target.mode === "working-tree") {
-    const state = getWorkingTreeState(repoRoot);
     diffBytes = measureCombinedGitOutputBytes(
       repoRoot,
       [
@@ -315,21 +419,24 @@ export function collectReviewContext(cwd, target, options = {}) {
       ],
       maxInlineDiffBytes
     );
-    includeDiff =
-      options.includeDiff ??
-      (listUniqueFiles(state.staged, state.unstaged, state.untracked).length <= maxInlineFiles &&
-        diffBytes <= maxInlineDiffBytes);
-    details = collectWorkingTreeContext(repoRoot, state, { includeDiff });
+    includeDiff = options.includeDiff ?? (inventory.length <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
+    if (!includeDiff) {
+      throw new Error(buildIncompleteEvidenceError(inventory.length, diffBytes, maxInlineFiles, maxInlineDiffBytes));
+    }
+    details = collectWorkingTreeContext(repoRoot, inventory, { includeDiff });
   } else {
-    const comparison = buildBranchComparison(repoRoot, target.baseRef);
-    const fileCount = gitChecked(repoRoot, ["diff", "--name-only", comparison.commitRange]).stdout.trim().split("\n").filter(Boolean).length;
+    const comparison = buildBranchComparison(repoRoot, target.baseRef, target);
+    const commitRange = `${target.mergeBase}..${target.headCommit}`;
     diffBytes = measureGitOutputBytes(
       repoRoot,
-      ["diff", "--binary", "--no-ext-diff", "--submodule=diff", comparison.commitRange],
+      ["diff", "--binary", "--no-ext-diff", "--submodule=diff", commitRange],
       maxInlineDiffBytes
     );
-    includeDiff = options.includeDiff ?? (fileCount <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
-    details = collectBranchContext(repoRoot, target.baseRef, { includeDiff, comparison });
+    includeDiff = options.includeDiff ?? (inventory.length <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
+    if (!includeDiff) {
+      throw new Error(buildIncompleteEvidenceError(inventory.length, diffBytes, maxInlineFiles, maxInlineDiffBytes));
+    }
+    details = collectBranchContext(repoRoot, target, { includeDiff, comparison, inventory });
   }
 
   return {
@@ -339,8 +446,29 @@ export function collectReviewContext(cwd, target, options = {}) {
     target,
     fileCount: details.changedFiles.length,
     diffBytes,
-    inputMode: includeDiff ? "inline-diff" : "self-collect",
-    collectionGuidance: buildAdversarialCollectionGuidance({ includeDiff }),
     ...details
   };
+}
+
+function buildEmptyTargetError(target) {
+  return (
+    `The review target "${target.label}" has no files to review: the resolved inventory is empty. ` +
+    "A review with nothing to review cannot be distinguished from an approval, so it is refused before any model call.\n" +
+    "To review something real, choose one of:\n" +
+    "  - Compare against a different ref with --base <ref> (e.g. --base main).\n" +
+    "  - Force a different scope with --scope working-tree (staged, unstaged, and untracked changes) or --scope branch.\n" +
+    "If the thing you want reviewed is a document that git ignores (and so can never appear in any review target), " +
+    "review it via delegation instead:\n" +
+    "  gateway-companion task --no-write \"<prompt naming the file paths>\""
+  );
+}
+
+function buildIncompleteEvidenceError(fileCount, diffBytes, maxInlineFiles, maxInlineDiffBytes) {
+  return (
+    "The direct review route cannot produce a complete review without the diff. " +
+    `This change has ${fileCount} file(s) and ${diffBytes.toLocaleString("en-US")} byte(s) of diff, ` +
+    `exceeding the inline evidence threshold (${maxInlineFiles} file(s) or ${maxInlineDiffBytes.toLocaleString("en-US")} byte(s)). ` +
+    "Re-run with --include-diff to send the complete diff inline, or use the agentic review route " +
+    "(gateway-companion review without --no-tools) which lets the model collect evidence with read-only tools."
+  );
 }

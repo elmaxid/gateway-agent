@@ -13,14 +13,19 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { executeReviewRun } from "../plugins/gateway/scripts/gateway-companion.mjs";
+import { createTempRepo, runGit } from "./helpers/git-fixture.mjs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.join(__dirname, "..");
+function makeFixtureRepo() {
+  const repo = createTempRepo("gw-malformed-repo-");
+  writeFileSync(path.join(repo.dir, "change.txt"), "malformed fixture change\n");
+  runGit(repo.dir, ["add", "change.txt"]);
+  return repo;
+}
 
 function malformedCompletion() {
   return JSON.stringify({
@@ -42,6 +47,7 @@ function validCompletion() {
 
 describe("executeReviewRun agentic path — malformed output handling", () => {
   it("returns exitStatus 1 and a FAILED render when the model returns malformed output twice in a row", async () => {
+    const repo = makeFixtureRepo();
     const server = http.createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(malformedCompletion());
@@ -51,7 +57,7 @@ describe("executeReviewRun agentic path — malformed output handling", () => {
 
     try {
       const result = await executeReviewRun({
-        cwd: REPO_ROOT,
+        cwd: repo.dir,
         profile: { name: "malformed-test", kind: "claude-gateway", baseUrl: `http://127.0.0.1:${port}`, defaultModel: "test-model" },
         scope: "working-tree",
       });
@@ -61,10 +67,12 @@ describe("executeReviewRun agentic path — malformed output handling", () => {
       assert.strictEqual(result.payload.error, "malformed_model_output");
     } finally {
       await new Promise((resolve) => server.close(resolve));
+      repo.cleanup();
     }
   });
 
   it("returns exitStatus 0 and a normal review render when the model recovers on retry", async () => {
+    const repo = makeFixtureRepo();
     let requestCount = 0;
     const server = http.createServer((req, res) => {
       requestCount++;
@@ -76,7 +84,7 @@ describe("executeReviewRun agentic path — malformed output handling", () => {
 
     try {
       const result = await executeReviewRun({
-        cwd: REPO_ROOT,
+        cwd: repo.dir,
         profile: { name: "recovers-test", kind: "claude-gateway", baseUrl: `http://127.0.0.1:${port}`, defaultModel: "test-model" },
         scope: "working-tree",
       });
@@ -86,6 +94,7 @@ describe("executeReviewRun agentic path — malformed output handling", () => {
       assert.strictEqual(result.payload.result.verdict, "approve");
     } finally {
       await new Promise((resolve) => server.close(resolve));
+      repo.cleanup();
     }
   });
 });

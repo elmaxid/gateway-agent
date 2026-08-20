@@ -35,14 +35,12 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { executeReviewRun } from "../plugins/gateway/scripts/gateway-companion.mjs";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.join(__dirname, "..");
+import { createTempRepo, runGit } from "./helpers/git-fixture.mjs";
 
 // timeoutMs * 2 = 200_000, which is > the old hardcoded 120_000 -- the two
 // are only distinguishable when timeoutMs > 60_000 (otherwise Math.max
@@ -84,6 +82,10 @@ function finalCompletion() {
 
 describe("executeReviewRun agentic maxTime scaling", () => {
   it("uses Math.max(120_000, timeoutMs * 2) as the tool loop deadline, not the old hardcoded 120_000", async () => {
+    const repo = createTempRepo("gw-maxtime-repo-");
+    writeFileSync(path.join(repo.dir, "change.txt"), "maxtime fixture change\n");
+    runGit(repo.dir, ["add", "change.txt"]);
+
     const realDateNow = Date.now;
     const t0 = realDateNow();
     let clockJumped = false;
@@ -117,7 +119,7 @@ describe("executeReviewRun agentic maxTime scaling", () => {
 
     try {
       await executeReviewRun({
-        cwd: REPO_ROOT,
+        cwd: repo.dir,
         profile: {
           name: "maxtime-test",
           kind: "claude-gateway",
@@ -130,6 +132,7 @@ describe("executeReviewRun agentic maxTime scaling", () => {
     } finally {
       Date.now = realDateNow;
       await new Promise((resolve) => server.close(resolve));
+      repo.cleanup();
     }
 
     assert.ok(clockJumped, "expected the mock server to have jumped the clock after the first request");

@@ -38,6 +38,12 @@ export function parseArgs(argv, config = {}) {
         if (nextValue === undefined) {
           throw new Error(`Missing value for --${rawKey}`);
         }
+        if (inlineValue === undefined && nextValue.startsWith("-") && nextValue !== "-") {
+          throw new Error(
+            `Missing value for --${rawKey}: next token "${nextValue}" is another option. ` +
+            `Use --${rawKey}=<value> when the value itself starts with "-".`
+          );
+        }
         options[key] = nextValue;
         if (inlineValue === undefined) {
           index += 1;
@@ -61,6 +67,11 @@ export function parseArgs(argv, config = {}) {
       const nextValue = argv[index + 1];
       if (nextValue === undefined) {
         throw new Error(`Missing value for -${shortKey}`);
+      }
+      // No inline `-k=value` form exists on the short branch, so this message must not
+      // advertise one — that syntax falls through to positionals here.
+      if (nextValue.startsWith("-") && nextValue !== "-") {
+        throw new Error(`Missing value for -${shortKey}: next token "${nextValue}" is another option.`);
       }
       options[key] = nextValue;
       index += 1;

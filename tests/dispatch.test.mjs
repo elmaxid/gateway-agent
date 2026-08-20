@@ -875,16 +875,16 @@ describe("runCrossReview", () => {
     assert.equal(results[2].review, undefined);
   });
 
-  it("truncates patch at 20k chars for review input", async () => {
-    const longPatch = "x".repeat(25_000);
+  it("rejects patches over 20k chars before cross-review and recommends agentic review", async () => {
+    const longPatch = "x".repeat(20_001);
     const results = [
       { id: 1, status: "completed", noChanges: false, prompt: "A", output: "ok", patch: longPatch },
     ];
 
-    let capturedUserPrompt = "";
-    const mockReview = async (_profile, _sys, userPrompt) => {
-      capturedUserPrompt = userPrompt;
-      return { content: { findings: [], summary: "ok" }, model: "m", usage: null, parsed: true };
+    let reviewCalls = 0;
+    const mockReview = async () => {
+      reviewCalls++;
+      return { content: { findings: [], summary: "approve" }, model: "m", usage: null, parsed: true };
     };
 
     await runCrossReview(results, {
@@ -893,8 +893,12 @@ describe("runCrossReview", () => {
       reviewFn: mockReview,
     });
 
-    assert.ok(capturedUserPrompt.includes("[... truncated"));
-    assert.ok(capturedUserPrompt.length < 25_000);
+    assert.equal(reviewCalls, 0, "incomplete evidence must never reach the reviewer");
+    assert.equal(results[0].review.findings, null);
+    assert.equal(results[0].review.summary, null);
+    assert.match(results[0].review.error, /20,000 characters/);
+    assert.match(results[0].review.error, /gateway-companion review/);
+    assert.match(results[0].review.error, /agentic/i);
   });
 });
 
@@ -916,6 +920,31 @@ describe("renderDispatchOutput", () => {
     assert.ok(output.includes("Failed: 1/2"));
     assert.ok(output.includes("task-001.patch"));
     assert.ok(output.includes("FAILED"));
+  });
+
+  it("renders cross-review errors as failures, not completed reviews", () => {
+    const result = {
+      jobId: "dispatch-test123",
+      baseSha: "abc123",
+      outputDir: "/tmp/.gateway-dispatch/dispatch-test123",
+      tasks: [
+        {
+          id: 1,
+          status: "completed",
+          noChanges: false,
+          duration: 1000,
+          profile: "worker",
+          model: "worker-model",
+          prompt: "Large change",
+          review: { findings: null, summary: null, error: "complete patch required" },
+        },
+      ],
+      summary: { total: 1, completed: 1, completedNoChanges: 0, failed: 0 },
+    };
+
+    const output = renderDispatchOutput(result);
+    assert.ok(output.includes("across 0 completed reviews"));
+    assert.ok(output.includes("Review failures: 1"));
   });
 });
 

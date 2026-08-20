@@ -28,10 +28,11 @@ import path from "node:path";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 
+import { createTempRepo, runGit } from "./helpers/git-fixture.mjs";
+
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.join(__dirname, "../plugins/gateway/scripts/gateway-companion.mjs");
-const REPO_ROOT = path.join(__dirname, "..");
 
 // Backstop only, for the test runner — should never actually be what fires
 // in a passing test. The `--timeout 300` flag inside the CLI is what should
@@ -87,16 +88,28 @@ function makeTmpDir() {
 }
 
 /**
+ * Builds a small, controlled git repo (one staged file) so the review path
+ * resolves a non-empty working-tree target without depending on whatever is
+ * uncommitted in the real repository at the moment the suite runs.
+ */
+function makeFixtureRepo() {
+  const repo = createTempRepo("gw-cli-timeout-repo-");
+  fs.writeFileSync(path.join(repo.dir, "change.txt"), "timeout fixture change\n");
+  runGit(repo.dir, ["add", "change.txt"]);
+  return repo;
+}
+
+/**
  * Spawns gateway-companion.mjs with the given argv against a config
- * fixture isolated to tmpDir, from REPO_ROOT (a real git repo, needed by
+ * fixture isolated to tmpDir, from a controlled fixture repo (needed by
  * ensureGitRepository/collectReviewContext). Never throws — captures a
  * failed/non-zero exit as a normal result so callers can assert on it.
  */
-async function runCli(args, tmpDir) {
+async function runCli(args, tmpDir, cwd) {
   const start = Date.now();
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [COMPANION, ...args], {
-      cwd: REPO_ROOT,
+      cwd,
       env: { ...process.env, GATEWAY_PLUGIN_CONFIG_DIR: tmpDir },
       timeout: EXEC_TIMEOUT_MS,
     });
@@ -119,6 +132,7 @@ async function runCli(args, tmpDir) {
 describe("CLI --timeout: review --no-tools (1 HTTP call)", () => {
   it("--timeout 300 against a hanging backend fails fast instead of hanging ~60s", async () => {
     const tmpDir = makeTmpDir();
+    const repo = makeFixtureRepo();
     const server = await startMockServer(() => {
       // Never respond.
     });
@@ -129,7 +143,8 @@ describe("CLI --timeout: review --no-tools (1 HTTP call)", () => {
     try {
       const result = await runCli(
         ["review", "--profile", "hanging", "--timeout", "300", "--no-tools", "--scope", "working-tree"],
-        tmpDir
+        tmpDir,
+        repo.dir
       );
 
       assert.notStrictEqual(result.code, 0, `expected review to fail fast, got exit 0. stdout: ${result.stdout}`);
@@ -142,24 +157,27 @@ describe("CLI --timeout: review --no-tools (1 HTTP call)", () => {
     } finally {
       await server.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
+      repo.cleanup();
     }
   });
 
   it("(no-regression) without --timeout, succeeds against a backend that responds immediately", async () => {
     const tmpDir = makeTmpDir();
+    const repo = makeFixtureRepo();
     const server = await startMockServer((count, req, res) => respondWithMinJson(res));
     writeConfigFixture(tmpDir, {
       hanging: { kind: "claude-gateway", baseUrl: `http://127.0.0.1:${server.port}`, defaultModel: "test-model" },
     });
 
     try {
-      const result = await runCli(["review", "--profile", "hanging", "--no-tools", "--scope", "working-tree"], tmpDir);
+      const result = await runCli(["review", "--profile", "hanging", "--no-tools", "--scope", "working-tree"], tmpDir, repo.dir);
 
       assert.strictEqual(result.code, 0, `expected review to succeed with no --timeout. stderr: ${result.stderr}`);
       assert.ok(server.getCount() >= 1, "expected the mock server to have received the request");
     } finally {
       await server.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
+      repo.cleanup();
     }
   });
 });
@@ -171,6 +189,7 @@ describe("CLI --timeout: review --no-tools (1 HTTP call)", () => {
 describe("CLI --timeout: adversarial-review (2 sequential HTTP calls)", () => {
   it("--timeout 300 against a backend that hangs only on pass 2 fails fast — proves pass 2 gets timeoutMs, not just pass 1", async () => {
     const tmpDir = makeTmpDir();
+    const repo = makeFixtureRepo();
     const server = await startMockServer((count, req, res) => {
       if (count === 1) {
         // Pass 1: respond normally.
@@ -185,7 +204,8 @@ describe("CLI --timeout: adversarial-review (2 sequential HTTP calls)", () => {
     try {
       const result = await runCli(
         ["adversarial-review", "--profile", "hanging2", "--timeout", "300", "--scope", "working-tree"],
-        tmpDir
+        tmpDir,
+        repo.dir
       );
 
       assert.notStrictEqual(result.code, 0, `expected adversarial-review to fail fast, got exit 0. stdout: ${result.stdout}`);
@@ -201,24 +221,27 @@ describe("CLI --timeout: adversarial-review (2 sequential HTTP calls)", () => {
     } finally {
       await server.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
+      repo.cleanup();
     }
   });
 
   it("(no-regression) without --timeout, succeeds through both passes against a backend that responds immediately", async () => {
     const tmpDir = makeTmpDir();
+    const repo = makeFixtureRepo();
     const server = await startMockServer((count, req, res) => respondWithMinJson(res));
     writeConfigFixture(tmpDir, {
       hanging2: { kind: "claude-gateway", baseUrl: `http://127.0.0.1:${server.port}`, defaultModel: "test-model" },
     });
 
     try {
-      const result = await runCli(["adversarial-review", "--profile", "hanging2", "--scope", "working-tree"], tmpDir);
+      const result = await runCli(["adversarial-review", "--profile", "hanging2", "--scope", "working-tree"], tmpDir, repo.dir);
 
       assert.strictEqual(result.code, 0, `expected adversarial-review to succeed with no --timeout. stderr: ${result.stderr}`);
       assert.ok(server.getCount() >= 2, `expected both passes to reach the server, got ${server.getCount()}`);
     } finally {
       await server.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
+      repo.cleanup();
     }
   });
 });
@@ -230,6 +253,7 @@ describe("CLI --timeout: adversarial-review (2 sequential HTTP calls)", () => {
 describe("CLI --timeout: staged-review (3 sequential HTTP calls)", () => {
   it("--timeout 300 against a backend that hangs only on the 3rd call fails fast — proves the last call in the chain gets timeoutMs", async () => {
     const tmpDir = makeTmpDir();
+    const repo = makeFixtureRepo();
     const server = await startMockServer((count, req, res) => {
       if (count === 1 || count === 2) {
         // Phase 1, then pass 1: respond normally.
@@ -244,7 +268,8 @@ describe("CLI --timeout: staged-review (3 sequential HTTP calls)", () => {
     try {
       const result = await runCli(
         ["staged-review", "--profile", "hanging3", "--timeout", "300", "--scope", "working-tree"],
-        tmpDir
+        tmpDir,
+        repo.dir
       );
 
       assert.notStrictEqual(result.code, 0, `expected staged-review to fail fast, got exit 0. stdout: ${result.stdout}`);
@@ -260,24 +285,27 @@ describe("CLI --timeout: staged-review (3 sequential HTTP calls)", () => {
     } finally {
       await server.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
+      repo.cleanup();
     }
   });
 
   it("(no-regression) without --timeout, succeeds through all 3 calls against a backend that responds immediately", async () => {
     const tmpDir = makeTmpDir();
+    const repo = makeFixtureRepo();
     const server = await startMockServer((count, req, res) => respondWithMinJson(res));
     writeConfigFixture(tmpDir, {
       hanging3: { kind: "claude-gateway", baseUrl: `http://127.0.0.1:${server.port}`, defaultModel: "test-model" },
     });
 
     try {
-      const result = await runCli(["staged-review", "--profile", "hanging3", "--scope", "working-tree"], tmpDir);
+      const result = await runCli(["staged-review", "--profile", "hanging3", "--scope", "working-tree"], tmpDir, repo.dir);
 
       assert.strictEqual(result.code, 0, `expected staged-review to succeed with no --timeout. stderr: ${result.stderr}`);
       assert.ok(server.getCount() >= 3, `expected all 3 calls to reach the server, got ${server.getCount()}`);
     } finally {
       await server.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
+      repo.cleanup();
     }
   });
 });

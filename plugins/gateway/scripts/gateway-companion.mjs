@@ -29,7 +29,7 @@ import {
   validateProfile
 } from "./lib/config.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { assertReviewTargetNonEmpty, collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import { terminateProcessTree, terminateProcessTreeAsync } from "./lib/process.mjs";
 import {
   generateJobId,
@@ -887,6 +887,10 @@ export async function executeReviewRun(request) {
     scope: request.scope
   });
 
+  // Above the route split on purpose: the agentic branch below never calls the collector, so a
+  // guard that lived only there would leave the default route approving an empty target.
+  assertReviewTargetNonEmpty(request.cwd, target);
+
   // Fallback to pre-injected diff if --no-tools requested
   if (request.noTools) {
     const context = collectReviewContext(request.cwd, target, {
@@ -1740,6 +1744,20 @@ async function handleDebate(argv) {
   const rounds = options.rounds ? Number(options.rounds) : 3;
   const mode = options.mode || "relaxed";
 
+  // Collect review context BEFORE the preflight health check. The empty-target
+  // guard lives in collectReviewContext and must refuse before any model call —
+  // preflight probes the same baseUrl as the debate rounds, so collecting the
+  // target first keeps an empty target from making even a connectivity request.
+  let fullQuestion = question;
+  if (options["include-diff"] || options.base || options.scope) {
+    const cwd = resolveCommandCwd(options);
+    ensureGitRepository(cwd);
+    const target = resolveReviewTarget(cwd, { base: options.base, scope: options.scope });
+    if (!options.json) console.error(`[debate] Collecting diff context (${target.label})...`);
+    const context = collectReviewContext(cwd, target, { includeDiff: options["include-diff"] || undefined });
+    fullQuestion = `${question}\n\n${context.content}`;
+  }
+
   // Pre-flight health check — includes synthesizer if different from debate profiles
   const synthesizerName = options.synthesizer || profileNames[0];
   const allProfilesToCheck = [...new Set([...profileNames, synthesizerName])];
@@ -1778,16 +1796,6 @@ async function handleDebate(argv) {
   const activeProfileNames = healthyDebate.map((h) => h.name);
   if (activeProfileNames.length < profileNames.length && !options.json) {
     console.error(`[debate] Continuing with ${activeProfileNames.length} healthy profiles: ${activeProfileNames.join(", ")}`);
-  }
-
-  let fullQuestion = question;
-  if (options["include-diff"] || options.base || options.scope) {
-    const cwd = resolveCommandCwd(options);
-    ensureGitRepository(cwd);
-    const target = resolveReviewTarget(cwd, { base: options.base, scope: options.scope });
-    if (!options.json) console.error(`[debate] Collecting diff context (${target.label})...`);
-    const context = collectReviewContext(cwd, target, { includeDiff: options["include-diff"] || undefined });
-    fullQuestion = `${question}\n\n${context.content}`;
   }
 
   const result = await runDebate({
@@ -2178,7 +2186,11 @@ async function handleDispatch(argv) {
     console.log(renderDispatchOutput(result));
   }
 
-  if (result.summary.failed > 0) process.exitCode = 1;
+  // A cross-review that refused to run (e.g. evidence too large to send whole) must not
+  // exit 0: that is the machine-readable signature of a clean reviewed run, and automation
+  // gating on the exit code would read "approved" from a review that never happened.
+  const crossReviewFailed = (result.tasks ?? []).some((task) => task.review?.error);
+  if (result.summary.failed > 0 || crossReviewFailed) process.exitCode = 1;
 }
 
 function getDefaultDebateProfiles(config) {

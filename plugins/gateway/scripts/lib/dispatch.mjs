@@ -466,7 +466,7 @@ export async function runDispatch(tasks, opts) {
 // ---------------------------------------------------------------------------
 
 const CROSS_REVIEW_SYSTEM = `You are a code reviewer. Review this implementation for correctness, bugs, and missed requirements. Return JSON: { "findings": [{ "severity": "critical"|"warning"|"suggestion", "description": "", "location": "" }], "summary": "" }`;
-const DIFF_TRUNCATE_LIMIT = 20_000;
+const CROSS_REVIEW_PATCH_CHAR_LIMIT = 20_000;
 
 export async function runCrossReview(results, opts) {
   const {
@@ -491,11 +491,17 @@ export async function runCrossReview(results, opts) {
   await Promise.all(reviewable.map((task) => sem.run(async () => {
     try {
       const patchText = task.patch ?? (task.patchFile ? fs.readFileSync(task.patchFile, "utf8") : "");
-      const truncated = patchText.length > DIFF_TRUNCATE_LIMIT
-        ? `${patchText.slice(0, DIFF_TRUNCATE_LIMIT)}\n[... truncated, ${patchText.length} chars total, full diff in patch file ...]`
-        : patchText;
+      if (patchText.length > CROSS_REVIEW_PATCH_CHAR_LIMIT) {
+        const recovery = task.patchFile
+          ? `Apply ${task.patchFile}, then run gateway-companion review --scope working-tree using the default agentic mode (do not use --no-tools).`
+          : "Run gateway-companion review --scope working-tree on the complete applied changes using the default agentic mode (do not use --no-tools).";
+        throw new Error(
+          `Cross-review requires the complete patch, but this patch has ${patchText.length.toLocaleString("en-US")} characters ` +
+          `and the cross-review patch limit is ${CROSS_REVIEW_PATCH_CHAR_LIMIT.toLocaleString("en-US")} characters. ${recovery}`
+        );
+      }
 
-      const userPrompt = `## Original Task\n${task.prompt}\n\n## Model Output\n${task.output}\n\n## Diff\n${truncated}`;
+      const userPrompt = `## Original Task\n${task.prompt}\n\n## Model Output\n${task.output}\n\n## Diff\n${patchText}`;
 
       onProgress?.({ message: `Review Task ${task.id}...`, phase: "cross-review" });
       const review = await reviewFn(reviewProfile, CROSS_REVIEW_SYSTEM, userPrompt, {
@@ -580,13 +586,18 @@ export function renderDispatchOutput(result) {
 
   const reviewedTasks = tasks.filter((t) => t.review);
   if (reviewedTasks.length > 0) {
+    const failedReviews = reviewedTasks.filter((t) => t.review.error);
+    const completedReviews = reviewedTasks.filter((t) => !t.review.error);
     const totalFindings = reviewedTasks.reduce((sum, t) => sum + (t.review.findings?.length ?? 0), 0);
     const criticalFindings = reviewedTasks.reduce(
       (sum, t) => sum + (t.review.findings?.filter((f) => String(f.severity).toLowerCase() === "critical").length ?? 0),
       0
     );
     lines.push("");
-    lines.push(`Review findings: ${totalFindings} total (critical: ${criticalFindings}) across ${reviewedTasks.length} reviewed tasks`);
+    lines.push(`Review findings: ${totalFindings} total (critical: ${criticalFindings}) across ${completedReviews.length} completed reviews`);
+    if (failedReviews.length > 0) {
+      lines.push(`Review failures: ${failedReviews.length}`);
+    }
   }
 
   if (patchTasks.length > 0) {

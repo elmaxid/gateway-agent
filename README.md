@@ -953,7 +953,7 @@ Si en el paso 1 el pedido amerita revisión multi-modelo del spec en sí (decisi
 ```bash
 cd /path/to/agent-plugin-cc
 
-# Suite completa — los 21 archivos tests/*.test.mjs (292 tests).
+# Suite completa — los 30 archivos tests/*.test.mjs (558 tests).
 node --test tests/*.test.mjs
 
 # Nota: integration.test.mjs (13 tests) requiere un gateway activo y alcanzable;
@@ -961,7 +961,7 @@ node --test tests/*.test.mjs
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Suite completa:** 292 tests — 279 sin red + 13 de integración. Los 279 sin red no requieren gateway: usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real. Cubren toda la superficie del CLI, incluyendo la de v0.5.2: background jobs (`background-jobs`), redaction/contrato de error (`redaction`, `setup-output-redaction`), baseline-capture (`baseline-capture`), `version --json` (`version`) y los tres harnesses (`claude-subprocess`, `codex-harness`, `zero-harness`). Los de mayor cobertura son dispatch (69) y zero-harness (36 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping).
+**Suite completa:** 558 tests — 545 sin red + 13 de integración. Los 545 sin red no requieren gateway: usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real. Cubren toda la superficie del CLI, incluyendo la de v0.5.2: background jobs (`background-jobs`), redaction/contrato de error (`redaction`, `setup-output-redaction`), baseline-capture (`baseline-capture`), `version --json` (`version`) y los tres harnesses (`claude-subprocess`, `codex-harness`, `zero-harness`). Los de mayor cobertura son dispatch (69) y zero-harness (36 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping).
 
 **Integration tests:** 13 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness y task via codex harness (cada uno contra los 3 modelos principales: glm-5.2, minimax-m3, deepseek-v4-pro), más task via zero harness (solo glm-5.2).
 

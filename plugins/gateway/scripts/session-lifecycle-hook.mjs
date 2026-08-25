@@ -2,9 +2,9 @@
 
 import fs from "node:fs";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
-import { terminateProcessTreeAsync } from "./lib/process.mjs";
-import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
+import { loadState, resolveStateFile } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 
@@ -51,41 +51,30 @@ function cleanupSessionJobs(cwd, sessionId) {
   return cleanupRunningJobs(cwd, workspaceRoot, stateFile, sessionId);
 }
 
-async function cleanupRunningJobs(cwd, workspaceRoot, stateFile, sessionId) {
+// Policy (Task 22, maintainer decision): background jobs SURVIVE session
+// end. They're spawned detached specifically so they can keep running
+// independently of the CLI session that launched them — killing them here
+// would defeat that. If a job's worker legitimately dies on its own
+// (crashes, gets orphaned), reconcileStaleJobs (job-control.mjs) already
+// catches that consistently on every read path (`status`, `status <id>`,
+// `result <id>`) by checking pid liveness, patching both the index and the
+// job's own file together — session end doesn't need its own separate
+// mechanism for that.
+export function cleanupRunningJobs(cwd, workspaceRoot, stateFile, sessionId) {
   const state = loadState(workspaceRoot);
-  const sessionJobs = state.jobs.filter((job) => job.sessionId === sessionId);
-  if (sessionJobs.length === 0) {
-    return;
+  const stillRunningCount = state.jobs.filter(
+    (job) => job.sessionId === sessionId && (job.status === "queued" || job.status === "running")
+  ).length;
+  if (stillRunningCount > 0) {
+    process.stderr.write(
+      `[gateway] ${stillRunningCount} background job(s) from this session are still running and will keep going — check with /gateway:status.\n`
+    );
   }
-
-  const failedToTerminate = new Set();
-  for (const job of sessionJobs) {
-    const stillRunning = job.status === "queued" || job.status === "running";
-    if (!stillRunning) {
-      continue;
-    }
-    try {
-      await terminateProcessTreeAsync(job.pid ?? Number.NaN);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[gateway] Warning: failed to terminate job ${job.id} (pid ${job.pid}): ${message}\n`);
-      failedToTerminate.add(job.id);
-    }
-  }
-
-  saveState(workspaceRoot, {
-    ...state,
-    jobs: state.jobs
-      .filter((job) => job.sessionId !== sessionId || failedToTerminate.has(job.id))
-      .map((job) =>
-        failedToTerminate.has(job.id) ? { ...job, status: "failed" } : job
-      )
-  });
 }
 
 const GATEWAY_ROUTING_CONTEXT = `<gateway-routing-rules>
 Gateway plugin active. Prefer these tools for delegation to alternative LLMs:
-- Code review before commit → /gateway:review --include-diff
+- Code review before commit → /gateway:review
 - Multi-model debate / architecture decision → /gateway:debate --include-diff
 - Adversarial 2-pass review → /gateway:adversarial-review --include-diff
 - Feature implementation → gateway:gateway-coder
@@ -125,7 +114,12 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  process.stderr.write(`[gateway] session-lifecycle-hook error: ${err.message}\n`);
-  process.exitCode = 1;
-});
+// Only auto-run when executed directly (as the CLI hook Claude Code spawns).
+// Without this guard, importing this module's named exports for direct
+// in-process testing would also trigger main(), which reads stdin.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    process.stderr.write(`[gateway] session-lifecycle-hook error: ${err.message}\n`);
+    process.exitCode = 1;
+  });
+}

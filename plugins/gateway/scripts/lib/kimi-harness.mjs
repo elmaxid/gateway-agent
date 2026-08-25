@@ -126,9 +126,16 @@ export function buildKimiEnv(profile) {
   return env;
 }
 
-export function buildKimiArgs(model, prompt, { resume = false } = {}) {
+// resumeSessionId (Task 25/26) takes precedence over the legacy boolean
+// `resume`: "-S <id>" resumes by explicit session id (verified to actually
+// carry over context, though bound to its originating cwd — the caller must
+// check that separately), while plain `resume: true` ("-c") only continues
+// "whatever's last in this cwd" — no job attribution, same limitation as
+// codex's `--last` (see docs/superpowers/plans/2026-08-25-task25-session-identity-investigation.md).
+export function buildKimiArgs(model, prompt, { resume = false, resumeSessionId = null } = {}) {
   const args = ["-p", prompt, "-m", `${KIMI_PROVIDER}/${model}`, "--output-format", "stream-json"];
-  if (resume) args.push("-c");
+  if (resumeSessionId) args.push("-S", resumeSessionId);
+  else if (resume) args.push("-c");
   return args;
 }
 
@@ -152,6 +159,31 @@ export function parseKimiStream(raw) {
     finalText: finals.length > 0 ? finals.at(-1).content : null,
     hasFinal: finals.length > 0
   };
+}
+
+/**
+ * Extract the kimi session id (Task 25/26 continuation reference) from a raw
+ * stream-json stdout stream. Emitted on every turn as a meta event
+ * (`{"role":"meta","type":"session.resume_hint","session_id":"..."}`). Pure/
+ * synchronous — safe to unit test. Returns null when absent.
+ * @param {string} raw
+ * @returns {string|null}
+ */
+export function extractKimiSessionId(raw) {
+  let found = null;
+  for (const line of String(raw ?? "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const evt = JSON.parse(trimmed);
+      if (evt && evt.role === "meta" && evt.type === "session.resume_hint" && typeof evt.session_id === "string" && evt.session_id) {
+        found = evt.session_id;
+      }
+    } catch {
+      // partial or corrupt line — skip, never throw
+    }
+  }
+  return found;
 }
 
 function appendLine(base, line) {
@@ -191,7 +223,7 @@ export async function runKimiTask(profile, prompt, opts = {}) {
     return { stdout: "", stderr: preflightFailure, exitCode: 1, signal: null, rawJsonl: "" };
   }
 
-  const args = buildKimiArgs(model, prompt, { resume: Boolean(opts.resume) });
+  const args = buildKimiArgs(model, prompt, { resume: Boolean(opts.resume), resumeSessionId: opts.resumeSessionId ?? null });
   const env = buildKimiEnv(profile);
   const proc = spawn("kimi", args, {
     cwd: opts.cwd || process.cwd(),

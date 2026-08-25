@@ -16,7 +16,7 @@ Routing map for everything this plugin exposes to a user. Read the tables, name 
 ## How to answer
 
 1. Match the request against the **Reach for it when** column, category by category.
-2. Name **one** primary entry point and give the exact invocation (`/gateway:review --include-diff`, `Skill(gateway:spec-plan)`, `Agent(gateway:gateway-coder)`). Name a second only as an explicit escalation ("start here; if X, escalate to Y").
+2. Name **one** primary entry point and give the exact invocation (`/gateway:review`, `Skill(gateway:spec-plan)`, `Agent(gateway:gateway-coder)`). Name a second only as an explicit escalation ("start here; if X, escalate to Y").
 3. If two rows compete, resolve with **Close calls** below instead of listing both.
 4. If nothing fits, use **If none of these fit** — do not force a bad match.
 5. Anything routed to a gateway model needs a configured profile. If unsure one exists, check with `/gateway:setup list` first (or `setup list --json`) — never assume a profile name.
@@ -29,7 +29,9 @@ Routing map for everything this plugin exposes to a user. Read the tables, name 
 | `/gateway:adversarial-review` | Two passes: find issues, then filter its own false positives | Findings quality matters more than speed; pre-commit gate on a risky change |
 | `/gateway:staged-review` | Phase 1 spec compliance, Phase 2 adversarial quality | There is a stated spec/intent and "does it do what we said" is a separate question from "is the code good" |
 
-All three take `--include-diff`, `--profile`, `--base`, `--scope auto\|branch\|working-tree`, `--json`, `--timeout`. None of them fix anything — they report.
+All three take `--profile`, `--base`, `--scope auto\|branch\|working-tree`, `--json`, `--timeout`. None of them fix anything — they report. `--include-diff` is different across the three: `adversarial-review` and `staged-review` always honor it; on plain `review` it only does anything paired with `--no-tools` (review's default route is agentic — the model reads the diff itself via tools — so `--include-diff` alone errors instead of silently doing nothing).
+
+**Reviewing a document that isn't code** (a spec, a plan, notes — anything under a gitignored path like this repo's own `docs/superpowers/`): none of the three `review` variants can see it. Target resolution runs `git ls-files --others --exclude-standard`, and `--exclude-standard` filters out anything gitignored on every route, `--no-tools` included — there's no flag that overrides it. Use `/gateway:task` instead: point it at the file and ask for a critique; `task` reads files directly, not through git.
 
 ## Commands — delegation (does work, can write)
 

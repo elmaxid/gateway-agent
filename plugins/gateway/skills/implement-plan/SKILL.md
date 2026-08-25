@@ -41,7 +41,7 @@ Run the Phase 1 dispatch. Each task returns its diff. Collect all diffs before m
 **Orchestration constraint**: the Phase 3 native reviewer and the Phase 4 arbiter are two separate `Agent` calls — running them requires a context that can call `Agent` (main thread, or a non-fork subagent). A `fork` subagent cannot call `Agent` (hard harness rule) and will silently collapse both into itself under one inherited model instead of erroring. Never delegate the full Phase 3-4 run to a single fork.
 
 Discover what's actually configured before fanning out — run `gateway-companion.mjs setup list --json` (or `setup list`) and use whatever profiles it reports. Do not assume any specific profile name or count exists; every installation configures its own set. Run in parallel, no pre-flight `setup test`:
-- One `gateway-companion.mjs review --profile <name> --include-diff --scope working-tree` call per configured profile (exclude the profile used for Phase 2's frontend implementation, if any, so a model doesn't review its own output)
+- One `gateway-companion.mjs review --profile <name> --scope working-tree` call per configured profile (exclude the profile used for Phase 2's frontend implementation, if any, so a model doesn't review its own output)
 - one native Claude reviewer: `Agent` call, model sonnet, persona `code-reviewer` if `octo:personas:code-reviewer` is available (otherwise plain judgment), on the same working-tree diff
 
 If a call errors or times out: skip it, note which profile was skipped, continue with whatever responded. Never let one dead profile block the phase.

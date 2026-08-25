@@ -11,10 +11,11 @@ import { parseArgs, splitRawArgumentString, validateTimeoutOption } from "./lib/
 import { chatCompletion, runDirectReview, testConnectivity, listModels, extractJson, profileSecrets, sanitizeError } from "./lib/api-client.mjs";
 import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
-import { runTask, extractCodexFailure } from "./lib/codex-harness.mjs";
+import { runTask, extractCodexFailure, extractCodexThreadId } from "./lib/codex-harness.mjs";
 import { runZeroTask, isZeroAvailable, getZeroProvider, zeroPreflightError, urlsMatch } from "./lib/zero-harness.mjs";
-import { runKimiTask, isKimiAvailable, getKimiConfigPath, readKimiConfig, kimiPreflightError, getKimiProviderApiKey } from "./lib/kimi-harness.mjs";
+import { runKimiTask, isKimiAvailable, getKimiConfigPath, readKimiConfig, kimiPreflightError, getKimiProviderApiKey, extractKimiSessionId } from "./lib/kimi-harness.mjs";
 import { runClineTask, isClineAvailable, getClineConfigPath, readClineConfig, clinePreflightError, getClineProviderApiKey } from "./lib/cline-harness.mjs";
+import { HARNESSES, HARNESS_CAPABILITIES, validateHarnessCombo } from "./lib/harness-capabilities.mjs";
 import { loadTranscript, parseTranscript, buildMessages } from "./lib/claude-session-transfer.mjs";
 import { runDebate, renderDebateOutput, preflightProfiles } from "./lib/debate.mjs";
 import {
@@ -96,7 +97,8 @@ function printUsage() {
       "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json]",
       "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [focus]",
       "  gateway-companion staged-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [intent]",
-      "  gateway-companion task [--profile NAME] [--model MODEL] [--harness claude|codex|zero|kimi|cline] [--as PERSONA] [--background] [--write|--no-write] [--prompt-file FILE] [prompt]",
+      "  gateway-companion task [--profile NAME] [--model MODEL] [--harness claude|codex|zero|kimi|cline] [--as PERSONA] [--background] [--write|--no-write] [--prompt-file FILE] [--resume JOB_ID] [prompt]",
+  "                          --resume continues a prior completed job's codex/kimi session (see `setup doctor` for which harnesses support it)",
   `                          PERSONA: ${getValidPersonas().join("|")}`,
       "  gateway-companion task-worker --job-id ID [--profile NAME] [--model MODEL] [--harness claude|codex|zero|kimi|cline] [--write|--no-write] [prompt]",
       "  gateway-companion debate [--models P1,P2,...] [--rounds N] [--synthesizer NAME] [--mode relaxed|strict]",
@@ -218,15 +220,40 @@ Return ONLY the JSON object, no markdown fences.`;
 
 const ADVERSARIAL_SYSTEM_PROMPT = `You are an adversarial code reviewer. You have been given a prior review with findings. Your job is to critically examine each finding and determine which are genuine issues and which are false positives. For each finding, state whether it is VALID or FALSE_POSITIVE with a brief justification. Then produce a refined final review with only the valid findings. Return a JSON object with the same shape as the original review.`;
 
-function extractRepeatableFlags(argv) {
+// A token "looks like an option" if it could itself be a flag rather than a
+// value — same convention parseArgs uses for its own value options: a bare
+// "-" is a valid literal value (e.g. stdin placeholder), anything else
+// starting with "-" is not.
+function looksLikeOption(token) {
+  return token.startsWith("-") && token !== "-";
+}
+
+export function extractRepeatableFlags(argv) {
   const tasks = [];
   const modelOverrides = [];
   const cleaned = [];
+  let passthrough = false;
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--task" && i + 1 < argv.length) {
+    if (passthrough) {
+      cleaned.push(argv[i]);
+      continue;
+    }
+    if (argv[i] === "--") {
+      passthrough = true;
+      cleaned.push(argv[i]);
+      continue;
+    }
+    if (argv[i] === "--task" && i + 1 < argv.length && !looksLikeOption(argv[i + 1])) {
       tasks.push(argv[++i]);
-    } else if (argv[i] === "--model-override" && i + 1 < argv.length) {
+    } else if (argv[i] === "--model-override" && i + 1 < argv.length && !looksLikeOption(argv[i + 1])) {
       modelOverrides.push(argv[++i]);
+    } else if (argv[i] === "--task" || argv[i] === "--model-override") {
+      // Bare flag immediately followed by another option (including "--", or
+      // end of argv): extracting a value would swallow a token that isn't
+      // actually this flag's value — either the "--" separator (Bug 2) or a
+      // different flag entirely (e.g. --task --model-override foo). Drop the
+      // valueless flag and let the next iteration handle that token normally.
+      continue;
     } else {
       cleaned.push(argv[i]);
     }
@@ -515,7 +542,7 @@ async function handleSetup(argv) {
             : { ok: false, error: claudeCheck.error },
           codex: codexCheck.ok
             ? { ok: true, version: codexCheck.version }
-            : { ok: false, warning: "not found — fallback to claude harness active" },
+            : { ok: false, warning: "not found — --harness codex unavailable" },
           zero: zeroCheck.ok
             ? {
                 ok: true,
@@ -531,18 +558,28 @@ async function handleSetup(argv) {
             ? { ok: true, version: clineCheck.version, ...(clineNote && { warning: clineNote }) }
             : { ok: false, warning: "not found — --harness cline unavailable" },
         };
-        outputResult({ checks, profiles: profilesMap, roles }, true);
+        outputResult({ checks, profiles: profilesMap, roles, capabilities: HARNESS_CAPABILITIES }, true);
       } else {
         const ok = "✓", fail = "✗", warn = "⚠";
         const lines = [];
 
         lines.push("[harness]");
         lines.push(`  claude  ${claudeCheck.ok ? ok : fail}  ${claudeCheck.ok ? claudeCheck.version : claudeCheck.error}`);
-        lines.push(`  codex   ${codexCheck.ok ? ok : warn}  ${codexCheck.ok ? codexCheck.version : "not found (fallback: claude harness active)"}`);
+        lines.push(`  codex   ${codexCheck.ok ? ok : warn}  ${codexCheck.ok ? codexCheck.version : "not found (--harness codex unavailable)"}`);
         lines.push(`  zero    ${zeroCheck.ok ? (zeroNote ? warn : ok) : warn}  ${zeroCheck.ok ? zeroCheck.version + (zeroNote ? `  (${zeroNote})` : "") : "not found (--harness zero unavailable)"}`);
         if (zeroUpdateLine) lines.push(`          ${zeroUpdateLine}`);
         lines.push(`  kimi    ${kimiCheck.ok ? (kimiNote ? warn : ok) : warn}  ${kimiCheck.ok ? kimiCheck.version + (kimiNote ? `  (${kimiNote})` : "") : "not found (--harness kimi unavailable)"}`);
         lines.push(`  cline   ${clineCheck.ok ? (clineNote ? warn : ok) : warn}  ${clineCheck.ok ? clineCheck.version + (clineNote ? `  (${clineNote})` : "") : "not found (--harness cline unavailable)"}`);
+
+        lines.push("");
+        lines.push("[capabilities]  (declared: ✓ supported  ✗ unsupported  ? unknown/unverified — actual availability is the [harness] section above)");
+        const stateMark = (s) => (s === "supported" ? ok : s === "unsupported" ? fail : "?");
+        const nameW2 = Math.max(...HARNESSES.map((h) => h.length)) + 2;
+        for (const harness of HARNESSES) {
+          const caps = HARNESS_CAPABILITIES[harness];
+          const kind = `kind(claude-gateway:${stateMark(caps.profileKindCompat["claude-gateway"])} openai-chat:${stateMark(caps.profileKindCompat["openai-chat"])})`;
+          lines.push(`  ${harness.padEnd(nameW2)}readonly:${stateMark(caps.readOnly)}  resume:${stateMark(caps.resume)}  ${kind}  shape:${stateMark(caps.outputShape)}`);
+        }
 
         lines.push("");
         lines.push("[profiles]");
@@ -1006,6 +1043,26 @@ async function handleReview(argv) {
     aliasMap: { m: "model", p: "profile" }
   });
 
+  if (positionals.length > 0) {
+    process.exitCode = 2;
+    throw new Error(
+      `"review" does not take free text ("${positionals.join(" ")}"). ` +
+      `Use "adversarial-review [focus]" or "staged-review [intent]" to pass instructions alongside a review.`
+    );
+  }
+
+  // --include-diff only does something in the --no-tools (direct HTTP) route: the
+  // default agentic route has the model collect its own context via tools and never
+  // reads request.includeDiff — passing --include-diff there is a silent no-op that
+  // makes the operator think the diff was sent when it wasn't.
+  if (options["include-diff"] && !options["no-tools"]) {
+    process.exitCode = 2;
+    throw new Error(
+      `--include-diff has no effect without --no-tools: the default agentic route reads the diff itself via tools. ` +
+      `Add --no-tools to use --include-diff, or drop --include-diff to keep the agentic route.`
+    );
+  }
+
   const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
 
   const cwd = resolveCommandCwd(options);
@@ -1172,6 +1229,16 @@ async function handleAdversarialReview(argv) {
 // Task subcommand
 // ---------------------------------------------------------------------------
 
+// Task 25/26: the identifier a LATER --resume needs to continue this exact
+// run. Only codex (thread_id) and kimi (session_id) have a verified
+// mechanism (harness-capabilities.mjs, resume dimension) — every other
+// harness returns null, same as a harness that ran but produced no id.
+function extractContinuationRef(harness, rawJsonl) {
+  if (harness === "codex") return extractCodexThreadId(rawJsonl);
+  if (harness === "kimi") return extractKimiSessionId(rawJsonl);
+  return null;
+}
+
 async function executeTaskRun(request) {
   const profile = request.profile;
   const model = request.model || profile.defaultModel;
@@ -1206,6 +1273,12 @@ async function executeTaskRun(request) {
     write,
     harness,
     cwd: request.cwd,
+    resume: request.resume,
+    // Generic `resumeRef` (codex reads this) and `resumeSessionId` (kimi's
+    // own established option name) both carry the same value — harmless for
+    // whichever harness ignores the one it doesn't read.
+    resumeRef: request.resumeRef,
+    resumeSessionId: request.resumeRef,
     onStdout: (line) => {
       request.onProgress?.({ message: line, phase: "running" });
     },
@@ -1216,6 +1289,7 @@ async function executeTaskRun(request) {
 
   const rawOutput = result.stdout || "";
   const rawStderr = result.stderr || "";
+  const rawJsonl = result.rawJsonl;
   const exitStatus = result.exitCode ?? (result.signal ? 1 : 0);
 
   // kimi's/cline's own credential lives in their own config file, never in
@@ -1236,7 +1310,7 @@ async function executeTaskRun(request) {
     // contract): a redacted one-line message on the agent-visible surfaces and a
     // 0600 log holding the COMPLETE raw material — never the raw codex JSON
     // stream or the backend catalog on an agent-visible stream.
-    return shapeTaskFailure({ request: { ...request, secrets }, harness, rawOutput, rawStderr, exitStatus, write });
+    return shapeTaskFailure({ request: { ...request, secrets }, harness, rawOutput, rawStderr, rawJsonl, exitStatus, write });
   }
 
   // Success: return the model output verbatim (unchanged behavior). Harness
@@ -1260,8 +1334,45 @@ async function executeTaskRun(request) {
     summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, "Task finished.")),
     jobTitle: request.jobTitle ?? "Gateway Task",
     jobClass: "task",
-    write
+    write,
+    harness,
+    profileName: profile.name ?? null,
+    continuationRef: extractContinuationRef(harness, rawJsonl),
+    continuationCwd: request.cwd ?? null
   };
+}
+
+// Lines that look like they're reporting an actual error, not a cosmetic or
+// informational notice a harness CLI prints on its way to the real failure
+// (a startup banner, a retry notice, "using cached credentials", etc).
+const ERROR_KEYWORD_RE = /\b(error|fail(?:ed|ure)?|reject(?:ed)?|exceed(?:ed)?|unauthorized|forbidden|quota|denied|invalid|timeout|refused)\b/i;
+// A bare HTTP-status-looking number is a weaker signal on its own (e.g. "500
+// items processed" isn't an error) — only used as a second-tier match, below
+// the keyword regex above.
+const HTTP_STATUS_RE = /\b[45]\d{2}\b/;
+
+/**
+ * Picks the stderr/stdout line that most likely explains a task failure's
+ * real cause, for harnesses whose raw stderr is CLI chatter rather than one
+ * pre-extracted line (codex is handled separately — see extractCodexFailure,
+ * which already reads its own structured event stream correctly).
+ *
+ * The bug this fixes: the previous rule took the FIRST non-blank stderr
+ * line, but a CLI's actual fatal error is typically the LAST thing it prints
+ * before a non-zero exit — informational/retry noise comes first. Among
+ * lines that look like an error, prefer the last one, since that is closest
+ * to the point of actual failure (e.g. the final attempt after N retries).
+ * Keyword matches (ERROR_KEYWORD_RE) win over a bare status-code match
+ * (HTTP_STATUS_RE), which wins over a plain positional guess.
+ */
+export function chooseErrorCauseLine(rawStderr, rawOutput, fallback) {
+  const stderrLines = String(rawStderr ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const keywordLines = stderrLines.filter((l) => ERROR_KEYWORD_RE.test(l));
+  if (keywordLines.length > 0) return keywordLines[keywordLines.length - 1];
+  const statusLines = stderrLines.filter((l) => HTTP_STATUS_RE.test(l));
+  if (statusLines.length > 0) return statusLines[statusLines.length - 1];
+  if (stderrLines.length > 0) return stderrLines[stderrLines.length - 1];
+  return firstMeaningfulLine(rawOutput, fallback);
 }
 
 // Shape a FAILED task run (any harness) into the fail-loud, leak-safe contract:
@@ -1271,30 +1382,42 @@ async function executeTaskRun(request) {
 //  - exit status is preserved (non-zero).
 // The raw codex JSON stream (stdout) and backend catalog (stderr) are NEVER
 // echoed to an agent-visible surface.
-function shapeTaskFailure({ request, harness, rawOutput, rawStderr, exitStatus, write }) {
+function shapeTaskFailure({ request, harness, rawOutput, rawStderr, rawJsonl, exitStatus, write }) {
   const secrets = request.secrets ?? [];
+
+  // Once a harness normalizes its stdout to just the final message (zero,
+  // kimi, cline, codex), rawOutput on a failed run can be empty/short — the
+  // raw event stream that actually carries the failure signal lives in
+  // rawJsonl instead. Use it wherever it's available; rawOutput stays the
+  // fallback for a harness that never sets it (currently: claude).
+  const rawStdoutForLog = rawJsonl ?? rawOutput;
 
   // Where the actionable error lives differs by harness:
   //  - codex reports it as a `turn.failed`/`error` event in its JSON stream on
-  //    STDOUT; its STDERR on failure is the backend model-catalog dump (giant
-  //    single lines). Both are forbidden on agent-visible streams, so extract a
-  //    single clean line and never echo the streams verbatim.
-  //  - claude/zero put a human-readable error on stdout and/or stderr.
+  //    STDOUT (rawStdoutForLog); its STDERR on failure is the backend
+  //    model-catalog dump (giant single lines). Both are forbidden on
+  //    agent-visible streams, so extract a single clean line and never echo
+  //    the streams verbatim.
+  //  - claude/zero/kimi/cline put a human-readable error on stdout and/or
+  //    stderr, but the actual failure isn't reliably the FIRST line — a
+  //    harness's own cosmetic/retry notices commonly print before it.
   let message;
   if (harness === "codex") {
-    message = extractCodexFailure(rawOutput) || `Codex task failed (exit ${exitStatus}). See log for details.`;
+    message = extractCodexFailure(rawStdoutForLog) || `Codex task failed (exit ${exitStatus}). See log for details.`;
   } else {
-    message =
-      firstMeaningfulLine(rawStderr, "") ||
-      firstMeaningfulLine(rawOutput, "") ||
-      `Gateway task failed (harness: ${harness}, exit ${exitStatus}).`;
+    message = chooseErrorCauseLine(
+      rawStderr,
+      rawOutput,
+      `Gateway task failed (harness: ${harness}, exit ${exitStatus}).`
+    );
   }
 
-  // Full material for the 0600 log: the entire stdout stream (raw turn.failed
-  // JSON for codex) plus the full stderr (catalog dump). writeLocalLog keeps it
+  // Full material for the 0600 log: the entire raw stdout stream (raw
+  // turn.failed JSON for codex, raw event stream for zero/kimi/cline) plus
+  // the full stderr (catalog dump for codex). writeLocalLog keeps it
   // unredacted on a 0600 file for diagnosis.
   const rawMaterial = [
-    rawOutput ? `--- stdout ---\n${rawOutput}` : "",
+    rawStdoutForLog ? `--- stdout ---\n${rawStdoutForLog}` : "",
     rawStderr ? `--- stderr ---\n${rawStderr}` : ""
   ].filter(Boolean).join("\n\n");
 
@@ -1327,6 +1450,23 @@ function shapeTaskFailure({ request, harness, rawOutput, rawStderr, exitStatus, 
   };
 }
 
+// Task 26 cross-review: path.resolve() (what continuationCwd/cwd already are)
+// does not resolve symlinks, while process.cwd() typically does — a job
+// started via a symlinked --cwd and resumed from the real path (or vice
+// versa) would otherwise false-positive as "different directory". The exact
+// string match is checked first (the common case); a failed realpathSync
+// (either path gone) falls through to `false` — i.e. it REJECTS, the fail-
+// safe direction, never silently waves through a mismatch. kimi's own
+// CLI-level cwd rejection remains the backstop either way.
+function samePath(a, b) {
+  if (a === b) return true;
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
 function resolveTaskPersona(as, prompt) {
   if (as === "auto") {
     const matched = matchPersona(prompt);
@@ -1340,7 +1480,7 @@ function resolveTaskPersona(as, prompt) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["profile", "model", "cwd", "prompt-file", "harness", "as"],
+    valueOptions: ["profile", "model", "cwd", "prompt-file", "harness", "as", "resume"],
     booleanOptions: ["json", "write", "no-write", "background"],
     aliasMap: { m: "model", p: "profile" }
   });
@@ -1348,9 +1488,15 @@ async function handleTask(argv) {
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   const config = loadConfig();
-  const profileResolved = options.profile
+  // Task 19 / H3: the default profile's kind is validated below by
+  // validateHarnessCombo (harness-aware), not by resolveTaskProfile's own
+  // hard claude-gateway requirement — that check runs unconditionally
+  // regardless of --harness and would block e.g. codex+openai-chat, which
+  // the declared capability matrix says is supported. resolveTaskProfile
+  // itself is untouched: `setup zero-init` still needs it strict.
+  let profileResolved = options.profile
     ? resolveProfile(options.profile, config)
-    : resolveTaskProfile(config);
+    : resolveProfile(config.taskProfile || config.defaultProfile, config);
 
   let prompt;
   if (options["prompt-file"]) {
@@ -1363,26 +1509,142 @@ async function handleTask(argv) {
     throw new Error("Provide a prompt, a --prompt-file, or pipe stdin.");
   }
 
-  const write = options["no-write"] ? false : (options.write !== undefined ? Boolean(options.write) : true);
-  const harness = options.harness || "claude";
-  // Pre-queue check: a --background zero/kimi/cline job must not report
-  // "queued" and then die in the detached worker — fail loud in the parent (spec: fail-loud).
+  let write = options["no-write"] ? false : (options.write !== undefined ? Boolean(options.write) : true);
+
+  // Task 26: --resume <jobRef> continues a prior job's codex/kimi session
+  // instead of starting fresh. Resolved BEFORE the harness checks below,
+  // since a resumed run's harness is the SOURCE job's harness, not
+  // necessarily whatever --harness (if any) was passed this time.
+  let resumeRef = null;
+  let harness = options.harness || "claude";
+  // options.resume !== undefined (not truthy) so `--resume=` (an explicit
+  // empty value — the strict parser in args.mjs allows it through, since it
+  // only rejects a MISSING value, not an empty one) is caught here instead of
+  // silently skipping the whole resume block and running a fresh task with
+  // no warning.
+  if (options.resume !== undefined) {
+    if (!options.resume.trim()) {
+      console.error("--resume requires a job id (got an empty value).");
+      process.exitCode = 2;
+      return;
+    }
+    let sourceJob;
+    try {
+      ({ job: sourceJob } = resolveResultJob(cwd, options.resume));
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = 2;
+      return;
+    }
+    if (sourceJob.status !== "completed") {
+      console.error(`Job ${sourceJob.id} did not complete successfully (status: ${sourceJob.status}) — nothing to resume.`);
+      process.exitCode = 2;
+      return;
+    }
+    if (!sourceJob.continuationRef) {
+      console.error(`Job ${sourceJob.id} has no continuation reference — its harness may not support resume, or it predates this feature.`);
+      process.exitCode = 2;
+      return;
+    }
+    if (options.harness && options.harness !== sourceJob.harness) {
+      console.error(`--resume ${sourceJob.id} was captured on harness "${sourceJob.harness}" — cannot resume it with --harness ${options.harness}.`);
+      process.exitCode = 2;
+      return;
+    }
+    harness = sourceJob.harness;
+    // Arbiter finding (2026-08-25): profile was re-resolved from
+    // --profile/config.taskProfile with no reference to the source job — a
+    // resume against a different default profile would silently continue
+    // that session against a different gateway endpoint/credentials.
+    // Inherit the source profile by default; reject only when the user
+    // explicitly asked for a different one. Skipped entirely for jobs
+    // predating this field (no profileName recorded) — same defensive
+    // pattern as sourceJob.write above.
+    if (sourceJob.profileName) {
+      if (options.profile && options.profile !== sourceJob.profileName) {
+        console.error(`Job ${sourceJob.id} was originally run with profile "${sourceJob.profileName}" — cannot resume it with --profile ${options.profile}. Omit --profile to inherit it, or start a fresh task instead.`);
+        process.exitCode = 2;
+        return;
+      }
+      if (!options.profile) {
+        profileResolved = resolveProfile(sourceJob.profileName, config);
+      }
+    }
+    // kimi's session is bound to its originating cwd — verified in Task 25,
+    // kimi itself rejects a cross-cwd resume. Check it here so a mismatch
+    // fails loud before spending a real request, not after.
+    if (harness === "kimi" && sourceJob.continuationCwd && !samePath(sourceJob.continuationCwd, cwd)) {
+      console.error(`Job ${sourceJob.id} was started from ${sourceJob.continuationCwd} — kimi sessions can only be resumed from their original working directory.`);
+      process.exitCode = 2;
+      return;
+    }
+    // Task 26 cross-review (gpt-5.6-terra) + LIVE verification: `codex exec
+    // resume` does not accept `-s`, does NOT inherit the source session's
+    // sandbox mode (a real read-only turn 1 resumed as workspace-write with
+    // no `-s` given), and a `-c sandbox_mode="read-only"` override was tried
+    // and confirmed to have NO effect either — a resumed turn with
+    // write:false, override included, still wrote a file to disk
+    // successfully (exit 0, no sandbox-denial anywhere in the stream).
+    // codex resume is therefore ALWAYS effectively write-capable, no matter
+    // what's requested. Refusing outright — rather than silently mislabeling
+    // a write-capable run as read-only — is the only honest option: this
+    // applies whether write:false comes from an explicit --no-write or from
+    // inheriting a source job that itself ran read-only.
+    const explicitWrite = options["no-write"] !== undefined || options.write !== undefined;
+    if (harness === "codex") {
+      const effectiveWrite = explicitWrite ? write : sourceJob.write;
+      if (effectiveWrite === false) {
+        console.error(
+          `Codex sessions cannot be resumed read-only — "codex exec resume" does not honor --no-write ` +
+          `(verified: sandbox mode is not controllable across a resume). Resume without --no-write, or start a fresh task instead.`
+        );
+        process.exitCode = 2;
+        return;
+      }
+      write = true;
+    } else if (typeof sourceJob.write === "boolean") {
+      // kimi never allows write:false at all (harness-capabilities.mjs:
+      // readOnly "unsupported"), so this is a no-op there today — kept
+      // generic in case a future resume-capable harness's sandbox genuinely
+      // IS controllable on resume, unlike codex's.
+      if (explicitWrite && write !== sourceJob.write) {
+        console.error(`Job ${sourceJob.id} was originally run with write=${sourceJob.write} — a resumed session keeps its original mode and cannot switch to write=${write}. Omit --write/--no-write to inherit it, or start a fresh task instead.`);
+        process.exitCode = 2;
+        return;
+      }
+      write = sourceJob.write;
+    }
+    resumeRef = sourceJob.continuationRef;
+  }
+
+  // Pre-queue check against the declared capability matrix (Task 19): a
+  // combo already known impossible must not report "queued" and then die
+  // in the detached worker — fail loud in the parent (spec: fail-loud).
+  const comboError = validateHarnessCombo({ harness, profileKind: profileResolved.kind, write, resume: Boolean(options.resume) });
+  if (comboError?.dimension === "readOnly") {
+    console.error(`--harness ${harness} does not support --no-write (no CLI-level read-only mode).`);
+    process.exitCode = 2;
+    return;
+  }
+  if (comboError?.dimension === "profileKindCompat") {
+    console.error(`--harness ${harness} does not support profiles of kind "${comboError.profileKind}".`);
+    process.exitCode = 2;
+    return;
+  }
+  if (comboError?.dimension === "resume") {
+    console.error(`--harness ${harness} does not support --resume (no verified continuation mechanism).`);
+    process.exitCode = 2;
+    return;
+  }
   if (harness === "zero" && !isZeroAvailable()) {
     console.error("--harness zero requires the zero CLI. Install: npm i -g @gitlawb/zero");
     process.exitCode = 2;
     return;
   }
-  if (harness === "kimi") {
-    if (!isKimiAvailable()) {
-      console.error("--harness kimi requires the kimi-code CLI. Install: see https://moonshotai.github.io/kimi-code/");
-      process.exitCode = 2;
-      return;
-    }
-    if (!write) {
-      console.error("--harness kimi does not support --no-write (no CLI-level read-only mode).");
-      process.exitCode = 2;
-      return;
-    }
+  if (harness === "kimi" && !isKimiAvailable()) {
+    console.error("--harness kimi requires the kimi-code CLI. Install: see https://moonshotai.github.io/kimi-code/");
+    process.exitCode = 2;
+    return;
   }
   if (harness === "cline" && !isClineAvailable()) {
     console.error("--harness cline requires the cline CLI. Install: see https://docs.cline.bot/");
@@ -1414,7 +1676,9 @@ async function handleTask(argv) {
       write,
       prompt,
       persona,
-      harness
+      harness,
+      resume: Boolean(options.resume),
+      resumeRef
     };
 
     // Transactional launch: persist status:"starting" WITH the request BEFORE
@@ -1482,6 +1746,8 @@ async function handleTask(argv) {
         prompt,
         write,
         harness,
+        resume: Boolean(options.resume),
+        resumeRef,
         persona: resolveTaskPersona(options.as, prompt),
         secrets: collectConfigSecrets(config),
         jobId: job.id,
@@ -1613,6 +1879,8 @@ async function handleTaskWorker(argv) {
         prompt,
         write,
         harness: request.harness,
+        resume: Boolean(request.resume),
+        resumeRef: request.resumeRef,
         persona: request.persona,
         secrets: collectConfigSecrets(config),
         jobId: storedJob.id,
@@ -1938,13 +2206,16 @@ async function handleDispatch(argv) {
 
   if (options.write && options["no-write"]) validationError("--write y --no-write son mutuamente excluyentes.");
   const write = options["no-write"] ? false : true;
-  if (harness === "kimi" && !write) {
-    validationError("--harness kimi does not support --no-write (no CLI-level read-only mode).");
+  if (validateHarnessCombo({ harness, write })?.dimension === "readOnly") {
+    validationError(`--harness ${harness} does not support --no-write (no CLI-level read-only mode).`);
   }
   const config = loadConfig();
   let defaultProfile;
   try {
-    defaultProfile = resolveTaskProfile(config);
+    // Task 19 / H3: same reasoning as handleTask -- kind is validated below,
+    // harness-aware, via validateHarnessCombo over every profile actually
+    // used (this default included, once it fills in a blank task profile).
+    defaultProfile = resolveProfile(config.taskProfile || config.defaultProfile, config);
   } catch (err) {
     validationError(err.message);
   }
@@ -1973,12 +2244,9 @@ async function handleDispatch(argv) {
   // --assign mappings, and --model-override profile:model all flow into
   // tasks[].profile via buildTaskList(); the --cross-review profile is added
   // explicitly below. Per spec §3.1, every one of these must exist in config
-  // AND have kind === "claude-gateway" -- checked here, in preflight, before
-  // any task starts executing. Exception: kind "openai-chat" is allowed when
-  // --harness codex, since runCodexTask (codex-harness.mjs) talks the OpenAI
-  // wire protocol natively and ignores profile.kind -- verified live 2026-08-03
-  // (task --harness codex --profile gpt54 succeeds). claude-subprocess.mjs is
-  // Anthropic-wire-only, so harness "claude" keeps the hard requirement.
+  // AND be compatible with --harness per the declared capability matrix
+  // (harness-capabilities.mjs), checked here in preflight before any task
+  // starts executing — see that module for the evidence behind each kind.
   const profileNames = [...new Set(tasks.map((t) => t.profile).filter(Boolean))];
   if (options["cross-review"]) profileNames.push(options["cross-review"]);
 
@@ -2001,9 +2269,7 @@ async function handleDispatch(argv) {
     } catch (err) {
       validationError(err.message);
     }
-    const kindCompatible = profile.kind === "claude-gateway"
-      || (profile.kind === "openai-chat" && harness === "codex");
-    if (!kindCompatible) {
+    if (validateHarnessCombo({ harness, profileKind: profile.kind })?.dimension === "profileKindCompat") {
       validationError(`Profile "${name}" has kind "${profile.kind}" — dispatch requires kind "claude-gateway" (or "openai-chat" with --harness codex).`);
     }
   }
@@ -2323,26 +2589,18 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
+export function buildTaskWorkerArgs(scriptPath, cwd, jobId, request) {
+  const args = [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId];
+  if (request.profile) args.push("--profile", request.profile);
+  if (request.model) args.push("--model", request.model);
+  args.push(request.write === false ? "--no-write" : "--write");
+  if (request.harness) args.push("--harness", request.harness);
+  return args;
+}
+
 function spawnDetachedTaskWorker(cwd, jobId, request) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "gateway-companion.mjs");
-  const args = [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId];
-  if (request.profile) {
-    args.push("--profile", request.profile);
-  }
-  if (request.model) {
-    args.push("--model", request.model);
-  }
-  if (request.write === false) {
-    args.push("--no-write");
-  } else {
-    args.push("--write");
-  }
-  if (request.persona) {
-    args.push("--as", request.persona);
-  }
-  if (request.harness) {
-    args.push("--harness", request.harness);
-  }
+  const args = buildTaskWorkerArgs(scriptPath, cwd, jobId, request);
 
   const child = spawn(process.execPath, args, {
     cwd,

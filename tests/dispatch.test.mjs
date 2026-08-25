@@ -1069,6 +1069,90 @@ describe("handleDispatch profile-kind preflight validation (via CLI)", () => {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  // Task 19 / H3: the default task profile used to be gated by
+  // resolveTaskProfile's own hard "requires claude-gateway" check, BEFORE
+  // --harness was ever consulted — so `dispatch --harness codex` with an
+  // openai-chat default profile failed even though the declared capability
+  // matrix says codex+openai-chat is supported. validateHarnessCombo is now
+  // the only gate; the harness-aware kind check further down still applies.
+  it("does not reject an openai-chat DEFAULT task profile when --harness codex (only harness-aware check applies)", async () => {
+    const tmpDir = makeTmpConfigDir();
+    writeConfig(tmpDir, {
+      profiles: {
+        oa: { kind: "openai-chat", baseUrl: "http://127.0.0.1:1", defaultModel: "m" },
+      },
+      defaultProfile: "oa",
+      reviewProfile: null,
+      taskProfile: "oa",
+    });
+
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const companion = path.join(__dirname, "../plugins/gateway/scripts/gateway-companion.mjs");
+
+    try {
+      await execFileAsync(process.execPath, [companion, "dispatch", "--harness", "codex", "--task", "do something"], {
+        timeout: 8000,
+        env: { ...process.env, GATEWAY_PLUGIN_CONFIG_DIR: tmpDir },
+      });
+      assert.fail("Should have thrown (unreachable baseUrl)");
+    } catch (err) {
+      assert.ok(
+        !err.stderr.includes('requires kind "claude-gateway"'),
+        `Should not be blocked by the old harness-blind kind gate, got: ${err.stderr}`
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Task 19 / H3, `task`'s own default-profile path (config.mjs's
+// resolveTaskProfile has the same harness-blind claude-gateway check
+// handleDispatch had — see the describe block above).
+describe("handleTask default-profile kind check is harness-aware (Task 19 / H3, via CLI)", () => {
+  function writeConfig(tmpDir, config) {
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(path.join(tmpDir, "config.json"), JSON.stringify(config, null, 2));
+  }
+
+  function makeTmpConfigDir() {
+    return mkdtempSync(path.join(os.tmpdir(), "gw-task-kind-test-"));
+  }
+
+  it("does not reject an openai-chat DEFAULT task profile when --harness codex (only harness-aware check applies)", async () => {
+    const tmpDir = makeTmpConfigDir();
+    writeConfig(tmpDir, {
+      profiles: {
+        oa: { kind: "openai-chat", baseUrl: "http://127.0.0.1:1", defaultModel: "m" },
+      },
+      defaultProfile: "oa",
+      reviewProfile: null,
+      taskProfile: "oa",
+    });
+
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const companion = path.join(__dirname, "../plugins/gateway/scripts/gateway-companion.mjs");
+
+    try {
+      await execFileAsync(process.execPath, [companion, "task", "--harness", "codex", "do something"], {
+        timeout: 15000,
+        env: { ...process.env, GATEWAY_PLUGIN_CONFIG_DIR: tmpDir },
+      });
+      assert.fail("Should have thrown (unreachable baseUrl)");
+    } catch (err) {
+      assert.ok(
+        !err.stderr.includes('requires kind "claude-gateway"'),
+        `Should not be blocked by the old harness-blind kind gate, got: ${err.stderr}`
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("cleanOrphanedWorktrees (regression)", () => {
@@ -1312,4 +1396,205 @@ describe("handleDispatch hardening (via CLI)", () => {
   // the manifest-rewrite try/catch and the taskRunner/resolveProfileFn typeof guards
   // are defensive against future refactors and are exercised by the happy-path
   // dispatch tests (runDispatch) rather than by CLI integration here.
+});
+
+// ---------------------------------------------------------------------------
+// Bug 2 / Bug 3 regression tests — extractRepeatableFlags -- separator,
+// and buildTaskWorkerArgs must not emit dead --as.
+// ---------------------------------------------------------------------------
+
+import { extractRepeatableFlags, buildTaskWorkerArgs, chooseErrorCauseLine } from "../plugins/gateway/scripts/gateway-companion.mjs";
+
+describe("extractRepeatableFlags -- separator handling (Bug 2)", () => {
+  it("does not swallow -- as the value of --model-override", () => {
+    const { tasks, modelOverrides, cleaned } = extractRepeatableFlags([
+      "dispatch",
+      "--model-override",
+      "--",
+      "--something-literal"
+    ]);
+    assert.deepStrictEqual(tasks, []);
+    assert.deepStrictEqual(modelOverrides, []);
+    assert.deepStrictEqual(cleaned, ["dispatch", "--", "--something-literal"]);
+  });
+
+  it("does not swallow -- as the value of --task", () => {
+    const { tasks, modelOverrides, cleaned } = extractRepeatableFlags([
+      "dispatch",
+      "--task",
+      "--",
+      "--something-literal"
+    ]);
+    assert.deepStrictEqual(tasks, []);
+    assert.deepStrictEqual(modelOverrides, []);
+    assert.deepStrictEqual(cleaned, ["dispatch", "--", "--something-literal"]);
+  });
+
+  it("still extracts --task / --model-override that appear before --", () => {
+    const { tasks, modelOverrides, cleaned } = extractRepeatableFlags([
+      "dispatch",
+      "--task",
+      "do-thing:profile",
+      "--model-override",
+      "profileA:modelX",
+      "--",
+      "--task",
+      "--model-override"
+    ]);
+    assert.deepStrictEqual(tasks, ["do-thing:profile"]);
+    assert.deepStrictEqual(modelOverrides, ["profileA:modelX"]);
+    assert.deepStrictEqual(cleaned, ["dispatch", "--", "--task", "--model-override"]);
+  });
+
+  it("preserves token order verbatim after the -- separator", () => {
+    const { cleaned } = extractRepeatableFlags([
+      "--task",
+      "a:p",
+      "--",
+      "one",
+      "--model-override",
+      "two",
+      "--task"
+    ]);
+    assert.deepStrictEqual(cleaned, ["--", "one", "--model-override", "two", "--task"]);
+  });
+
+  it("does not swallow --model-override as the value of --task", () => {
+    const { tasks, modelOverrides, cleaned } = extractRepeatableFlags(["--task", "--model-override", "foo"]);
+    assert.deepStrictEqual(tasks, []);
+    assert.deepStrictEqual(modelOverrides, ["foo"]);
+    assert.deepStrictEqual(cleaned, []);
+  });
+
+  it("does not swallow --task as the value of --model-override", () => {
+    const { tasks, modelOverrides, cleaned } = extractRepeatableFlags(["--model-override", "--task", "foo:profile"]);
+    assert.deepStrictEqual(tasks, ["foo:profile"]);
+    assert.deepStrictEqual(modelOverrides, []);
+    assert.deepStrictEqual(cleaned, []);
+  });
+
+  it("does not swallow a short-flag-looking token as a value", () => {
+    const { tasks, cleaned } = extractRepeatableFlags(["--task", "-x"]);
+    assert.deepStrictEqual(tasks, []);
+    assert.deepStrictEqual(cleaned, ["-x"]);
+  });
+
+  it("still accepts a literal single dash as a value", () => {
+    const { tasks } = extractRepeatableFlags(["--task", "-"]);
+    assert.deepStrictEqual(tasks, ["-"]);
+  });
+});
+
+describe("buildTaskWorkerArgs (Bug 3 — dead --as removed)", () => {
+  it("never emits --as even when request.persona is set", () => {
+    const args = buildTaskWorkerArgs("/p/comp.mjs", "/cwd", "job-1", {
+      profile: "prof",
+      model: "mod",
+      write: true,
+      harness: "codex",
+      persona: "coder"
+    });
+    assert.ok(!args.includes("--as"), `expected no --as, got: ${JSON.stringify(args)}`);
+    assert.ok(!args.includes("coder"), `expected persona value absent, got: ${JSON.stringify(args)}`);
+  });
+
+  it("includes the expected core/value/boolean/harness flags", () => {
+    const args = buildTaskWorkerArgs("/p/comp.mjs", "/cwd", "job-1", {
+      profile: "prof",
+      model: "mod",
+      write: true,
+      harness: "codex",
+      persona: "coder"
+    });
+    assert.ok(args.includes("/p/comp.mjs"));
+    assert.ok(args.includes("task-worker"));
+    assert.ok(args.includes("--cwd"));
+    assert.ok(args.includes("/cwd"));
+    assert.ok(args.includes("--job-id"));
+    assert.ok(args.includes("job-1"));
+    assert.ok(args.includes("--profile"));
+    assert.ok(args.includes("prof"));
+    assert.ok(args.includes("--model"));
+    assert.ok(args.includes("mod"));
+    assert.ok(args.includes("--write"));
+    assert.ok(args.includes("--harness"));
+    assert.ok(args.includes("codex"));
+  });
+
+  it("emits --no-write when request.write === false", () => {
+    const args = buildTaskWorkerArgs("/p/comp.mjs", "/cwd", "job-1", {
+      write: false,
+      persona: "coder"
+    });
+    assert.ok(args.includes("--no-write"));
+    assert.ok(!args.includes("--write"), `--write and --no-write must be mutually exclusive: ${JSON.stringify(args)}`);
+    assert.ok(!args.includes("--as"));
+  });
+
+  it("omits --profile/--model/--harness when not present", () => {
+    const args = buildTaskWorkerArgs("/p/comp.mjs", "/cwd", "job-1", {
+      write: true,
+      persona: "coder"
+    });
+    assert.ok(!args.includes("--profile"));
+    assert.ok(!args.includes("--model"));
+    assert.ok(!args.includes("--harness"));
+    assert.ok(args.includes("--write"));
+    assert.ok(!args.includes("--as"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 16 — chooseErrorCauseLine must pick the real failure, not the first
+// noise in stderr. A CLI's actual fatal error typically comes LAST, after
+// any startup/retry notices.
+// ---------------------------------------------------------------------------
+
+describe("chooseErrorCauseLine (Task 16)", () => {
+  it("prefers the LAST error-signal line over an earlier cosmetic notice", () => {
+    const stderr = [
+      "Note: using cached credentials from ~/.config/harness/creds.json",
+      "Retrying request (attempt 1/3)...",
+      "Error: request rejected by gateway: quota exceeded for this billing period",
+    ].join("\n");
+    const line = chooseErrorCauseLine(stderr, "", "fallback");
+    assert.equal(line, "Error: request rejected by gateway: quota exceeded for this billing period");
+  });
+
+  it("among several error-signal lines (e.g. repeated retries), picks the last one", () => {
+    const stderr = [
+      "Error: 429 rate limited, retrying",
+      "Error: 429 rate limited, retrying",
+      "Error: 500 upstream failed permanently",
+    ].join("\n");
+    assert.equal(chooseErrorCauseLine(stderr, "", "fallback"), "Error: 500 upstream failed permanently");
+  });
+
+  it("matches on a bare HTTP status code even without an error keyword", () => {
+    const stderr = ["Connecting to gateway...", "Server replied: 403 - access not granted"].join("\n");
+    assert.equal(chooseErrorCauseLine(stderr, "", "fallback"), "Server replied: 403 - access not granted");
+  });
+
+  it("a keyword match wins over a plain status-code-shaped number that isn't an error", () => {
+    const stderr = ["500 items processed", "Error: connection reset by peer"].join("\n");
+    assert.equal(chooseErrorCauseLine(stderr, "", "fallback"), "Error: connection reset by peer");
+  });
+
+  it("no error-signal line at all: falls back to the LAST non-empty stderr line, not the first", () => {
+    const stderr = ["first line", "second line", "third and last line"].join("\n");
+    assert.equal(chooseErrorCauseLine(stderr, "", "fallback"), "third and last line");
+  });
+
+  it("empty stderr: falls back to the first meaningful stdout line", () => {
+    assert.equal(chooseErrorCauseLine("", "some stdout output\nmore", "fallback"), "some stdout output");
+  });
+
+  it("empty stderr and stdout: falls back to the provided fallback message", () => {
+    assert.equal(chooseErrorCauseLine("", "", "fallback message"), "fallback message");
+  });
+
+  it("ignores blank lines when scanning stderr", () => {
+    const stderr = "\n  \nError: the real cause\n\n";
+    assert.equal(chooseErrorCauseLine(stderr, "", "fallback"), "Error: the real cause");
+  });
 });

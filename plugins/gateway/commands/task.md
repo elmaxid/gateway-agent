@@ -18,7 +18,7 @@ Execution mode:
 - If neither flag is present, default to foreground.
 - `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
 - `--profile`, `--model`, `--write`, `--no-write`, `--harness`, `--as`, and `--prompt-file` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
-- `--harness claude|codex|zero|kimi|cline` selects the execution harness (default: `claude`). `zero`, `kimi`, and `cline` are fail-loud (no fallback); `kimi` does not support `--no-write` (`cline` does — its only harness with real read-only support). `--as` selects a persona (`debugger`, `reviewer`, `security`, `researcher`, `coder`). `--prompt-file <path>` reads the task prompt from a file instead of the natural-language text.
+- `--harness claude|codex|zero|kimi|cline` selects the execution harness (default: `claude`). `codex`, `zero`, `kimi`, and `cline` are all fail-loud (no fallback); `kimi` does not support `--no-write` (`cline` does — its only harness with real read-only support). `--as` selects a persona (`debugger`, `reviewer`, `security`, `researcher`, `coder`). `--prompt-file <path>` reads the task prompt from a file instead of the natural-language text.
 
 Operating rules:
 

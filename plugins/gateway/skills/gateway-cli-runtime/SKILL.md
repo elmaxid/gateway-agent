@@ -16,7 +16,7 @@ Primary helper:
 
 Available subcommands (forwarder agents use `task` — or `dispatch` for the dispatcher — exclusively):
 - `setup` — configure gateway profiles: `add|remove|list|test|set-default|set-review-profile|set-task-profile|set-model|doctor|models|wizard|zero-init` (`wizard` is interactive — terminal only, never from an agent)
-- `review` — one-pass code review via direct HTTP to an alternative LLM
+- `review` — one-pass code review; default route is agentic (the model explores the repo itself via tool-use), `--no-tools` switches to direct HTTP with pre-injected context (`--include-diff` only does anything in that `--no-tools` mode — it errors otherwise)
 - `adversarial-review` — two-pass review (find issues, then filter false positives)
 - `staged-review` — two-phase review (spec extraction + adversarial pass)
 - `debate` — multi-model debate with a synthesizer
@@ -33,7 +33,7 @@ Task invocation:
   - `--model MODEL` (`-m`) — override the model for this task (e.g. `glm-5.2`, `minimax-m3`, `deepseek-v4-pro`)
   - `--harness claude|codex|zero|kimi|cline` — select execution harness (default: claude)
     - `claude` — stateless subprocess via `claude -p --bare` (fast, zero overhead; one-shot Q&A, research, review)
-    - `codex` — stateful subprocess via `codex exec --json` (thread persistence, reasoning traces, real sandbox; implementation, debugging). If codex is not installed, falls back to claude automatically.
+    - `codex` — stateful subprocess via `codex exec --json` (thread persistence, reasoning traces, real sandbox; implementation, debugging). **Fail-loud: NO fallback** — if codex is not installed, or codex is authenticated via a ChatGPT account (which rejects non-OpenAI models), the command errors with remediation instead of silently switching to the claude harness.
     - `zero` — one-shot agentic run via `zero exec` (fixed tool whitelist, no MCP/browser/swarm; JSONL event stream kept in the task log). **Fail-loud: NO fallback** — if the zero CLI is missing or its provider does not match the profile URL, the command errors with remediation (`npm i -g @gitlawb/zero`, `setup zero-init`) instead of silently switching harness.
     - `kimi` — one-shot/resumable run via `kimi -p --output-format stream-json` (Moonshot's Kimi Code CLI). **Fail-loud: NO fallback** — if the kimi CLI is missing, its `gateway` provider is misaligned, or the requested model isn't declared in `~/.kimi-code/config.toml`, the command errors with remediation instead of silently switching harness. **Does not support `--no-write`** (no CLI-level read-only mode) — passing it with `--harness kimi` fails before the task runs.
     - `cline` — one-shot run via `cline --json --provider litellm` (Cline CLI). **Fail-loud: NO fallback** — if the cline CLI is missing or its `litellm` provider is misaligned, the command errors with remediation instead of silently switching harness. **Unlike kimi, DOES support `--no-write`** — real read-only mode via `--auto-approve false` (every tool call fails cleanly instead of executing). Resume (`--id`) is NOT supported — broken in the installed CLI's non-interactive `--json` mode.
@@ -45,8 +45,8 @@ Task invocation:
   - `--json` — structured JSON output instead of rendered text
   - Note: `task` has NO `--timeout` flag (timeouts exist on `review`/`debate`/`dispatch`). Unknown flags are not honored.
 
-Zero/kimi/cline harness prompt convention:
-- Zero's, kimi's, and cline's rendered stdout are the model's **final message only**. Agentic models often close with a short meta remark and leave the real content mid-stream. For analysis/review delegations via `--harness zero`, `--harness kimi`, or `--harness cline`, end the prompt with: "Your final message must contain the complete output." The full event stream is always preserved in the task log (`rawJsonl` for all three).
+Codex/zero/kimi/cline harness prompt convention:
+- All four event-stream harnesses render stdout as the model's **final message only** (codex: the last `agent_message` item; zero/kimi/cline: their own `final`/equivalent event) — never the raw event stream. Agentic models often close with a short meta remark and leave the real content mid-stream. For analysis/review delegations via `--harness codex`, `--harness zero`, `--harness kimi`, or `--harness cline`, end the prompt with: "Your final message must contain the complete output." The full event stream is always preserved in the task log (`rawJsonl` for all four).
 - For `--harness cline` specifically, avoid explicitly demanding tool use in a `--no-write` prompt — a read-only run that insists on using a blocked tool can exhaust cline's retries and abort the whole run (fails loud, not silently). Plain analysis/review prompts (no explicit tool demand) are unaffected.
 
 Dispatch invocation (dispatcher agent only):
@@ -74,5 +74,7 @@ Execution rules:
 Safety rules:
 - Default to write-capable gateway work unless the user explicitly asks for read-only behavior; reviews/research default to `--no-write`.
 - Preserve the user's task text as-is apart from stripping routing flags.
+- The prompt never passes through a shell: harness subprocesses spawn with an argv array (`spawn("claude"|"codex", args, ...)`, no `shell: true`), so the prompt is one argv element, not shell-interpolated text. No need to escape shell metacharacters in the prompt — but this also means shell features (globs, `$VAR` expansion, pipes) inside a prompt string do nothing; they reach the model as literal text.
+- A prompt that itself starts with `-` (e.g. "-1 means unlimited") is parsed as an unrecognized option and rejected — the strict parser cannot tell a leading-dash prompt from a mistyped flag. Put `--` right before it: `task -- "-1 means unlimited"`.
 - Return the stdout of the forwarded command exactly as-is.
 - If the command fails, report its exit status and the stderr excerpt the runtime already redacted and truncated. Never convert a gateway failure into an empty response.

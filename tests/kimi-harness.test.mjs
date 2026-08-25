@@ -17,7 +17,8 @@ import {
   buildKimiArgs,
   parseKimiStream,
   shapeKimiResult,
-  runKimiTask
+  runKimiTask,
+  extractKimiSessionId
 } from "../plugins/gateway/scripts/lib/kimi-harness.mjs";
 
 const PROFILE = {
@@ -117,6 +118,52 @@ describe("buildKimiArgs", () => {
   it("resume: appends -c", () => {
     const args = buildKimiArgs("kimi-k2.6", "hello", { resume: true });
     assert.deepEqual(args, ["-p", "hello", "-m", "gateway/kimi-k2.6", "--output-format", "stream-json", "-c"]);
+  });
+
+  // Task 25/26: explicit session id resume — verified to actually carry
+  // context over (unlike bare -c), so this is what a real --resume must use.
+  it("resumeSessionId: appends -S <id>, not -c", () => {
+    const args = buildKimiArgs("kimi-k2.6", "hello", { resumeSessionId: "session_abc-123" });
+    assert.deepEqual(args, ["-p", "hello", "-m", "gateway/kimi-k2.6", "--output-format", "stream-json", "-S", "session_abc-123"]);
+  });
+
+  it("resumeSessionId takes precedence over resume:true (never both flags)", () => {
+    const args = buildKimiArgs("kimi-k2.6", "hello", { resume: true, resumeSessionId: "session_abc-123" });
+    assert.deepEqual(args, ["-p", "hello", "-m", "gateway/kimi-k2.6", "--output-format", "stream-json", "-S", "session_abc-123"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractKimiSessionId (Task 25/26 continuation reference)
+// ---------------------------------------------------------------------------
+
+describe("extractKimiSessionId", () => {
+  it("extracts the session_id from a session.resume_hint meta event", () => {
+    const raw = [
+      '{"role":"meta","type":"system.version","version":"0.37.2"}',
+      '{"role":"assistant","content":"ok"}',
+      '{"role":"meta","type":"session.resume_hint","session_id":"session_abc-123","command":"kimi -r session_abc-123"}',
+    ].join("\n");
+    assert.equal(extractKimiSessionId(raw), "session_abc-123");
+  });
+
+  it("no resume_hint event → null", () => {
+    const raw = '{"role":"assistant","content":"ok"}';
+    assert.equal(extractKimiSessionId(raw), null);
+  });
+
+  it("multiple resume_hint events → last one wins", () => {
+    const raw = [
+      '{"role":"meta","type":"session.resume_hint","session_id":"session_old"}',
+      '{"role":"meta","type":"session.resume_hint","session_id":"session_new"}',
+    ].join("\n");
+    assert.equal(extractKimiSessionId(raw), "session_new");
+  });
+
+  it("skips corrupt lines and empty input without throwing", () => {
+    assert.equal(extractKimiSessionId("not json\n{broken"), null);
+    assert.equal(extractKimiSessionId(""), null);
+    assert.equal(extractKimiSessionId(null), null);
   });
 });
 

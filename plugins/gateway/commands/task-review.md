@@ -43,11 +43,12 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" task <task-args>
 ## Step 2 — Cross-model review (only if Step 1 exits 0)
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" review --profile <review-profile> --include-diff --scope working-tree
+node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" review --profile <review-profile> --scope working-tree
 ```
 
 - Report the review stdout **verbatim** after the task output, separated by a line:
   `--- Cross-model review (by <review-profile>) ---`
+- If Step 1's task made no file changes (`--no-write`, or a task that legitimately touched nothing), Step 2 now fails loud instead of reporting a clean "approve": review refuses an empty target before it ever reaches a model. Report that failure verbatim like any other — it is not a bug in this command.
 
 ## Operating rules
 

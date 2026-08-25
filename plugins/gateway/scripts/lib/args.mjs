@@ -51,8 +51,7 @@ export function parseArgs(argv, config = {}) {
         continue;
       }
 
-      positionals.push(token);
-      continue;
+      throw new Error(`Unknown option "${token}".`);
     }
 
     const shortKey = token.slice(1);
@@ -78,7 +77,7 @@ export function parseArgs(argv, config = {}) {
       continue;
     }
 
-    positionals.push(token);
+    throw new Error(`Unknown option "${token}".`);
   }
 
   return { options, positionals };

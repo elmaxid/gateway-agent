@@ -43,107 +43,136 @@ function syncSleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+function runWindowsTaskkill(pid, options) {
+  const runCommandImpl = options.runCommandImpl ?? runCommand;
+  const killImpl = options.killImpl ?? process.kill.bind(process);
+  const result = runCommandImpl("taskkill", ["/PID", String(pid), "/T", "/F"], {
+    cwd: options.cwd,
+    env: options.env
+  });
+
+  if (!result.error && result.status === 0) {
+    return { attempted: true, delivered: true, method: "taskkill", result };
+  }
+
+  const combinedOutput = `${result.stderr}\n${result.stdout}`.trim();
+  if (!result.error && looksLikeMissingProcessMessage(combinedOutput)) {
+    return { attempted: true, delivered: false, method: "taskkill", result };
+  }
+
+  if (result.error?.code === "ENOENT") {
+    try {
+      killImpl(pid);
+      return { attempted: true, delivered: true, method: "kill" };
+    } catch (error) {
+      if (error?.code === "ESRCH") {
+        return { attempted: true, delivered: false, method: "kill" };
+      }
+      throw error;
+    }
+  }
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  throw new Error(formatCommandFailure(result));
+}
+
+// Shared by the sync and async paths: send SIGTERM (process group first,
+// falling back to just the pid), reporting how it went. No sleeping here —
+// each path awaits/blocks for the grace period in its own idiomatic way.
+function deliverTermSignal(pid, killImpl) {
+  try {
+    killImpl(-pid, "SIGTERM");
+    return { attempted: true, delivered: true, method: "process-group" };
+  } catch (error) {
+    if (error?.code === "ESRCH") {
+      return { attempted: true, delivered: false, method: "process-group" };
+    }
+    try {
+      killImpl(pid, "SIGTERM");
+      return { attempted: true, delivered: true, method: "process" };
+    } catch (innerError) {
+      if (innerError?.code === "ESRCH") {
+        return { attempted: true, delivered: false, method: "process" };
+      }
+      throw innerError;
+    }
+  }
+}
+
+// Shared by the sync and async paths: after the grace period has elapsed,
+// escalate to SIGKILL only if the process is still alive.
+function escalateIfStillAlive(pid, method, killImpl) {
+  let stillAlive = false;
+  try {
+    killImpl(pid, 0);
+    stillAlive = true;
+  } catch {
+    // process already exited
+  }
+
+  if (!stillAlive) {
+    return { attempted: true, delivered: true, method };
+  }
+
+  try {
+    killImpl(-pid, "SIGKILL");
+  } catch {
+    try {
+      killImpl(pid, "SIGKILL");
+    } catch {
+      // best effort — process may have exited between check and kill
+    }
+  }
+  return { attempted: true, delivered: true, method: `${method}+sigkill` };
+}
+
 export function terminateProcessTree(pid, options = {}) {
   if (!Number.isFinite(pid)) {
     return { attempted: false, delivered: false, method: null };
   }
 
   const platform = options.platform ?? process.platform;
-  const runCommandImpl = options.runCommandImpl ?? runCommand;
-  const killImpl = options.killImpl ?? process.kill.bind(process);
-
   if (platform === "win32") {
-    const result = runCommandImpl("taskkill", ["/PID", String(pid), "/T", "/F"], {
-      cwd: options.cwd,
-      env: options.env
-    });
-
-    if (!result.error && result.status === 0) {
-      return { attempted: true, delivered: true, method: "taskkill", result };
-    }
-
-    const combinedOutput = `${result.stderr}\n${result.stdout}`.trim();
-    if (!result.error && looksLikeMissingProcessMessage(combinedOutput)) {
-      return { attempted: true, delivered: false, method: "taskkill", result };
-    }
-
-    if (result.error?.code === "ENOENT") {
-      try {
-        killImpl(pid);
-        return { attempted: true, delivered: true, method: "kill" };
-      } catch (error) {
-        if (error?.code === "ESRCH") {
-          return { attempted: true, delivered: false, method: "kill" };
-        }
-        throw error;
-      }
-    }
-
-    if (result.error) {
-      throw result.error;
-    }
-
-    throw new Error(formatCommandFailure(result));
+    return runWindowsTaskkill(pid, options);
   }
 
-  let method;
-  let delivered = false;
-
-  try {
-    killImpl(-pid, "SIGTERM");
-    method = "process-group";
-    delivered = true;
-  } catch (error) {
-    if (error?.code !== "ESRCH") {
-      try {
-        killImpl(pid, "SIGTERM");
-        method = "process";
-        delivered = true;
-      } catch (innerError) {
-        if (innerError?.code === "ESRCH") {
-          return { attempted: true, delivered: false, method: "process" };
-        }
-        throw innerError;
-      }
-    } else {
-      return { attempted: true, delivered: false, method: "process-group" };
-    }
+  const killImpl = options.killImpl ?? process.kill.bind(process);
+  const signalResult = deliverTermSignal(pid, killImpl);
+  if (!signalResult.delivered) {
+    return signalResult;
   }
 
-  if (delivered) {
-    const sleepMs = options.gracePeriodMs ?? 2000;
-    const sleepImpl = options.sleepImpl ?? syncSleep;
-    sleepImpl(sleepMs);
-
-    let stillAlive = false;
-    try {
-      killImpl(pid, 0);
-      stillAlive = true;
-    } catch {
-      // process already exited
-    }
-
-    if (stillAlive) {
-      try {
-        killImpl(-pid, "SIGKILL");
-      } catch {
-        try {
-          killImpl(pid, "SIGKILL");
-        } catch {
-          // best effort — process may have exited between check and kill
-        }
-      }
-      return { attempted: true, delivered: true, method: `${method}+sigkill` };
-    }
-  }
-
-  return { attempted: true, delivered, method };
+  syncSleep(options.gracePeriodMs ?? 2000);
+  return escalateIfStillAlive(pid, signalResult.method, killImpl);
 }
 
 export async function terminateProcessTreeAsync(pid, options = {}) {
-  const sleepMs = options.gracePeriodMs ?? 2000;
-  const asyncSleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-  return terminateProcessTree(pid, { ...options, sleepImpl: asyncSleep });
+  if (!Number.isFinite(pid)) {
+    return { attempted: false, delivered: false, method: null };
+  }
+
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    // taskkill /F is immediate -- no grace-period step to genuinely await.
+    return runWindowsTaskkill(pid, options);
+  }
+
+  const killImpl = options.killImpl ?? process.kill.bind(process);
+  const signalResult = deliverTermSignal(pid, killImpl);
+  if (!signalResult.delivered) {
+    return signalResult;
+  }
+
+  // The actual bug fix: a REAL await, not a synchronous function call with a
+  // Promise-returning argument it never awaits (which is what delegating to
+  // terminateProcessTree with an async sleepImpl used to do — the grace
+  // period effectively never happened, and SIGKILL landed right after
+  // SIGTERM every time).
+  await new Promise((resolve) => setTimeout(resolve, options.gracePeriodMs ?? 2000));
+  return escalateIfStillAlive(pid, signalResult.method, killImpl);
 }
 
 export function formatCommandFailure(result) {

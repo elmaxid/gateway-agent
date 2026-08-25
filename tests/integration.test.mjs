@@ -1,9 +1,9 @@
 /**
- * Integration tests — live gateway (requires profiles glm, minimax and
+ * Integration tests — live gateway (requires profiles glm and
  * deepseek-pro configured in ~/.gateway-plugin/config.json; no env vars).
  *
  * Covers:
- *   - Connectivity + model routing for glm-5.2, minimax-m3, deepseek-v4-pro
+ *   - Connectivity + model routing for glm-5.2, deepseek-v4-pro
  *   - Direct HTTP review (api-client chatCompletion)
  *   - Task via claude harness (subprocess)
  *   - Task via codex harness
@@ -29,7 +29,7 @@ const COMPANION = path.join(__dirname, "../plugins/gateway/scripts/gateway-compa
 
 const config = loadConfig();
 
-const MODELS = ["glm", "minimax", "deepseek-pro"];
+const MODELS = ["glm", "deepseek-pro"];
 
 // ---------------------------------------------------------------------------
 // Connectivity — one test per model

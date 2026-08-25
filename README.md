@@ -75,7 +75,7 @@ Las personas están definidas en archivos `personas/*.md` con frontmatter YAML. 
 | **kimi** | `kimi -p --output-format stream-json` | CLI agentic de Moonshot, resume vía `-c` |
 | **cline** | `cline --json --provider litellm` | Único harness con read-only real (`--auto-approve false`) |
 
-En `task`/`task-worker`, si codex no está instalado hay fallback automático a claude (para perfiles claude-gateway). En `dispatch` **no** hay fallback: si falta el CLI de codex, zero, kimi o cline, el comando preflight-falla (exit 2). Zero, kimi y cline nunca tienen fallback: si faltan, fallan explícito.
+Ningún harness alternativo tiene fallback a claude: si falta el CLI de codex, zero, kimi o cline, o si codex está autenticado vía cuenta ChatGPT en vez de API key, el comando falla explícito con remediación — en `dispatch` como preflight (exit 2, antes de encolar nada), en `task`/`task-worker` como resultado de la tarea (exit 1).
 
 ### Zero harness
 
@@ -154,7 +154,7 @@ devolver un "éxito" vacío. Prompts de análisis/review que no exigen herramien
 - **Node.js** ≥ 18.18.0
 - **Claude Code CLI** (cualquier versión con soporte de plugins)
 - Al menos un endpoint compatible con OpenAI (Ollama, gateway custom, etc.)
-- **Opcional:** [Codex CLI](https://github.com/openai/codex) para el harness codex (si no está, usa claude subprocess como fallback)
+- **Opcional:** [Codex CLI](https://github.com/openai/codex) para el harness codex (sin fallback: fail-loud si no está instalado, o si está autenticado vía cuenta ChatGPT en vez de API key)
   > ⚠️ **Nota:** Codex requiere que el directorio de trabajo sea un repositorio git. Si no lo es, ejecutar `git init` antes de usar harness codex.
   > Codex también puede ser **cliente** del plugin (no solo harness de ejecución) — ver sección [Codex](#codex) más abajo.
 - **Opcional:** [Zero CLI](https://github.com/Gitlawb/zero) (`npm i -g @gitlawb/zero`) para el harness zero (sin fallback: fail-loud si no está instalado)
@@ -403,8 +403,8 @@ Review del diff actual usando el LLM configurado.
   - `working-tree`: solo cambios sin commitear
   - `branch`: diff desde merge-base contra rama principal
 - `--no-tools` — desactiva el loop agentic; usa HTTP directo con diff pre-inyectado en el prompt (más rápido, menos contexto)
-- `--include-diff` — fuerza inclusión del diff completo en el contexto pre-inyectado (solo tiene efecto con `--no-tools`)
-- `--timeout MS` — timeout HTTP por request en milisegundos (default: 60000). Útil con modelos lentos (ej. minimax-m3). En modo `--no-tools` es 1 request; en modo agentic default puede ser hasta `maxIterations` requests, cada una bounded por este valor (el deadline interno del loop escala como `max(120000, timeout × 2)`, worst-case wall-clock ≈ deadline + hasta 4×timeout). Si el modelo devuelve output que no tiene forma de review válida (no-JSON, o JSON sin verdict/summary/findings) dos veces seguidas en el mismo turno terminal, la review reintenta automáticamente una vez por punto de fallo; si persiste, falla explícito (`exitStatus` no-cero, render dice "FAILED") en vez de renderizar el garbage como si fuera un review real.
+- `--include-diff` — fuerza inclusión del diff completo en el contexto pre-inyectado. **Requiere `--no-tools`**: el modo agentic por defecto arma su propio contexto vía tools y nunca lee este flag, así que `review --include-diff` sin `--no-tools` es un error (exit 2), no un no-op silencioso.
+- `--timeout MS` — timeout HTTP por request en milisegundos (default: 60000). Útil con modelos lentos (ej. deepseek-v4-pro). En modo `--no-tools` es 1 request; en modo agentic default puede ser hasta `maxIterations` requests, cada una bounded por este valor (el deadline interno del loop escala como `max(120000, timeout × 2)`, worst-case wall-clock ≈ deadline + hasta 4×timeout). Si el modelo devuelve output que no tiene forma de review válida (no-JSON, o JSON sin verdict/summary/findings) dos veces seguidas en el mismo turno terminal, la review reintenta automáticamente una vez por punto de fallo; si persiste, falla explícito (`exitStatus` no-cero, render dice "FAILED") en vez de renderizar el garbage como si fuera un review real.
 - `--json` — output estructurado JSON
 
 **Modos de review:**
@@ -422,13 +422,13 @@ Review de dos pasadas: primera encuentra issues, segunda filtra falsos positivos
 
 ```
 /gateway:adversarial-review
-/gateway:adversarial-review --profile minimax "focus en seguridad"
+/gateway:adversarial-review --profile deepseek-pro "focus en seguridad"
 /gateway:adversarial-review --base main
 /gateway:adversarial-review --include-diff "verificar cambios de seguridad"
-/gateway:adversarial-review --profile minimax --timeout 120000 --include-diff
+/gateway:adversarial-review --profile deepseek-pro --timeout 120000 --include-diff
 ```
 
-Mismos flags que `/gateway:review` (incluyendo `--include-diff`, `--timeout`). Más lento pero más preciso — útil antes de merge a main. Hace 2 requests HTTP secuenciales (primera pasada + filtro adversarial), así que el peor caso con modelos lentos es ≈2×`--timeout`.
+Mismos flags que `/gateway:review` (incluyendo `--timeout`), salvo `--include-diff`: acá no requiere `--no-tools` — adversarial-review no tiene ruta agéntica, siempre es HTTP directo. Más lento pero más preciso — útil antes de merge a main. Hace 2 requests HTTP secuenciales (primera pasada + filtro adversarial), así que el peor caso con modelos lentos es ≈2×`--timeout`.
 
 ---
 
@@ -438,7 +438,7 @@ Review de 2 fases: Fase 1 evalúa spec compliance (¿el código hace lo que dice
 
 ```
 /gateway:staged-review --include-diff "v0.3.1 robustness improvements"
-/gateway:staged-review --profile minimax --include-diff
+/gateway:staged-review --profile deepseek-pro --include-diff
 /gateway:staged-review --json --include-diff
 /gateway:staged-review --base main --scope branch "verificar feature branch"
 ```
@@ -492,7 +492,7 @@ Delega una tarea al LLM via subprocess. Soporta 5 harnesses (claude, codex, zero
 - `--wait` — foreground bloqueante (default)
 - `--profile NAME` — perfil a usar (debe ser `claude-gateway`)
 - `--model MODEL` — override del modelo
-- `--harness claude|codex|zero|kimi|cline` — harness de ejecución (default: claude). Codex ofrece threads persistentes y sandbox real; zero, kimi y cline son fail-loud (sin fallback); kimi no soporta `--no-write`, cline sí (único harness con read-only real)
+- `--harness claude|codex|zero|kimi|cline` — harness de ejecución (default: claude). Codex ofrece threads persistentes y sandbox real; los cuatro alternativos (codex, zero, kimi, cline) son fail-loud (sin fallback a claude); kimi no soporta `--no-write`, cline sí (único harness con read-only real)
 - `--as PERSONA` — inyecta system prompt de una persona antes de la tarea (`reviewer`, `debugger`, `security`, `researcher`, `coder`). Si no se especifica, se intenta auto-match: el prompt se compara contra `activation_keywords` de cada persona y se selecciona la de mayor score (vía `matchPersona()`). Usar `--as` explícito para forzar una persona concreta.
 - `--write` — permite escritura de archivos (default)
 - `--no-write` — modo lectura, sin edits
@@ -518,7 +518,7 @@ Encadena task + cross-model review automático. Ejecuta la tarea con un modelo, 
 - Todos los flags de `/gateway:task` aplican (`--profile`, `--model`, `--harness`, `--as`, `--write`, `--no-write`, `--prompt-file`)
 - No soporta `--background` — la tarea debe completar antes del review
 
-**Flujo:** task (exit 0) → `review --profile <review> --include-diff --scope working-tree`. Si task falla, review se omite.
+**Flujo:** task (exit 0) → `review --profile <review> --scope working-tree`. Si task falla, review se omite. Si task no tocó archivos (`--no-write`, o simplemente no hubo cambios), el review ahora falla antes de llegar a un modelo — un review sin nada que revisar ya no se reporta como "approve".
 
 ---
 
@@ -953,17 +953,17 @@ Si en el paso 1 el pedido amerita revisión multi-modelo del spec en sí (decisi
 ```bash
 cd /path/to/agent-plugin-cc
 
-# Suite completa — los 30 archivos tests/*.test.mjs (558 tests).
+# Suite completa — los 32 archivos tests/*.test.mjs (601 tests).
 node --test tests/*.test.mjs
 
-# Nota: integration.test.mjs (13 tests) requiere un gateway activo y alcanzable;
+# Nota: integration.test.mjs (9 tests) requiere un gateway activo y alcanzable;
 # sin gateway esos tests fallan por timeout. Para correrlos solos, con timeout amplio:
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Suite completa:** 558 tests — 545 sin red + 13 de integración. Los 545 sin red no requieren gateway: usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real. Cubren toda la superficie del CLI, incluyendo la de v0.5.2: background jobs (`background-jobs`), redaction/contrato de error (`redaction`, `setup-output-redaction`), baseline-capture (`baseline-capture`), `version --json` (`version`) y los tres harnesses (`claude-subprocess`, `codex-harness`, `zero-harness`). Los de mayor cobertura son dispatch (69) y zero-harness (36 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping).
+**Suite completa:** 601 tests — 592 sin red + 9 de integración. Los 592 sin red no requieren gateway: usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real. Cubren toda la superficie del CLI, incluyendo la de v0.5.2: background jobs (`background-jobs`), redaction/contrato de error (`redaction`, `setup-output-redaction`), baseline-capture (`baseline-capture`), `version --json` (`version`) y los tres harnesses (`claude-subprocess`, `codex-harness`, `zero-harness`). Los de mayor cobertura son dispatch (82) y zero-harness (36 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping).
 
-**Integration tests:** 13 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness y task via codex harness (cada uno contra los 3 modelos principales: glm-5.2, minimax-m3, deepseek-v4-pro), más task via zero harness (solo glm-5.2).
+**Integration tests:** 9 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness y task via codex harness (cada uno contra los 2 modelos principales: glm-5.2, deepseek-v4-pro), más task via zero harness (solo glm-5.2).
 
 ## Hooks del ciclo de sesión
 

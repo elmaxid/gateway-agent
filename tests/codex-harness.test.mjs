@@ -11,6 +11,11 @@ import {
   buildCodexEnv,
   extractCodexFailure,
   runCodexTask,
+  runTask,
+  isCodexAvailable,
+  parseCodexJsonl,
+  shapeCodexResult,
+  extractCodexThreadId,
 } from "../plugins/gateway/scripts/lib/codex-harness.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -257,6 +262,38 @@ process.stdin.on("end", () => {
     process.stdout.write("X".repeat(60000) + "\\n", () => process.exit(1));
     return;
   }
+  if (MODE === "echo-args") {
+    // Task 25/26: proves the actual argv runCodexTask builds, not just its
+    // return value — e.g. that --ephemeral is gone, and resume uses an
+    // explicit thread id + --json instead of --last.
+    process.stdout.write(JSON.stringify(args) + "\\n", () => process.exit(0));
+    return;
+  }
+  if (MODE === "auth") {
+    // codex authenticated via a ChatGPT account rejects non-OpenAI models —
+    // isCodexAuthError() matches on this exact substring.
+    process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message: "Rejected: this ChatGPT account cannot use non-OpenAI models." } }) + "\\n", () => process.exit(1));
+    return;
+  }
+  if (MODE === "success") {
+    // A clean run: two agent_message items (proves last-one-wins) then a
+    // proper turn.completed terminal event.
+    const successLines = [
+      JSON.stringify({ type: "thread.started", thread_id: "t-2" }),
+      JSON.stringify({ type: "turn.started" }),
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "intermediate remark" } }),
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "CODEX-SUCCESS-FINAL" } }),
+      JSON.stringify({ type: "turn.completed" }),
+    ].join("\\n") + "\\n";
+    process.stdout.write(successLines, () => process.exit(0));
+    return;
+  }
+  if (MODE === "no-terminal") {
+    // Process exits 0 but never emits turn.completed/turn.failed — must never
+    // read as success (Task 16).
+    process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "t-3" }) + "\\n", () => process.exit(0));
+    return;
+  }
   const NESTED = ${nestedForScript};
   const lines = [
     JSON.stringify({ type: "thread.started", thread_id: "t-1" }),
@@ -292,6 +329,255 @@ describe("runCodexTask — capture completeness (resolves on close, not exit)", 
     } finally {
       process.env.PATH = originalPath;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 25/26 — real args runCodexTask builds: no --ephemeral on a normal run
+// (Task 25 root cause: it silently blocked all persistence, so resume always
+// attached to nothing), and resume requires an explicit thread id + --json
+// (never --last, which Task 25 proved is not attributable to a specific job
+// under concurrency).
+// ---------------------------------------------------------------------------
+
+describe("runCodexTask — args (Task 25/26)", () => {
+  it("normal run never passes --ephemeral (must persist so a later resume can attach)", async () => {
+    const { dir } = writeFakeCodex("echo-args");
+    const originalPath = process.env.PATH;
+    process.env.PATH = pathWithFakeBin(dir);
+    try {
+      const profile = { name: "fake", kind: "claude-gateway", baseUrl: "http://127.0.0.1:1", defaultModel: "m", apiKey: "k" };
+      const result = await runCodexTask(profile, "hi", { model: "m", write: false });
+      const args = JSON.parse(result.stdout.trim());
+      assert.ok(!args.includes("--ephemeral"), `expected no --ephemeral, got: ${JSON.stringify(args)}`);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("resume with an explicit resumeRef: exec resume <id> --json, never --last -- still routes through the gateway provider via -m/-c (cross-review finding, verified live)", async () => {
+    const { dir } = writeFakeCodex("echo-args");
+    const originalPath = process.env.PATH;
+    process.env.PATH = pathWithFakeBin(dir);
+    try {
+      const profile = { name: "fake", kind: "claude-gateway", baseUrl: "http://127.0.0.1:1", defaultModel: "m", apiKey: "k" };
+      const result = await runCodexTask(profile, "hi", { resume: true, resumeRef: "01a0392f-thread-id" });
+      const args = JSON.parse(result.stdout.trim());
+      assert.deepEqual(args, [
+        "exec", "resume", "01a0392f-thread-id", "--json", "-m", "m",
+        "-c", 'model_provider="gateway"',
+        "-c", 'model_providers.gateway.name="Gateway"',
+        "-c", 'model_providers.gateway.base_url="http://127.0.0.1:1"',
+        "-c", 'model_providers.gateway.env_key="OPENAI_API_KEY"',
+        "-c", 'model_providers.gateway.wire_api="responses"',
+      ]);
+      assert.ok(!args.includes("-s"), "resume does not accept -s (absent from `codex exec resume --help`)");
+      assert.ok(!args.includes("-C"), "resume does not accept -C (absent from `codex exec resume --help`)");
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  // Cross-review + LIVE verification: a `-c sandbox_mode="read-only"`
+  // override was tried and confirmed to have NO effect on a resumed turn (it
+  // still wrote a file to disk, exit 0, no sandbox-denial anywhere in the
+  // stream) -- so runCodexTask deliberately does NOT attempt it; opts.write
+  // is silently a no-op for the resume branch's args, by design. The actual
+  // safety enforcement lives in gateway-companion.mjs (handleTask refuses to
+  // resume codex with an effective write:false at all).
+  it("resume args never include sandbox_mode -- opts.write has no effect on resume argv (verified ineffective, see codex-harness.mjs comment)", async () => {
+    const { dir } = writeFakeCodex("echo-args");
+    const originalPath = process.env.PATH;
+    process.env.PATH = pathWithFakeBin(dir);
+    try {
+      const profile = { name: "fake", kind: "claude-gateway", baseUrl: "http://127.0.0.1:1", defaultModel: "m", apiKey: "k" };
+      const resultWrite = await runCodexTask(profile, "hi", { resume: true, resumeRef: "id", write: true });
+      const resultNoWrite = await runCodexTask(profile, "hi", { resume: true, resumeRef: "id", write: false });
+      assert.deepEqual(JSON.parse(resultWrite.stdout.trim()), JSON.parse(resultNoWrite.stdout.trim()));
+      assert.ok(!JSON.parse(resultWrite.stdout.trim()).some((a) => String(a).includes("sandbox_mode")));
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("resume without a resumeRef throws synchronously (no spawn, no silent --last fallback)", () => {
+    const profile = { name: "fake", kind: "claude-gateway", baseUrl: "http://127.0.0.1:1", defaultModel: "m", apiKey: "k" };
+    assert.throws(() => runCodexTask(profile, "hi", { resume: true }), /resumeRef/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 14 — runTask must fail loud on both codex-unavailable and codex
+// auth-error paths, never silently fall back to the claude harness.
+// ---------------------------------------------------------------------------
+
+describe("runTask — no silent fallback to claude (Task 14)", () => {
+  it("codex CLI missing: fails with remediation, never tries claude", async () => {
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-missing-"));
+    const originalPath = process.env.PATH;
+    process.env.PATH = emptyDir; // no codex, no claude, nothing resolvable
+    try {
+      assert.equal(await isCodexAvailable(), false, "sanity: codex must be unresolvable on this PATH");
+      const result = await runTask(CODEX_PROFILE, "hi", { harness: "codex", model: "m", write: false });
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /--harness codex requires codex CLI/);
+      assert.match(result.stderr, /npm i -g @openai\/codex/);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  it("codex auth error (ChatGPT account): fails with remediation, never tries claude", async () => {
+    const { dir } = writeFakeCodex("auth");
+    const originalPath = process.env.PATH;
+    process.env.PATH = pathWithFakeBin(dir);
+    try {
+      const result = await runTask(CODEX_PROFILE, "hi", { harness: "codex", model: "m", write: false });
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /ChatGPT account/);
+      // Never the old silent-fallback text, and never an attempt to spawn claude.
+      assert.ok(!result.stderr.includes("claude fallback"), `unexpected leftover fallback wording: ${result.stderr}`);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 15/16 — output normalization (parity with zero/kimi/cline) and
+// fail-loud on absence of a terminal event.
+// ---------------------------------------------------------------------------
+
+function jsonl(...events) {
+  return events.map((e) => JSON.stringify(e)).join("\n") + "\n";
+}
+
+describe("parseCodexJsonl", () => {
+  it("clean success: hasFinal + hasTerminal, finalText from the agent_message", () => {
+    const raw = jsonl(
+      { type: "thread.started", thread_id: "t" },
+      { type: "turn.started" },
+      { type: "item.completed", item: { type: "agent_message", text: "the answer" } },
+      { type: "turn.completed" },
+    );
+    const parsed = parseCodexJsonl(raw);
+    assert.equal(parsed.hasFinal, true);
+    assert.equal(parsed.hasTerminal, true);
+    assert.equal(parsed.finalText, "the answer");
+  });
+
+  it("several agent_message items: the LAST one wins", () => {
+    const raw = jsonl(
+      { type: "item.completed", item: { type: "agent_message", text: "first" } },
+      { type: "item.completed", item: { type: "agent_message", text: "second" } },
+      { type: "item.completed", item: { type: "agent_message", text: "final one" } },
+      { type: "turn.completed" },
+    );
+    assert.equal(parseCodexJsonl(raw).finalText, "final one");
+  });
+
+  it("empty final text is a valid answer when a proper terminal event closes the turn", () => {
+    const raw = jsonl(
+      { type: "item.completed", item: { type: "agent_message", text: "" } },
+      { type: "turn.completed" },
+    );
+    const parsed = parseCodexJsonl(raw);
+    assert.equal(parsed.hasFinal, true);
+    assert.equal(parsed.hasTerminal, true);
+    assert.equal(parsed.finalText, "");
+  });
+
+  it("turn.failed alone: hasTerminal true, hasFinal false (no agent_message)", () => {
+    const raw = jsonl({ type: "turn.failed", error: { message: "boom" } });
+    const parsed = parseCodexJsonl(raw);
+    assert.equal(parsed.hasTerminal, true);
+    assert.equal(parsed.hasFinal, false);
+    assert.equal(parsed.finalText, null);
+  });
+
+  it("no turn.completed/turn.failed/error anywhere: hasTerminal false", () => {
+    const raw = jsonl(
+      { type: "thread.started", thread_id: "t" },
+      { type: "item.completed", item: { type: "agent_message", text: "stray text" } },
+    );
+    // Note: an agent_message CAN appear without the turn ever closing —
+    // hasFinal is true, but hasTerminal must still be false.
+    const parsed = parseCodexJsonl(raw);
+    assert.equal(parsed.hasFinal, true);
+    assert.equal(parsed.hasTerminal, false);
+  });
+
+  it("empty/garbage input: no events, hasTerminal false, hasFinal false", () => {
+    assert.deepStrictEqual(parseCodexJsonl(""), { finalText: null, hasFinal: false, hasTerminal: false });
+    assert.deepStrictEqual(parseCodexJsonl("not json\n{{{\n"), { finalText: null, hasFinal: false, hasTerminal: false });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractCodexThreadId (Task 25/26 continuation reference)
+// ---------------------------------------------------------------------------
+
+describe("extractCodexThreadId", () => {
+  it("extracts thread_id from the thread.started event", () => {
+    const raw = [
+      JSON.stringify({ type: "thread.started", thread_id: "01a0392f-23f3-7212-a164-043fda04d864" }),
+      JSON.stringify({ type: "turn.started" }),
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "ok" } }),
+      JSON.stringify({ type: "turn.completed" }),
+    ].join("\n");
+    assert.equal(extractCodexThreadId(raw), "01a0392f-23f3-7212-a164-043fda04d864");
+  });
+
+  it("no thread.started event → null", () => {
+    const raw = JSON.stringify({ type: "turn.completed" });
+    assert.equal(extractCodexThreadId(raw), null);
+  });
+
+  it("skips corrupt lines and empty input without throwing", () => {
+    assert.equal(extractCodexThreadId("not json\n{broken"), null);
+    assert.equal(extractCodexThreadId(""), null);
+    assert.equal(extractCodexThreadId(null), null);
+  });
+});
+
+describe("shapeCodexResult", () => {
+  it("success: stdout is the final message, rawJsonl keeps the full stream, exitCode preserved", () => {
+    const raw = jsonl(
+      { type: "item.completed", item: { type: "agent_message", text: "OK done" } },
+      { type: "turn.completed" },
+    );
+    const shaped = shapeCodexResult({ stdout: raw, stderr: "", exitCode: 0, signal: null });
+    assert.equal(shaped.stdout, "OK done");
+    assert.equal(shaped.exitCode, 0);
+    assert.equal(shaped.rawJsonl, raw);
+  });
+
+  it("no terminal event: forced to exitCode 1 regardless of the raw exit code", () => {
+    const raw = jsonl({ type: "thread.started", thread_id: "t" });
+    const shaped = shapeCodexResult({ stdout: raw, stderr: "", exitCode: 0, signal: null });
+    assert.equal(shaped.stdout, "");
+    assert.equal(shaped.exitCode, 1, "exit 0 with no terminal event must never read as success");
+    assert.match(shaped.stderr, /no terminal event/);
+    assert.equal(shaped.rawJsonl, raw, "raw stream must still be preserved for the log even on this failure");
+  });
+
+  it("turn.failed with no agent_message: empty stdout, real exit code preserved, rawJsonl kept", () => {
+    const raw = jsonl({ type: "turn.failed", error: { message: "quota exceeded" } });
+    const shaped = shapeCodexResult({ stdout: raw, stderr: "some catalog dump", exitCode: 1, signal: null });
+    assert.equal(shaped.stdout, "");
+    assert.equal(shaped.exitCode, 1);
+    assert.equal(shaped.rawJsonl, raw);
+  });
+
+  it("never leaks the raw JSONL stream into stdout on the success path", () => {
+    const raw = jsonl(
+      { type: "item.completed", item: { type: "agent_message", text: "clean" } },
+      { type: "turn.completed" },
+    );
+    const shaped = shapeCodexResult({ stdout: raw, stderr: "", exitCode: 0, signal: null });
+    assert.ok(!shaped.stdout.includes('"type"'), `stdout must not carry raw JSONL: ${shaped.stdout}`);
   });
 });
 
@@ -351,5 +637,66 @@ describe("CLI task --harness codex failure contract (fake codex, 5 runs)", () =>
       assert.ok(logBody.includes("turn.failed"), `${tag}: log must retain the raw turn.failed JSON`);
       assert.ok(/"data":\s*\[/.test(logBody), `${tag}: log must retain the full stderr catalog`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 15/16 — end-to-end through the real CLI: a clean success renders just
+// the final message (never raw JSONL), and a stream with no terminal event
+// fails loud even though the process itself exited 0.
+// ---------------------------------------------------------------------------
+
+function writeFakeCliConfig() {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-cli-cfg-"));
+  fs.writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      profiles: { fake: { kind: "claude-gateway", baseUrl: "http://127.0.0.1:1", defaultModel: "m", apiKey: "gw-config-secret-abc123" } },
+      defaultProfile: "fake", reviewProfile: "fake", taskProfile: "fake",
+    }),
+  );
+  return configDir;
+}
+
+describe("CLI task --harness codex output normalization (Task 15/16)", () => {
+  it("clean success: CLI stdout is just the final message, never the raw JSONL stream", async () => {
+    const { dir } = writeFakeCodex("success");
+    const configDir = writeFakeCliConfig();
+    const env = { ...process.env, PATH: pathWithFakeBin(dir), GATEWAY_PLUGIN_CONFIG_DIR: configDir };
+
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [COMPANION, "task", "--harness", "codex", "--no-write", "--profile", "fake", "--model", "fake-model-xyz", "reply OK"],
+      { cwd: REPO_ROOT, env, timeout: 30_000 },
+    );
+
+    assert.match(stdout, /CODEX-SUCCESS-FINAL/, "final agent_message text must reach stdout");
+    // last-one-wins: only the LAST agent_message should surface, not the earlier one.
+    assert.ok(!stdout.includes("intermediate remark"), "must not surface an earlier agent_message, only the last one");
+    assert.ok(!stdout.includes('"type":"turn.completed"'), "raw JSONL must not leak to stdout");
+    assert.ok(!stdout.includes('"type":"thread.started"'), "raw JSONL must not leak to stdout");
+  });
+
+  it("no terminal event: fails loud even though the fake process exited 0", async () => {
+    const { dir } = writeFakeCodex("no-terminal");
+    const configDir = writeFakeCliConfig();
+    const env = { ...process.env, PATH: pathWithFakeBin(dir), GATEWAY_PLUGIN_CONFIG_DIR: configDir };
+
+    let stdout = "";
+    let code = 0;
+    try {
+      const r = await execFileAsync(
+        process.execPath,
+        [COMPANION, "task", "--harness", "codex", "--no-write", "--profile", "fake", "--model", "fake-model-xyz", "reply OK"],
+        { cwd: REPO_ROOT, env, timeout: 30_000 },
+      );
+      stdout = r.stdout;
+    } catch (err) {
+      stdout = err.stdout ?? "";
+      code = typeof err.code === "number" ? err.code : 1;
+    }
+
+    assert.notEqual(code, 0, "a stream with no terminal event must never report success, regardless of the raw exit code");
+    assert.ok(stdout.length > 0, "must still report SOMETHING to the agent, not a silent empty success");
   });
 });

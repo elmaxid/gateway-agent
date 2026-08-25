@@ -11,6 +11,15 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "gateway-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+const LOCK_FILE_NAME = "state.lock";
+// Every real holder today does synchronous, sub-millisecond work (load +
+// mutate + save, all sync fs calls) inside the lock -- kept short on purpose
+// so a crashed holder is only presumed abandoned for a few seconds, not
+// tens of seconds. staleMs < timeoutMs so a waiter recovers from a crashed
+// holder by stealing well before its own timeout gives up.
+const LOCK_STALE_MS = 3_000;
+const LOCK_RETRY_MS = 20;
+const LOCK_TIMEOUT_MS = 5_000; // fail loud instead of hanging forever on a stuck holder
 
 function nowIso() {
   return new Date().toISOString();
@@ -55,6 +64,68 @@ export function ensureStateDir(cwd) {
   fs.mkdirSync(resolveJobsDir(cwd), { recursive: true });
 }
 
+function sleepSync(ms) {
+  // No blocking sleep exists in sync Node; Atomics.wait on a throwaway
+  // buffer is the standard synchronous-sleep trick. Fine here: state.mjs's
+  // whole API is deliberately synchronous, and lock waits are short.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Cross-process mutex over one workspace's state directory (index +
+ * per-job files). Returns a release function; caller MUST call it in a
+ * finally block.
+ *
+ * Keep the held section short and synchronous (load + mutate + save). A
+ * lock older than LOCK_STALE_MS is presumed abandoned by a crashed holder
+ * and gets stolen rather than waited on forever — a holder that's merely
+ * slow (e.g. genuinely `await`ing long async work while holding it) would
+ * get its lock stolen out from under it too, breaking mutual exclusion.
+ * Each holder writes a random token so release() only removes the lock if
+ * it's still the one this call created — never a lock a stale-steal gave to
+ * someone else after this holder overstayed.
+ */
+export function acquireStateLock(cwd, { timeoutMs = LOCK_TIMEOUT_MS, staleMs = LOCK_STALE_MS } = {}) {
+  ensureStateDir(cwd);
+  const lockFile = path.join(resolveStateDir(cwd), LOCK_FILE_NAME);
+  const token = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const deadline = Date.now() + timeoutMs;
+
+  for (;;) {
+    try {
+      const fd = fs.openSync(lockFile, "wx");
+      fs.writeSync(fd, token);
+      fs.closeSync(fd);
+      return () => {
+        let held;
+        try {
+          held = fs.readFileSync(lockFile, "utf8");
+        } catch {
+          return; // already gone
+        }
+        if (held === token) {
+          try { fs.unlinkSync(lockFile); } catch { /* raced with a steal, fine */ }
+        }
+      };
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      try {
+        const stat = fs.statSync(lockFile);
+        if (Date.now() - stat.mtimeMs > staleMs) {
+          try { fs.unlinkSync(lockFile); } catch { /* another process already stole it */ }
+          continue;
+        }
+      } catch {
+        continue; // lock vanished between the EEXIST and this stat -- retry create
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out waiting for state lock (${lockFile}) after ${timeoutMs}ms — another process may be stuck.`);
+      }
+      sleepSync(LOCK_RETRY_MS);
+    }
+  }
+}
+
 export function loadState(cwd) {
   const stateFile = resolveStateFile(cwd);
   if (!fs.existsSync(stateFile)) {
@@ -97,12 +168,6 @@ function pruneJobs(jobs) {
     .slice(0, MAX_JOBS);
 }
 
-function removeFileIfExists(filePath) {
-  if (filePath && fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-  }
-}
-
 export function saveState(cwd, state) {
   const previousJobs = loadState(cwd).jobs;
   ensureStateDir(cwd);
@@ -132,10 +197,14 @@ export function saveState(cwd, state) {
 }
 
 export function updateState(cwd, mutate) {
-  // Note: not safe for concurrent multi-process access; last writer wins on simultaneous updates.
-  const state = loadState(cwd);
-  mutate(state);
-  return saveState(cwd, state);
+  const release = acquireStateLock(cwd);
+  try {
+    const state = loadState(cwd);
+    mutate(state);
+    return saveState(cwd, state);
+  } finally {
+    release();
+  }
 }
 
 export function generateJobId(prefix = "job") {
@@ -183,8 +252,13 @@ export function readJobFile(jobFile) {
 }
 
 function removeJobFile(jobFile) {
-  if (fs.existsSync(jobFile)) {
+  // Defense in depth even under the lock: existsSync-then-unlinkSync is its
+  // own TOCTOU. try/catch ENOENT so a file already gone (e.g. removed by an
+  // out-of-band cleanup) never crashes the whole state write.
+  try {
     fs.unlinkSync(jobFile);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
   }
 }
 

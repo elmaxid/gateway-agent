@@ -122,3 +122,61 @@ it("a value option refusing an option token names the offending token", () => {
   assert.match(shortErr.message, /next token "--no-write" is another option/);
   assert.ok(!shortErr.message.includes("="), `short-option message must not offer an inline form: ${shortErr.message}`);
 });
+
+describe("parseArgs rejects unknown options", () => {
+  const config = {
+    valueOptions: ["model"],
+    booleanOptions: ["no-write"],
+    aliasMap: { m: "model" }
+  };
+
+  it("throws on an unrecognized long option", () => {
+    assert.throws(
+      () => parseArgs(["--totally-bogus"], config),
+      /Unknown option "--totally-bogus"/
+    );
+  });
+
+  it("names the offending token verbatim in the long-option error", () => {
+    let err;
+    try {
+      parseArgs(["--totally-bogus"], config);
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err, "expected parseArgs to throw");
+    assert.strictEqual(err.message, 'Unknown option "--totally-bogus".');
+  });
+
+  it("throws on an unrecognized short option", () => {
+    assert.throws(
+      () => parseArgs(["-z"], config),
+      /Unknown option "-z"/
+    );
+  });
+
+  it("names the offending token verbatim in the short-option error", () => {
+    let err;
+    try {
+      parseArgs(["-z"], config);
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err, "expected parseArgs to throw");
+    assert.strictEqual(err.message, 'Unknown option "-z".');
+  });
+
+  it("treats an unrecognized option after -- as a positional (separator guard)", () => {
+    assert.deepStrictEqual(parseArgs(["--", "--totally-bogus"], config), {
+      options: {},
+      positionals: ["--totally-bogus"]
+    });
+  });
+
+  it("still rejects an unrecognized option that appears before --", () => {
+    assert.throws(
+      () => parseArgs(["--totally-bogus", "--", "x"], config),
+      /Unknown option "--totally-bogus"/
+    );
+  });
+});

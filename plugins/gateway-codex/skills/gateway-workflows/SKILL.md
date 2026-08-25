@@ -25,7 +25,7 @@ gateway-companion setup list --json
 | Subcomando | Usar cuando |
 |---|---|
 | `task [--profile P] [--harness claude\|codex\|zero] [--as PERSONA] [--write\|--no-write] [--prompt-file F]` | Delegar una tarea puntual (fix, investigación, implementación) a un perfil/modelo. `PERSONA`: debugger\|reviewer\|security\|researcher\|coder. |
-| `review [--profile P] [--base REF] [--scope auto\|working-tree\|branch] [--include-diff]` | Revisión de código de un diff/branch con un modelo alternativo. |
+| `review [--profile P] [--base REF] [--scope auto\|working-tree\|branch] [--no-tools]` | Revisión de código de un diff/branch con un modelo alternativo. Ruta por defecto es agéntica (el modelo lee el diff por su cuenta vía tools); `--include-diff` solo hace algo junto con `--no-tools`, si no, error. |
 | `adversarial-review [--profile P] [focus]` | Revisión en 2 pasadas: encuentra issues, después filtra falsos positivos. |
 | `staged-review [--profile P] [intent]` | Revisión en 2 fases: cumplimiento de spec primero, calidad de código después. |
 | `debate [--models P1,P2,...] [--rounds N] [--synthesizer NAME] [question]` | Comparar posiciones entre varios modelos y sintetizar una decisión. |
@@ -58,8 +58,8 @@ loop.
 # Tarea puntual, sin escritura, salida legible
 gateway-companion task --profile minimax --as debugger "por qué falla este test: <ruta>"
 
-# Review del diff actual contra main, con el diff incluido, salida JSON
-gateway-companion review --profile glm --base main --include-diff --json
+# Review del diff actual contra main, ruta agéntica por defecto, salida JSON
+gateway-companion review --profile glm --base main --json
 
 # Job en background: lanzar, consultar estado, leer resultado
 gateway-companion task --profile deepseek --background --prompt-file /tmp/prompt.md

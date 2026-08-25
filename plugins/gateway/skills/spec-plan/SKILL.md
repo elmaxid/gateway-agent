@@ -47,6 +47,8 @@ Delegate to the agent chosen in Phase 1.3. `research-planner` is read-only by it
 
 Same reviewer+arbiter shape as implement-plan's Phases 3-4, applied to the drafted spec/plan instead of a diff: discover configured gateway profiles (`gateway-companion.mjs setup list --json`), fan out the draft to 2+ of them for critique, one dedicated opus arbiter verifies every suggestion against the real repo before anything gets folded in — raw unfiltered findings go to the arbiter, same as implement-plan. Skip this phase for every other deliverable tier — it's not free, don't run it by default.
 
+Concrete command, per profile: `gateway-companion.mjs task --profile <name> --no-write --prompt-file <file>`, where `<file>` embeds the draft plus critique instructions — **not** `review`: the draft typically lives under a gitignored path (this repo's own `docs/superpowers/`), and `review`'s target resolution (`git ls-files --others --exclude-standard`) never sees gitignored files, on any route.
+
 ## Phase 6 — Close out (audit + handoff)
 
 Before calling it done:

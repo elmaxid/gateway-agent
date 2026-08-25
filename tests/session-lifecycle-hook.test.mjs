@@ -6,6 +6,11 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { upsertJob, loadState } from "../plugins/gateway/scripts/lib/state.mjs";
+import { resolveWorkspaceRoot } from "../plugins/gateway/scripts/lib/workspace.mjs";
+import { cleanupRunningJobs } from "../plugins/gateway/scripts/session-lifecycle-hook.mjs";
+import { buildSingleJobSnapshot, resolveResultJob } from "../plugins/gateway/scripts/lib/job-control.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOOK = path.join(__dirname, "../plugins/gateway/scripts/session-lifecycle-hook.mjs");
 
@@ -85,5 +90,111 @@ describe("session-lifecycle-hook", () => {
       !written.includes("GATEWAY_TRANSCRIPT_PATH"),
       `Expected no GATEWAY_TRANSCRIPT_PATH in env file when path absent, got:\n${written}`
     );
+  });
+});
+
+// Task 22/23: maintainer decision — background jobs SURVIVE session end
+// (they're spawned detached specifically so they can). cleanupRunningJobs
+// must not terminate a still-running/queued job, and must not remove it
+// from the index either -- both would make the job unreachable/unrecoverable
+// even though its worker process is fine.
+describe("cleanupRunningJobs -- survive-session-end policy (Task 22/23)", () => {
+  function withTempState(fn) {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-hook-survive-data-"));
+    const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-hook-survive-ws-"));
+    const prev = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = dataDir;
+    const workspaceRoot = resolveWorkspaceRoot(wsDir);
+    try {
+      return fn({ dataDir, workspaceRoot });
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+      else process.env.CLAUDE_PLUGIN_DATA = prev;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+      fs.rmSync(wsDir, { recursive: true, force: true });
+    }
+  }
+
+  it("does not terminate a still-running job's real process", () => {
+    withTempState(({ workspaceRoot }) => {
+      // A real, genuinely alive detached process -- proves cleanupRunningJobs
+      // never signals it, not just that it "forgets" to update a status field.
+      const longLived = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", detached: true });
+      try {
+        upsertJob(workspaceRoot, {
+          id: "survivor-job", kind: "task", jobClass: "task", title: "t", workspaceRoot,
+          sessionId: "sess-survive", status: "running", pid: longLived.pid,
+        });
+
+        cleanupRunningJobs(workspaceRoot, workspaceRoot, null, "sess-survive");
+
+        assert.doesNotThrow(() => process.kill(longLived.pid, 0), "the job's real process must still be alive");
+      } finally {
+        longLived.kill("SIGKILL");
+      }
+    });
+  });
+
+  it("does not remove a running or queued job from the index", () => {
+    withTempState(({ workspaceRoot }) => {
+      upsertJob(workspaceRoot, {
+        id: "running-job", kind: "task", jobClass: "task", title: "t", workspaceRoot,
+        sessionId: "sess-survive-2", status: "running", pid: 999999,
+      });
+      upsertJob(workspaceRoot, {
+        id: "queued-job", kind: "task", jobClass: "task", title: "t", workspaceRoot,
+        sessionId: "sess-survive-2", status: "queued", pid: null,
+      });
+
+      cleanupRunningJobs(workspaceRoot, workspaceRoot, null, "sess-survive-2");
+
+      const state = loadState(workspaceRoot);
+      const running = state.jobs.find((j) => j.id === "running-job");
+      const queued = state.jobs.find((j) => j.id === "queued-job");
+      assert.ok(running, "running job must still be in the index");
+      assert.equal(running.status, "running", "status must be untouched");
+      assert.ok(queued, "queued job must still be in the index");
+      assert.equal(queued.status, "queued", "status must be untouched");
+    });
+  });
+
+  it("leaves jobs from OTHER sessions and already-terminal jobs alone too", () => {
+    withTempState(({ workspaceRoot }) => {
+      upsertJob(workspaceRoot, {
+        id: "other-session-job", kind: "task", jobClass: "task", title: "t", workspaceRoot,
+        sessionId: "sess-other", status: "running", pid: 999999,
+      });
+      upsertJob(workspaceRoot, {
+        id: "already-done", kind: "task", jobClass: "task", title: "t", workspaceRoot,
+        sessionId: "sess-survive-3", status: "completed", pid: null,
+      });
+
+      cleanupRunningJobs(workspaceRoot, workspaceRoot, null, "sess-survive-3");
+
+      const state = loadState(workspaceRoot);
+      assert.equal(state.jobs.find((j) => j.id === "other-session-job")?.status, "running");
+      assert.equal(state.jobs.find((j) => j.id === "already-done")?.status, "completed");
+    });
+  });
+
+  it("a job left running past session end is still reported correctly once it completes naturally", () => {
+    withTempState(({ workspaceRoot }) => {
+      upsertJob(workspaceRoot, {
+        id: "finishes-later", kind: "task", jobClass: "task", title: "t", workspaceRoot,
+        sessionId: "sess-survive-4", status: "running", pid: 999999,
+      });
+
+      cleanupRunningJobs(workspaceRoot, workspaceRoot, null, "sess-survive-4");
+
+      // Simulate the worker finishing normally, same as it would with no
+      // session-end event involved at all.
+      upsertJob(workspaceRoot, { id: "finishes-later", status: "completed", pid: null, completedAt: new Date().toISOString() });
+
+      const snapshot = buildSingleJobSnapshot(workspaceRoot, "finishes-later");
+      assert.equal(snapshot.job.status, "completed");
+
+      const resultJob = resolveResultJob(workspaceRoot, "finishes-later");
+      assert.equal(resultJob.job.status, "completed");
+    });
   });
 });

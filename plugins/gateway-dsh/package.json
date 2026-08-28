@@ -1,0 +1,54 @@
+{
+  "name": "dsh-gateway-agent",
+  "version": "0.1.0",
+  "description": "Delega tareas, reviews y debates a modelos alternativos (DeepSeek, MiniMax, Ollama, etc.) vía el CLI gateway-companion, sin MCP.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "SKILL.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "homepage": "https://github.com/elmaxid/gateway-agent/tree/main/plugins/gateway-dsh",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "cordis",
+    "agent-skill",
+    "gateway",
+    "llm",
+    "multi-model"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "elmaxi"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elmaxid/gateway-agent.git",
+    "directory": "plugins/gateway-dsh"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.1.0-rc.8 <0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  }
+}

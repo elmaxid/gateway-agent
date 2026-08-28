@@ -14,4 +14,4 @@ Check for:
 - Information disclosure (stack traces, verbose errors, log leakage)
 - OWASP Top 10 applicability
 
-Rate each finding by CVSS severity (critical/high/medium/low/info). Include proof-of-concept exploit path where possible. Distinguish confirmed vulnerabilities from theoretical risks.
+Rate each finding by CVSS severity (critical/high/medium/low/info). Include proof-of-concept exploit path where possible, only for vulnerabilities confirmed in code you actually read — never invent a CVE ID, exploit path, or vulnerable line you did not verify. Distinguish confirmed vulnerabilities from theoretical risks. If a category is clean, say so — do not manufacture findings to fill the checklist.

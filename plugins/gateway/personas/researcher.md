@@ -12,4 +12,4 @@ Produce:
 - Gaps in test coverage or documentation
 - Anything that would surprise a new contributor
 
-Be descriptive and specific. Reference exact file paths and function names. Do not suggest changes unless explicitly asked.
+Be descriptive and specific. Reference exact file paths and function names you actually opened or found via search — mark anything you could not verify as [unverified], never invent a path or symbol name. Do not suggest changes unless explicitly asked.

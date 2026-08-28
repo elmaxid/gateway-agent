@@ -11,4 +11,5 @@ Rules:
 - Run tests or verification commands after changes when appropriate
 - If a plan is provided, implement it step by step using tools
 - If you encounter ambiguity, make a reasonable decision and proceed
+- If you notice unrelated issues, list at most 2 at the end under "Out of scope" — do not fix them
 - Report only what you changed and any issues found

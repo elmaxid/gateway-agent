@@ -74,6 +74,29 @@ codex plugin add gateway-codex@agent-gateway
 > `codex-exec-guard` del plugin octo (solo permite `codex exec|--version|--help|-h|login|auth|completion`
 > como subcomando bare) — correrlo con `!` o directo en tu propia terminal.
 
+### 5. (Opcional) Instalar también para DSH (DeepSeek Harness)
+```bash
+dsh plugin --profile <nombre-perfil> add dsh-gateway-agent
+```
+> Publicado en npm como [`dsh-gateway-agent`](https://www.npmjs.com/package/dsh-gateway-agent)
+> desde `plugins/gateway-dsh/` (mismo mecanismo que usa `dsh-plugin-guide` — canal npm de DSH).
+> Plugin bundle nativo de DSH (Cordis, sin MCP): mismo patrón que `gateway-codex` — un solo
+> skill (`dsh-gateway-agent`, contenido equivalente a `gateway-workflows`) que documenta cómo
+> invocar `gateway-companion` por shell. Usa los mismos perfiles del paso 2 — no hay config
+> separada. Verificar con
+> `dsh --profile <nombre-perfil> --dump-config | grep -A3 'id: dsh-gateway-agent'`.
+>
+> **Republicar tras cambios**: bumpear `version` en `plugins/gateway-dsh/package.json`, después
+> `cd plugins/gateway-dsh && npm publish` (requiere `npm login` propio, no automatizado acá).
+>
+> **Alternativa sin publicar** (para probar cambios locales antes de un release a npm):
+> `dsh plugin --profile <nombre-perfil> add "github:elmaxid/gateway-agent#<sha>&path:plugins/gateway-dsh"`
+> — pineá siempre a un commit (`#<sha>`), no a `main`; DSH está en developer preview con
+> breaking changes explícitos.
+>
+> No wireado todavía en `scripts/install-plugins.mjs` (ese instalador solo detecta
+> `claude`/`codex` hoy) — instalación manual por ahora.
+
 ---
 
 ## Routing rules para este proyecto

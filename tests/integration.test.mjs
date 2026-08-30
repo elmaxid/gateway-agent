@@ -3,7 +3,7 @@
  * deepseek-pro configured in ~/.gateway-plugin/config.json; no env vars).
  *
  * Covers:
- *   - Connectivity + model routing for glm-5.2, deepseek-v4-pro
+ *   - Connectivity + model routing for glm (glm-5.3-flash), deepseek-v4-pro
  *   - Direct HTTP review (api-client chatCompletion)
  *   - Task via claude harness (subprocess)
  *   - Task via codex harness

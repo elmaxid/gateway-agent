@@ -28,7 +28,7 @@ claude plugin marketplace add https://github.com/elmaxid/gateway-agent.git
 claude plugin install gateway@agent-gateway
 # reiniciar Claude Code
 
-# 2. Configurar un perfil (mínimo uno; ver "Configuración inicial" para el setup completo con 11 perfiles)
+# 2. Configurar un perfil (mínimo uno; ver "Configuración inicial" para el setup completo con 2 perfiles)
 node plugins/gateway/scripts/bootstrap-profiles.mjs --url http://TU_GATEWAY:4000 --api-key sk-...
 ```
 
@@ -36,7 +36,7 @@ Dentro de Claude Code:
 
 ```
 # 3. Verificar que conecta
-/gateway:setup test --profile minimax
+/gateway:setup test --profile glm
 
 # 4. Primer review — revisa el diff actual de tu working tree
 /gateway:review
@@ -45,7 +45,7 @@ Dentro de Claude Code:
 /gateway:task "agregá un test para la función X"
 
 # 6. Primer dispatch — distribuye varias tareas de un plan entre modelos en paralelo
-/gateway:dispatch --task "explica qué hace config.mjs:minimax" --dry-run
+/gateway:dispatch --task "explica qué hace config.mjs:glm" --dry-run
 ```
 
 De acá en adelante, cada comando tiene su propia sección más abajo con flags completos y ejemplos. `/gateway:work "<lo que necesites>"` es el punto de entrada más simple si no estás seguro de qué comando usar — hace auto-routing por keywords. Si preferís elegir vos (o querés ver el mapa completo de comandos, agentes y skills), `/gateway:pick-tool "<lo que necesites>"` te enruta sin ejecutar nada.
@@ -268,27 +268,25 @@ node plugins/gateway/scripts/bootstrap-profiles.mjs \
   --api-key sk-...
 ```
 
-Crea los 11 perfiles estándar con roles correctos de una vez:
+Crea los 2 perfiles que realmente usa el routing por defecto:
 
 | Perfil | Modelo | Uso |
 |--------|--------|-----|
-| `minimax` | `minimax-m3` | default + task — análisis, síntesis |
+| `glm` | `glm-5.3-flash` | default + task — coding, research |
 | `deepseek-pro` | `deepseek-v4-pro` | review — razonamiento profundo |
-| `deepseek-flash` | `deepseek-v4-flash` | iteración rápida |
-| `glm` | `glm-5.2` | coding, research — large context |
-| `nemotron` | `nemotron-3-ultra` | seguridad, razonamiento |
-| `kimi-think` | `kimi-k2-thinking` | debug, análisis profundo |
-| `kimi-code` | `kimi-k2.6` | coding |
-| `devstral` | `devstral-2:123b` | coding especializado |
-| `cogito` | `cogito-2.1:671b` | debate, seguridad, adversarial |
-| `gemini-flash` | `gemini-flash` | iteración rápida, bajo costo |
-| `gemini-pro` | `gemini-pro` | razonamiento general, largo contexto |
+
+Un perfil es conexión (baseUrl/kind/credenciales) + modelo por defecto — no una
+"especialidad". La especialidad la da `--as <persona>` al momento de invocar, y
+un modelo puntual distinto es `--model <nombre>` sobre el mismo perfil — ninguno
+de los dos necesita un perfil dedicado. Sumá más perfiles solo cuando una
+feature realmente necesite una segunda identidad distinta (`/gateway:debate
+--models a,b`, `dispatch --cross-review`), vía `setup wizard` o `setup add`.
 
 También acepta variables de entorno: `GATEWAY_URL` y `GATEWAY_API_KEY`.
 
-### Opción B: wizard interactivo (para elegir modelos fuera de los 11 estándar)
+### Opción B: wizard interactivo (para elegir modelos fuera de los 2 estándar)
 
-El gateway suele exponer más modelos que los 11 de la Opción A. `setup wizard`
+El gateway suele exponer más modelos que los 2 de la Opción A. `setup wizard`
 lista todos, marca los ya configurados, y agrega por número — sin escribir un
 `setup add` por modelo.
 
@@ -296,17 +294,17 @@ Necesita un perfil ya conectado para poder listar modelos, así que primero un
 bootstrap manual de uno solo:
 
 ```
-/gateway:setup add --profile minimax --url http://GATEWAY:4000 --model minimax-m3:cloud --kind claude-gateway --api-key sk-...
+/gateway:setup add --profile glm --url http://GATEWAY:4000 --model glm-5.3-flash --kind claude-gateway --api-key sk-...
 ```
 
 Después, el wizard — es interactivo (pide input por stdin), así que corre
 **directo en una terminal real**, no vía slash command:
 
 ```bash
-node plugins/gateway/scripts/gateway-companion.mjs setup wizard --source minimax
+node plugins/gateway/scripts/gateway-companion.mjs setup wizard --source glm
 ```
 
-(o `!node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" setup wizard --source minimax`
+(o `!node "${CLAUDE_PLUGIN_ROOT}/scripts/gateway-companion.mjs" setup wizard --source glm`
 desde el prompt de Claude Code — el `!` corre en tu shell real, no por el Bash
 tool del modelo)
 
@@ -315,12 +313,11 @@ tool del modelo)
 Desde Claude Code, usar `/gateway:setup add` para cada endpoint:
 
 ```
-/gateway:setup add --profile minimax --url http://GATEWAY:4000 --model minimax-m3:cloud --kind claude-gateway --api-key sk-...
+/gateway:setup add --profile glm --url http://GATEWAY:4000 --model glm-5.3-flash --kind claude-gateway --api-key sk-...
 /gateway:setup add --profile deepseek-pro --url http://GATEWAY:4000 --model deepseek-v4-pro:cloud --kind claude-gateway --api-key sk-...
-/gateway:setup add --profile deepseek-flash --url http://GATEWAY:4000 --model deepseek-v4-flash:cloud --kind claude-gateway --api-key sk-...
-/gateway:setup set-default --profile minimax
+/gateway:setup set-default --profile glm
 /gateway:setup set-review-profile --profile deepseek-pro
-/gateway:setup set-task-profile --profile minimax
+/gateway:setup set-task-profile --profile glm
 ```
 
 ### Listar perfiles configurados
@@ -332,20 +329,20 @@ Desde Claude Code, usar `/gateway:setup add` para cada endpoint:
 ### Probar conectividad
 
 ```
-/gateway:setup test --profile minimax
+/gateway:setup test --profile glm
 ```
 
 ### Establecer perfil por defecto
 
 ```
-/gateway:setup set-default --profile minimax
+/gateway:setup set-default --profile glm
 ```
 
 ### Configurar perfiles separados para review y task
 
 ```
-/gateway:setup set-review-profile --profile deepseek-flash
-/gateway:setup set-task-profile --profile minimax
+/gateway:setup set-review-profile --profile deepseek-pro
+/gateway:setup set-task-profile --profile glm
 ```
 
 ### Eliminar un perfil
@@ -357,7 +354,7 @@ Desde Claude Code, usar `/gateway:setup add` para cada endpoint:
 ### Cambiar modelo de un perfil (sin remove+add)
 
 ```
-/gateway:setup set-model --profile minimax --model minimax-m3:cloud-v2
+/gateway:setup set-model --profile glm --model glm-5.3
 /gateway:setup set-model --profile deepseek-pro --model deepseek-v4-pro:latest
 ```
 
@@ -387,7 +384,7 @@ Review del diff actual usando el LLM configurado.
 ```
 /gateway:review
 /gateway:review --profile deepseek-flash
-/gateway:review --profile minimax --model minimax-m3:cloud
+/gateway:review --profile glm --model deepseek-v4-pro  # mismo endpoint/credenciales, otro modelo puntual
 /gateway:review --base main --head HEAD
 /gateway:review --scope branch
 /gateway:review --json
@@ -466,7 +463,7 @@ Review de 2 fases: Fase 1 evalúa spec compliance (¿el código hace lo que dice
     "firstPass": { "content": "...", "model": "..." },
     "filtered": { "content": "...", "model": "..." }
   },
-  "meta": { "profile": "minimax", "model": "minimax-m3", "target": "working-tree" }
+  "meta": { "profile": "glm", "model": "glm-5.3-flash", "target": "working-tree" }
 }
 ```
 
@@ -528,16 +525,16 @@ Distribuye varias tareas de implementación across múltiples modelos gateway en
 
 ```
 /gateway:dispatch --plan tasks/plan.md
-/gateway:dispatch --plan tasks/plan.md --assign "1-3:minimax,4-6:glm" --cross-review deepseek-pro
-/gateway:dispatch --task "add retry:minimax" --task "fix auth:glm"
-/gateway:dispatch --plan tasks/plan.md --model-override minimax:minimax-m3 --max-concurrency 4
+/gateway:dispatch --plan tasks/plan.md --assign "1-3:deepseek-flash,4-6:glm" --cross-review deepseek-pro
+/gateway:dispatch --task "add retry:deepseek-flash" --task "fix auth:glm"
+/gateway:dispatch --plan tasks/plan.md --model-override glm:glm-5.3 --max-concurrency 4
 /gateway:dispatch --plan tasks/plan.md --dry-run
 ```
 
 **Flags:**
 - `--plan FILE` — archivo de plan; cada sección `## Task N` se convierte en una tarea. Mutuamente excluyente con `--task`
 - `--task PROMPT:PROFILE` — tarea inline (repetible). El sufijo `:PROFILE` es opcional (usa el taskProfile por defecto). Mutuamente excluyente con `--plan`
-- `--assign RANGES` — asigna rangos de task IDs a perfiles, ej. `1-3:minimax,4-6:glm`. Solo válido con `--plan`
+- `--assign RANGES` — asigna rangos de task IDs a perfiles, ej. `1-3:deepseek-flash,4-6:glm`. Solo válido con `--plan`
 - `--model-override PROF:MODEL` — override de modelo para un perfil (repetible)
 - `--max-concurrency N` — máximo de tareas concurrentes por endpoint (1-16, default 3)
 - `--harness claude|codex|zero|kimi|cline` — harness de ejecución por tarea (default `codex`; codex, zero, kimi y cline requieren su CLI instalado; kimi no soporta `--no-write`)
@@ -582,15 +579,15 @@ Distribuye varias tareas de implementación across múltiples modelos gateway en
 2. Repartir las 3 tareas entre 2 perfiles y pedir cross-review con un tercero:
 
    ```bash
-   /gateway:dispatch --plan tasks/refactor-plan.md --assign "1-2:minimax,3:glm" --cross-review deepseek-pro
+   /gateway:dispatch --plan tasks/refactor-plan.md --assign "1-2:deepseek-flash,3:glm" --cross-review deepseek-pro
    ```
 
 3. Salida esperada (resumida):
 
    ```
    [dispatch] job dispatch-mfx2a1-k9j3lp — 3 tasks, base a1b2c3d
-   [dispatch] task 1 (minimax): done 12s — patch task-001.patch
-   [dispatch] task 2 (minimax): done 18s — patch task-002.patch
+   [dispatch] task 1 (deepseek-flash): done 12s — patch task-001.patch
+   [dispatch] task 2 (deepseek-flash): done 18s — patch task-002.patch
    [dispatch] task 3 (glm): no changes
    [dispatch] Cross-review: 2 tasks by deepseek-pro
    [dispatch] task 1: 0 findings — task 2: 1 finding (minor)
@@ -612,7 +609,7 @@ Distribuye varias tareas de implementación across múltiples modelos gateway en
 5. Si algo falla, el log de esa tarea puntual está en `.gateway-dispatch/<jobId>/logs/task-00N.log`; el resto de las tareas no se ven afectadas (excepto con `--fail-fast`).
 
 **Notas prácticas:**
-- `--max-concurrency` es por endpoint (por `baseUrl` normalizado), no global — si `minimax` y `glm` apuntan a gateways distintos, cada uno tiene su propio límite de tareas concurrentes.
+- `--max-concurrency` es por endpoint (por `baseUrl` normalizado), no global — si `deepseek-pro` y `glm` apuntan a gateways distintos, cada uno tiene su propio límite de tareas concurrentes.
 - Si el working tree tiene cambios sin commitear, el preflight avisa: las worktrees se crean desde `HEAD`, así que uncommitted changes no viajan a las tareas.
 - `--task "prompt:profile"` sin `:profile` usa el `taskProfile` configurado por defecto — útil para pruebas rápidas como el paso 6 del Quick Start.
 - Dos `dispatch` corriendo al mismo tiempo sobre el mismo repo no se pisan: cada job activo se marca con un `active.lock` (PID) bajo `.gateway-dispatch/<jobId>/`; un job nuevo salta los directorios de jobs activos de otro proceso al limpiar worktrees huérfanas, y nunca borra `patches/`, `logs/`, `reviews/` ni `manifest.json` de jobs ya completados — solo las worktrees huérfanas.
@@ -651,7 +648,7 @@ Debate multi-modelo entre endpoints configurados. HTTP puro, sin subprocesses.
 
 ```
 /gateway:debate "¿usar sqlite o postgres para este proyecto?"
-/gateway:debate --models deepseek-pro,minimax "arquitectura propuesta"
+/gateway:debate --models deepseek-pro,glm "arquitectura propuesta"
 /gateway:debate --rounds 2 --synthesizer deepseek-pro "REST vs GraphQL"
 /gateway:debate --json "mejor approach para caching"
 /gateway:debate --include-diff "revisar estos cambios entre los modelos"
@@ -760,10 +757,10 @@ Guardado en `~/.gateway-plugin/config.json` (o `$GATEWAY_PLUGIN_CONFIG_DIR/confi
 ```json
 {
   "profiles": {
-    "minimax": {
+    "glm": {
       "kind": "claude-gateway",
       "baseUrl": "http://GATEWAY:4000",
-      "defaultModel": "minimax-m3",
+      "defaultModel": "glm-5.3-flash",
       "authToken": "YOUR_API_KEY_HERE"
     },
     "deepseek-pro": {
@@ -771,17 +768,11 @@ Guardado en `~/.gateway-plugin/config.json` (o `$GATEWAY_PLUGIN_CONFIG_DIR/confi
       "baseUrl": "http://GATEWAY:4000",
       "defaultModel": "deepseek-v4-pro",
       "authToken": "YOUR_API_KEY_HERE"
-    },
-    "glm": {
-      "kind": "claude-gateway",
-      "baseUrl": "http://GATEWAY:4000",
-      "defaultModel": "glm-5.2",
-      "authToken": "YOUR_API_KEY_HERE"
     }
   },
-  "defaultProfile": "minimax",
+  "defaultProfile": "glm",
   "reviewProfile": "deepseek-pro",
-  "taskProfile": "minimax"
+  "taskProfile": "glm"
 }
 ```
 
@@ -795,17 +786,14 @@ El gateway expone modelos vía `GET /v1/models`. Modelos confirmados en producci
 
 | Modelo | Uso recomendado | Notas |
 |--------|----------------|-------|
-| `minimax-m3` | Análisis estructurado, reviews, síntesis | default + taskProfile |
 | `deepseek-v4-pro` | Razonamiento profundo, review, segunda opinión | reviewProfile |
 | `deepseek-v4-flash` | Tareas rápidas, iteración | — |
-| `glm-5.2` | Coding, research — large context | thinking model: output en `reasoning_content` |
+| `glm-5.3-flash` | Coding, research — default + taskProfile | thinking model: output en `reasoning_content` |
 | `nemotron-3-ultra` | Seguridad, razonamiento, análisis adversarial | — |
 | `kimi-k2-thinking` | Debug, razonamiento paso a paso | thinking model |
 | `kimi-k2.6` | Coding general | — |
 | `devstral-2:123b` | Coding especializado (Mistral, 123B) | — |
 | `cogito-2.1:671b` | Debate, seguridad, crítica (671B) | — |
-| `gemini-flash` | Iteración rápida, bajo costo | — |
-| `gemini-pro` | Razonamiento general, largo contexto | — |
 
 Para listar modelos disponibles en tu gateway:
 
@@ -953,7 +941,7 @@ Si en el paso 1 el pedido amerita revisión multi-modelo del spec en sí (decisi
 ```bash
 cd /path/to/agent-plugin-cc
 
-# Suite completa — los 37 archivos tests/*.test.mjs (689 tests).
+# Suite completa — los 40 archivos tests/*.test.mjs (704 tests).
 node --test tests/*.test.mjs
 
 # Nota: integration.test.mjs (9 tests) requiere un gateway activo y alcanzable;
@@ -961,9 +949,9 @@ node --test tests/*.test.mjs
 node --test --test-timeout=120000 tests/integration.test.mjs
 ```
 
-**Suite completa:** 689 tests — 680 sin red + 9 de integración. Los 680 sin red no requieren gateway: usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real. Cubren toda la superficie del CLI, incluyendo la de v0.5.2: background jobs (`background-jobs`), redaction/contrato de error (`redaction`, `setup-output-redaction`), baseline-capture (`baseline-capture`), `version --json` (`version`) y los tres harnesses (`claude-subprocess`, `codex-harness`, `zero-harness`). Los de mayor cobertura son dispatch (82) y zero-harness (36 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping).
+**Suite completa:** 704 tests — 695 sin red + 9 de integración. Los 695 sin red no requieren gateway: usan `http.createServer`/`net.createServer` locales o repos git temporales cuando necesitan simular un backend, nunca el gateway real. Cubren toda la superficie del CLI, incluyendo la de v0.5.2: background jobs (`background-jobs`), redaction/contrato de error (`redaction`, `setup-output-redaction`), baseline-capture (`baseline-capture`), `version --json` (`version`) y los tres harnesses (`claude-subprocess`, `codex-harness`, `zero-harness`). Los de mayor cobertura son dispatch (82) y zero-harness (36 — JSONL parsing, env/args building, provider resolution, preflight guards, result shaping).
 
-**Integration tests:** 9 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness y task via codex harness (cada uno contra los 2 modelos principales: glm-5.2, deepseek-v4-pro), más task via zero harness (solo glm-5.2).
+**Integration tests:** 9 tests contra el gateway live — conectividad, review HTTP directo, task via claude harness y task via codex harness (cada uno contra los 2 modelos principales: glm-5.3-flash, deepseek-v4-pro), más task via zero harness (solo glm-5.3-flash).
 
 ## Hooks del ciclo de sesión
 
@@ -985,7 +973,7 @@ Formato: una línea por entrada con timestamp ISO.
 
 ```
 [2026-06-02T21:23:49.708Z] Starting Gateway Task.
-[2026-06-02T21:23:49.881Z] Delegating task to minimax (minimax-m3:cloud)...
+[2026-06-02T21:23:49.881Z] Delegating task to glm (glm-5.3-flash)...
 [2026-06-02T21:23:58.528Z] ## Archivos .mjs del proyecto
 ...
 [2026-06-02T21:23:59.106Z] Final output
@@ -1110,7 +1098,7 @@ rm ~/.gateway-plugin/config.json
 
 MIT — ver [LICENSE](LICENSE).
 
-**Versión actual:** v0.5.4
+**Versión actual:** v0.6.4
 
 ## Créditos
 

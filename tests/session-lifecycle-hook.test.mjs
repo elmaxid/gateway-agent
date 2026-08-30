@@ -20,11 +20,13 @@ function runHook(input, env) {
       stdio: ["pipe", "pipe", "pipe"],
       env,
     });
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
     child.on("close", (code) => {
       if (code !== 0) reject(new Error(`Hook exited ${code}: ${stderr}`));
-      else resolve();
+      else resolve(stdout);
     });
     child.stdin.write(input);
     child.stdin.end();
@@ -90,6 +92,24 @@ describe("session-lifecycle-hook", () => {
       !written.includes("GATEWAY_TRANSCRIPT_PATH"),
       `Expected no GATEWAY_TRANSCRIPT_PATH in env file when path absent, got:\n${written}`
     );
+  });
+
+  it("emits an additionalContext routing index derived from pick-tool, excluding model-invocation-disabled commands", async () => {
+    const input = JSON.stringify({
+      hook_event_name: "SessionStart",
+      session_id: "test-session-789"
+    });
+
+    const stdout = await runHook(input, {
+      ...process.env,
+      CLAUDE_ENV_FILE: path.join(tmpDir, "claude-routing.env"),
+      GATEWAY_PLUGIN_CONFIG_DIR: tmpDir
+    });
+
+    const output = JSON.parse(stdout);
+    const ctx = output.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /Skill\(gateway:spec-plan\)/, `Expected a real pick-tool entry in additionalContext, got:\n${ctx}`);
+    assert.doesNotMatch(ctx, /\/gateway:status/, `Expected model-invocation-disabled commands excluded, got:\n${ctx}`);
   });
 });
 

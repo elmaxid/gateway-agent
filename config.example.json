@@ -4,7 +4,7 @@
     "ollama-local": {
       "kind": "claude-gateway",
       "baseUrl": "http://YOUR_OLLAMA_HOST:11434",
-      "defaultModel": "minimax-m3:cloud",
+      "defaultModel": "llama3.3:70b",
       "authToken": "ollama"
     },
     "my-gateway": {

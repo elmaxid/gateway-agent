@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { loadState, resolveStateFile } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
+import { buildRoutingContext } from "./lib/routing-index.mjs";
 
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 export const TRANSCRIPT_PATH_ENV = "GATEWAY_TRANSCRIPT_PATH";
@@ -72,17 +73,6 @@ export function cleanupRunningJobs(cwd, workspaceRoot, stateFile, sessionId) {
   }
 }
 
-const GATEWAY_ROUTING_CONTEXT = `<gateway-routing-rules>
-Gateway plugin active. Prefer these tools for delegation to alternative LLMs:
-- Code review before commit → /gateway:review
-- Multi-model debate / architecture decision → /gateway:debate --include-diff
-- Adversarial 2-pass review → /gateway:adversarial-review --include-diff
-- Feature implementation → gateway:gateway-coder
-- Bug investigation → gateway:gateway-debugger
-- Codebase exploration → gateway:gateway-researcher
-Run /gateway:setup to see configured profiles and endpoints.
-</gateway-routing-rules>`;
-
 function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
@@ -90,7 +80,7 @@ function handleSessionStart(input) {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "SessionStart",
-      additionalContext: GATEWAY_ROUTING_CONTEXT
+      additionalContext: buildRoutingContext()
     }
   }) + "\n");
 }

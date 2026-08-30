@@ -1,6 +1,6 @@
 {
   "name": "dsh-gateway-agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Delega tareas, reviews y debates a modelos alternativos (DeepSeek, MiniMax, Ollama, etc.) vía el CLI gateway-companion, sin MCP.",
   "type": "module",
   "main": "index.js",

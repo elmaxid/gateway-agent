@@ -1,6 +1,6 @@
 {
   "name": "gateway",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Route reviews, tasks, debates, and specialized AI personas to Ollama, DeepSeek, MiniMax and other OpenAI-compatible endpoints. 5-harness (claude/codex/zero/kimi/cline), prompt shaping, auto-routing.",
   "author": {
     "name": "elmaxi"

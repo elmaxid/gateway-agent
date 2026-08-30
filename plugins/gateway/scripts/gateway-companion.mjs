@@ -13,6 +13,7 @@ import { runAgenticReview } from "./lib/agentic-review.mjs";
 import { runClaudeTask } from "./lib/claude-subprocess.mjs";
 import { runTask, extractCodexFailure, extractCodexThreadId } from "./lib/codex-harness.mjs";
 import { runZeroTask, isZeroAvailable, getZeroProvider, zeroPreflightError, urlsMatch } from "./lib/zero-harness.mjs";
+import { findSiblingModels } from "./lib/model-siblings.mjs";
 import { runKimiTask, isKimiAvailable, getKimiConfigPath, readKimiConfig, kimiPreflightError, getKimiProviderApiKey, extractKimiSessionId } from "./lib/kimi-harness.mjs";
 import { runClineTask, isClineAvailable, getClineConfigPath, readClineConfig, clinePreflightError, getClineProviderApiKey } from "./lib/cline-harness.mjs";
 import { HARNESSES, HARNESS_CAPABILITIES, validateHarnessCombo } from "./lib/harness-capabilities.mjs";
@@ -526,6 +527,28 @@ async function handleSetup(argv) {
         task:    config.taskProfile    ?? null,
       };
 
+      // Best-effort: surface other models sharing the configured model's family
+      // (e.g. glm-5.2 vs glm-5.3/glm-5.3-flash) for the profiles actually used
+      // by default/review/task, so a stale role-profile model doesn't silently
+      // go unnoticed. A flaky /v1/models call must never break `doctor`.
+      const roleModelSiblings = {};
+      for (const profileName of new Set(Object.values(roles).filter(Boolean))) {
+        const profile = config.profiles[profileName];
+        if (!profile) continue;
+        try {
+          const liveModels = await listModels(profile);
+          const siblings = findSiblingModels(profile.defaultModel, liveModels);
+          if (siblings.length > 0) roleModelSiblings[profileName] = siblings;
+        } catch {
+          // best-effort only — skip silently, doctor must still complete
+        }
+      }
+      const roleNote = (profileName) => {
+        const siblings = roleModelSiblings[profileName];
+        if (!siblings || siblings.length === 0) return "";
+        return `  [other models available for ${profileName}: ${siblings.join(", ")} — setup set-model --profile ${profileName} --model <name>]`;
+      };
+
       if (options.json) {
         const profilesMap = {};
         for (const p of profileResults) {
@@ -534,6 +557,7 @@ async function handleSetup(argv) {
             latency_ms: p.latencyMs,
             model: p.model,
             ...(p.error && { error: p.error }),
+            ...(roleModelSiblings[p.name] && { otherModelsAvailable: roleModelSiblings[p.name] }),
           };
         }
         const checks = {
@@ -599,9 +623,9 @@ async function handleSetup(argv) {
 
         lines.push("");
         lines.push("[roles]");
-        lines.push(`  default → ${roles.default ?? "(unset)"}`);
-        lines.push(`  review  → ${roles.review  ?? "(unset)"}`);
-        lines.push(`  task    → ${roles.task    ?? "(unset)"}`);
+        lines.push(`  default → ${roles.default ?? "(unset)"}${roles.default ? roleNote(roles.default) : ""}`);
+        lines.push(`  review  → ${roles.review  ?? "(unset)"}${roles.review  ? roleNote(roles.review)  : ""}`);
+        lines.push(`  task    → ${roles.task    ?? "(unset)"}${roles.task    ? roleNote(roles.task)    : ""}`);
 
         console.log(lines.join("\n"));
       }

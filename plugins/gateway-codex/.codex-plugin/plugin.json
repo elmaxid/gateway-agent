@@ -1,6 +1,6 @@
 {
   "name": "gateway-codex",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Delega tareas, reviews y debates a modelos alternativos (DeepSeek, MiniMax, Ollama, etc.) vía el CLI gateway-companion, sin MCP.",
   "author": {
     "name": "elmaxi"

@@ -8,3 +8,4 @@ docs/superpowers/
 .gateway-dispatch/
 tasks/
 docs/no_track/
+.claude/agent-memory/

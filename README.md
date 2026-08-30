@@ -251,11 +251,41 @@ Debe listar `gateway-codex@agent-gateway` como instalado.
 
 ### Qué expone
 
-El skill `gateway-workflows` (`plugins/gateway-codex/skills/gateway-workflows/SKILL.md`) documenta para Codex los mismos subcomandos que Claude Code expone vía `/gateway:*` — `task`, `review`, `adversarial-review`, `staged-review`, `debate`, `dispatch`, `transfer`, `status`, `result`, `cancel`, `setup` — más las reglas de seguridad: no secretos en el prompt, `--prompt-file` para prompts largos, `--no-write` por defecto, no fallback silencioso entre harnesses.
+El skill `gateway-workflows` (`plugins/gateway-codex/skills/gateway-workflows/SKILL.md`) documenta para Codex los mismos subcomandos que Claude Code expone vía `/gateway:*` — `task`, `review`, `adversarial-review`, `staged-review`, `debate`, `dispatch`, `transfer`, `status`, `result`, `cancel`, `setup` — más las reglas de seguridad: no secretos en el prompt, `--prompt-file` para prompts largos, `--write` es el default real (usar `--no-write` explícito cuando corresponda), no fallback silencioso entre harnesses.
 
 ### Limitación conocida: sandbox anidado
 
 Invocar `gateway-companion task --harness codex` (o `claude`) desde **dentro** de una sesión de Codex ya activa puede colgarse o fallar sin log útil — es Codex invocándose a sí mismo anidado, no un bug del CLI. `debate`/`review`/`staged-review`/`transfer` son HTTP directo (sin subprocess) y no tienen ese problema. Ante `fetch failed` o un colgado, correr `gateway-companion setup test --profile <nombre>` primero para descartar que sea el perfil (sin cupo/token en el router) antes de sospechar del harness.
+
+## Kimi Code
+
+Además del plugin de Claude Code, el repo incluye un plugin nativo para [Kimi Code](https://moonshotai.github.io/kimi-code/) — sin servidor MCP, solo un skill (`gateway-workflows`) que le enseña a Kimi Code a invocar el mismo CLI `gateway-companion` por shell. Los perfiles configurados (`~/.gateway-plugin/config.json`) son compartidos — no hay configuración separada para Kimi Code. No confundir con el [harness kimi](#kimi-harness): esto es instalar el plugin para que Kimi Code sea **cliente** del gateway, no configurar el gateway para delegar **hacia** kimi.
+
+### Instalación
+
+Kimi Code instala plugins desde un path local o una URL de GitHub, vía slash command dentro de su propia TUI (no hay wrapper en `scripts/install-plugins.mjs` todavía — instalación manual):
+
+```
+/plugins install /path/to/agent-plugin-cc/plugins/gateway-kimi
+```
+
+o directo desde GitHub, sin clonar:
+
+```
+/plugins install https://github.com/elmaxid/gateway-agent/tree/main/plugins/gateway-kimi
+```
+
+### Verificar instalación
+
+```
+/plugins list
+```
+
+Debe listar `gateway-kimi` como instalado y habilitado.
+
+### Qué expone
+
+El skill `gateway-workflows` (`plugins/gateway-kimi/skills/gateway-workflows/SKILL.md`) documenta para Kimi Code los mismos subcomandos que Claude Code expone vía `/gateway:*` — `task`, `review`, `adversarial-review`, `staged-review`, `debate`, `dispatch`, `transfer`, `status`, `result`, `cancel`, `setup` — más las reglas de seguridad: no secretos en el prompt, `--prompt-file` para prompts largos, `--write` es el default real (usar `--no-write` explícito cuando corresponda, sabiendo que el harness kimi no lo soporta), no fallback silencioso entre harnesses. Kimi Code lo invoca manual vía `/skill:gateway-workflows` o automático cuando el modelo detecta que aplica (según `description`/`whenToUse` del `SKILL.md`).
 
 ## Configuración inicial
 
@@ -1098,7 +1128,7 @@ rm ~/.gateway-plugin/config.json
 
 MIT — ver [LICENSE](LICENSE).
 
-**Versión actual:** v0.6.4
+**Versión actual:** v0.6.5
 
 ## Créditos
 

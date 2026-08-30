@@ -1,0 +1,17 @@
+{
+  "name": "gateway-kimi",
+  "version": "0.6.5",
+  "description": "Delega tareas, reviews y debates a modelos configurados en el gateway (DeepSeek, GLM, Ollama, etc.) vía el CLI gateway-companion, sin MCP.",
+  "author": {
+    "name": "elmaxi"
+  },
+  "homepage": "https://github.com/elmaxid/gateway-agent",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Gateway Kimi",
+    "shortDescription": "Delegar tareas/review/debate al gateway multi-modelo",
+    "longDescription": "Expone el CLI gateway-companion (ya instalado en PATH) a Kimi Code: delega tareas, code review, debates y dispatch paralelo a modelos configurados en el gateway (DeepSeek, GLM, Ollama, otros endpoints OpenAI-compatibles). Sin servidor MCP: invoca el binario directo por shell.",
+    "developerName": "elmaxi"
+  }
+}

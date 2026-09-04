@@ -3,6 +3,7 @@ config.json
 *.log
 .DS_Store
 docs/superpowers/
+docs/releases/
 .claude/worktrees/
 .claude/settings.json
 .gateway-dispatch/

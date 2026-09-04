@@ -1060,6 +1060,21 @@ export async function executeReviewRun(request) {
   };
 }
 
+// A request carrying the diff inline is one large prompt, and a reasoning model
+// routinely spends minutes on it. The general per-request deadline is sized for
+// short calls, so an --include-diff run aborts on any real diff — which made
+// the documented "adversarial review before every commit" step impossible to
+// follow without discovering --timeout by trial and error. Give the inline
+// routes a deadline that matches what they actually do; an explicit --timeout
+// always wins.
+const INLINE_DIFF_TIMEOUT_MS = 600_000;
+
+export function resolveReviewTimeout(options) {
+  const explicit = validateTimeoutOption(options.timeout, "timeout");
+  if (explicit !== undefined) return explicit;
+  return options["include-diff"] ? INLINE_DIFF_TIMEOUT_MS : undefined;
+}
+
 async function handleReview(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["profile", "model", "base", "scope", "cwd", "timeout"],
@@ -1087,7 +1102,7 @@ async function handleReview(argv) {
     );
   }
 
-  const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
+  const timeoutMs = resolveReviewTimeout(options);
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -1213,7 +1228,7 @@ async function handleAdversarialReview(argv) {
     aliasMap: { m: "model", p: "profile" }
   });
 
-  const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
+  const timeoutMs = resolveReviewTimeout(options);
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -1294,10 +1309,15 @@ async function executeTaskRun(request) {
   const prompt = applyPersona(request.prompt, request.persona);
   const timeoutController = timeoutMs === undefined ? null : new AbortController();
   let timedOut = false;
+  // One source for this sentence: it reaches the user through the shaped
+  // failure below, and it is also the abort reason. Two literals would be free
+  // to drift, and the pair that disagreed would be the abort reason nobody
+  // reads and the message everybody does.
+  const timeoutMessage = `Gateway task timed out after ${timeoutMs} ms.`;
   const timeoutTimer = timeoutController
     ? setTimeout(() => {
       timedOut = true;
-      timeoutController.abort(new Error(`Gateway task timed out after ${timeoutMs} ms.`));
+      timeoutController.abort(new Error(timeoutMessage));
     }, timeoutMs)
     : null;
 
@@ -1353,7 +1373,7 @@ async function executeTaskRun(request) {
       rawJsonl,
       exitStatus: 1,
       write,
-      failureMessage: `Gateway task timed out after ${timeoutMs} ms.`
+      failureMessage: timeoutMessage
     });
   }
 
@@ -2071,7 +2091,7 @@ async function handleDebate(argv) {
     throw new Error("Provide a question or topic to debate.");
   }
 
-  const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
+  const timeoutMs = resolveReviewTimeout(options);
   if (options["max-concurrency"] !== undefined && (!Number.isInteger(Number(options["max-concurrency"])) || Number(options["max-concurrency"]) < 1)) {
     throw new Error(`Invalid --max-concurrency "${options["max-concurrency"]}". Expected an integer >= 1.`);
   }
@@ -2186,7 +2206,7 @@ async function handleStagedReview(argv) {
     aliasMap: { p: "profile", m: "model" }
   });
 
-  const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
+  const timeoutMs = resolveReviewTimeout(options);
 
   const description = positionals.join(" ").trim();
   const config = loadConfig();

@@ -139,7 +139,18 @@ async function withRetry(fn, externalSignal, { timeoutMs = REQUEST_TIMEOUT_MS } 
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Abort WITH a reason. Without one the runtime raises a bare "This
+    // operation was aborted", which is indistinguishable from a user
+    // cancellation and says nothing about what to do next — a caller sending a
+    // large inline payload (a diff, a whole file) hits this deadline routinely
+    // and has no way to learn that raising it is the fix. The name stays
+    // AbortError so existing non-retriable handling is unchanged.
+    const timer = setTimeout(() => controller.abort(
+      Object.assign(
+        new Error(`Request timed out after ${timeoutMs} ms — the model did not answer in time. Raise the deadline with --timeout <ms>; a large inline payload usually needs several minutes.`),
+        { name: "AbortError" }
+      )
+    ), timeoutMs);
 
     let onAbort;
     if (externalSignal) {

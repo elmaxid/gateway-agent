@@ -434,3 +434,64 @@ describe("CLI --timeout: staged-review (3 sequential HTTP calls)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// The default deadline for an inline-diff review.
+//
+// Sending the diff inside the prompt makes one large request, and a reasoning
+// model routinely spends minutes on it. The general per-request deadline is
+// sized for short calls, so before this every --include-diff run aborted on any
+// real diff — which made the project's own "run an adversarial review before
+// each commit" rule impossible to follow: it failed with a bare "This operation
+// was aborted" that named neither the cause nor the fix.
+// ---------------------------------------------------------------------------
+
+describe("resolveReviewTimeout: inline-diff runs get a deadline that fits them", () => {
+  it("raises the default when the diff travels inline, and never overrides an explicit --timeout", async () => {
+    const { resolveReviewTimeout } = await import("../plugins/gateway/scripts/gateway-companion.mjs");
+
+    // No inline diff: keep the shared default (undefined = whatever the API
+    // client uses). Raising it for every call would hide slow endpoints.
+    assert.strictEqual(resolveReviewTimeout({}), undefined);
+
+    // Inline diff and no explicit deadline: this is the case that used to abort.
+    const inlineDefault = resolveReviewTimeout({ "include-diff": true });
+    assert.ok(
+      typeof inlineDefault === "number" && inlineDefault >= 300_000,
+      `an inline-diff run needs minutes, got ${inlineDefault}`
+    );
+
+    // An explicit --timeout always wins, in both directions — including a value
+    // SHORTER than the inline default, which is how the tests above force a
+    // timeout on purpose.
+    assert.strictEqual(resolveReviewTimeout({ "include-diff": true, timeout: "1000" }), 1000);
+    assert.strictEqual(resolveReviewTimeout({ timeout: "1000" }), 1000);
+  });
+});
+
+describe("a timed-out request explains itself", () => {
+  it("names the deadline and the flag that raises it, instead of a bare abort", async () => {
+    const { chatCompletion } = await import("../plugins/gateway/scripts/lib/api-client.mjs");
+    const server = await startMockServer(() => { /* never responds */ });
+    try {
+      await assert.rejects(
+        () => chatCompletion(
+          { kind: "claude-gateway", baseUrl: `http://127.0.0.1:${server.port}`, apiKey: "k", defaultModel: "m" },
+          [{ role: "user", content: "hi" }],
+          { timeoutMs: 300 }
+        ),
+        (err) => {
+          // Still an AbortError, so non-retriable handling is unchanged.
+          assert.strictEqual(err.name, "AbortError");
+          // But it must say WHAT happened and HOW to fix it. A caller who only
+          // sees "aborted" has no way to learn that --timeout is the answer.
+          assert.match(err.message, /timed out/i);
+          assert.match(err.message, /--timeout/);
+          return true;
+        }
+      );
+    } finally {
+      await server.close();
+    }
+  });
+});

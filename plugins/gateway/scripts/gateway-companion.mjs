@@ -98,7 +98,7 @@ function printUsage() {
       "  gateway-companion review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--no-tools] [--json]",
       "  gateway-companion adversarial-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [focus]",
       "  gateway-companion staged-review [--profile NAME] [--model MODEL] [--base REF] [--scope auto|working-tree|branch] [--timeout MS] [--include-diff] [--json] [intent]",
-      "  gateway-companion task [--profile NAME] [--model MODEL] [--harness claude|codex|zero|kimi|cline] [--as PERSONA] [--background] [--write|--no-write] [--prompt-file FILE] [--resume JOB_ID] [prompt]",
+      "  gateway-companion task [--profile NAME] [--model MODEL] [--harness claude|codex|zero|kimi|cline] [--as PERSONA] [--background] [--write|--no-write] [--prompt-file FILE] [--resume JOB_ID] [--timeout MS] [prompt]",
   "                          --resume continues a prior completed job's codex/kimi session (see `setup doctor` for which harnesses support it)",
   `                          PERSONA: ${getValidPersonas().join("|")}`,
       "  gateway-companion task-worker --job-id ID [--profile NAME] [--model MODEL] [--harness claude|codex|zero|kimi|cline] [--write|--no-write] [prompt]",
@@ -1267,6 +1267,7 @@ async function executeTaskRun(request) {
   const profile = request.profile;
   const model = request.model || profile.defaultModel;
   const write = request.write !== false;
+  const timeoutMs = request.timeoutMs;
 
   request.onProgress?.({ message: `Delegating task to ${profile.name} (${model})...`, phase: "starting" });
 
@@ -1291,25 +1292,39 @@ async function executeTaskRun(request) {
     : harness === "cline" ? runClineTask
     : runClaudeTask;
   const prompt = applyPersona(request.prompt, request.persona);
+  const timeoutController = timeoutMs === undefined ? null : new AbortController();
+  let timedOut = false;
+  const timeoutTimer = timeoutController
+    ? setTimeout(() => {
+      timedOut = true;
+      timeoutController.abort(new Error(`Gateway task timed out after ${timeoutMs} ms.`));
+    }, timeoutMs)
+    : null;
 
-  const result = await taskRunner(profile, prompt, {
-    model,
-    write,
-    harness,
-    cwd: request.cwd,
-    resume: request.resume,
-    // Generic `resumeRef` (codex reads this) and `resumeSessionId` (kimi's
-    // own established option name) both carry the same value — harmless for
-    // whichever harness ignores the one it doesn't read.
-    resumeRef: request.resumeRef,
-    resumeSessionId: request.resumeRef,
-    onStdout: (line) => {
-      request.onProgress?.({ message: line, phase: "running" });
-    },
-    onStderr: (chunk) => {
-      request.onProgress?.({ stderrMessage: chunk.trim(), phase: "running" });
-    }
-  });
+  let result;
+  try {
+    result = await taskRunner(profile, prompt, {
+      model,
+      write,
+      harness,
+      cwd: request.cwd,
+      signal: timeoutController?.signal,
+      resume: request.resume,
+      // Generic `resumeRef` (codex reads this) and `resumeSessionId` (kimi's
+      // own established option name) both carry the same value — harmless for
+      // whichever harness ignores the one it doesn't read.
+      resumeRef: request.resumeRef,
+      resumeSessionId: request.resumeRef,
+      onStdout: (line) => {
+        request.onProgress?.({ message: line, phase: "running" });
+      },
+      onStderr: (chunk) => {
+        request.onProgress?.({ stderrMessage: chunk.trim(), phase: "running" });
+      }
+    });
+  } finally {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+  }
 
   const rawOutput = result.stdout || "";
   const rawStderr = result.stderr || "";
@@ -1327,6 +1342,19 @@ async function executeTaskRun(request) {
   } else if (harness === "cline") {
     const clineApiKey = getClineProviderApiKey(readClineConfig(getClineConfigPath()));
     if (clineApiKey) secrets = [...(request.secrets ?? []), clineApiKey];
+  }
+
+  if (timedOut) {
+    return shapeTaskFailure({
+      request: { ...request, secrets },
+      harness,
+      rawOutput,
+      rawStderr,
+      rawJsonl,
+      exitStatus: 1,
+      write,
+      failureMessage: `Gateway task timed out after ${timeoutMs} ms.`
+    });
   }
 
   if (exitStatus !== 0) {
@@ -1417,7 +1445,7 @@ export function chooseErrorCauseLine(rawStderr, rawOutput, fallback) {
 //  - exit status is preserved (non-zero).
 // The raw codex JSON stream (stdout) and backend catalog (stderr) are NEVER
 // echoed to an agent-visible surface.
-function shapeTaskFailure({ request, harness, model, profileName, rawOutput, rawStderr, rawJsonl, exitStatus, write }) {
+function shapeTaskFailure({ request, harness, model, profileName, rawOutput, rawStderr, rawJsonl, exitStatus, write, failureMessage }) {
   const secrets = request.secrets ?? [];
 
   // Once a harness normalizes its stdout to just the final message (zero,
@@ -1437,7 +1465,9 @@ function shapeTaskFailure({ request, harness, model, profileName, rawOutput, raw
   //    stderr, but the actual failure isn't reliably the FIRST line — a
   //    harness's own cosmetic/retry notices commonly print before it.
   let message;
-  if (harness === "codex") {
+  if (failureMessage) {
+    message = failureMessage;
+  } else if (harness === "codex") {
     message = extractCodexFailure(rawStdoutForLog) || `Codex task failed (exit ${exitStatus}). See log for details.`;
   } else {
     message = chooseErrorCauseLine(
@@ -1526,10 +1556,11 @@ function resolveTaskPersona(as, prompt) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["profile", "model", "cwd", "prompt-file", "harness", "as", "resume"],
+    valueOptions: ["profile", "model", "cwd", "prompt-file", "harness", "as", "resume", "timeout"],
     booleanOptions: ["json", "write", "no-write", "background"],
     aliasMap: { m: "model", p: "profile" }
   });
+  const timeoutMs = validateTimeoutOption(options.timeout, "timeout");
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -1724,7 +1755,8 @@ async function handleTask(argv) {
       persona,
       harness,
       resume: Boolean(options.resume),
-      resumeRef
+      resumeRef,
+      timeoutMs
     };
 
     // Transactional launch: persist status:"starting" WITH the request BEFORE
@@ -1794,6 +1826,7 @@ async function handleTask(argv) {
         harness,
         resume: Boolean(options.resume),
         resumeRef,
+        timeoutMs,
         persona: resolveTaskPersona(options.as, prompt),
         secrets: collectConfigSecrets(config),
         jobId: job.id,
@@ -1927,6 +1960,7 @@ async function handleTaskWorker(argv) {
         harness: request.harness,
         resume: Boolean(request.resume),
         resumeRef: request.resumeRef,
+        timeoutMs: request.timeoutMs,
         persona: request.persona,
         secrets: collectConfigSecrets(config),
         jobId: storedJob.id,

@@ -105,12 +105,12 @@ function makeFixtureRepo() {
  * ensureGitRepository/collectReviewContext). Never throws — captures a
  * failed/non-zero exit as a normal result so callers can assert on it.
  */
-async function runCli(args, tmpDir, cwd) {
+async function runCli(args, tmpDir, cwd, envOverrides = {}) {
   const start = Date.now();
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [COMPANION, ...args], {
       cwd,
-      env: { ...process.env, GATEWAY_PLUGIN_CONFIG_DIR: tmpDir },
+      env: { ...process.env, GATEWAY_PLUGIN_CONFIG_DIR: tmpDir, ...envOverrides },
       timeout: EXEC_TIMEOUT_MS,
     });
     return { code: 0, stdout, stderr, durationMs: Date.now() - start };
@@ -124,6 +124,131 @@ async function runCli(args, tmpDir, cwd) {
     };
   }
 }
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function waitForProcessExit(pid, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processExists(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`process ${pid} remained alive after ${timeoutMs}ms`);
+}
+
+async function waitForJobFailure(jobId, tmpDir, cwd, envOverrides, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await runCli(["status", jobId, "--all", "--json"], tmpDir, cwd, envOverrides);
+    if (result.code === 0) {
+      const snapshot = JSON.parse(result.stdout);
+      if (snapshot.job?.status === "failed") return snapshot.job;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`job ${jobId} did not fail within ${timeoutMs}ms`);
+}
+
+function writeHangingClaude(binDir, pidFile) {
+  const bin = path.join(binDir, "claude");
+  fs.writeFileSync(bin, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+fs.writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ parent: process.pid, child: child.pid }));
+setInterval(() => {}, 1000);
+`);
+  fs.chmodSync(bin, 0o755);
+}
+
+// ---------------------------------------------------------------------------
+// task --harness claude — subprocess timeout must kill the whole process tree
+// ---------------------------------------------------------------------------
+
+describe("CLI --timeout: task subprocess", () => {
+  it("fails loudly as timed out and leaves no harness process behind", async () => {
+    const tmpDir = makeTmpDir();
+    const repo = makeFixtureRepo();
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-cli-timeout-bin-"));
+    const pidFile = path.join(tmpDir, "harness-pids.json");
+    writeHangingClaude(binDir, pidFile);
+    writeConfigFixture(tmpDir, {
+      hanging: { kind: "claude-gateway", baseUrl: "http://127.0.0.1:1", defaultModel: "test-model" },
+    });
+
+    try {
+      const result = await runCli(
+        ["task", "--profile", "hanging", "--harness", "claude", "--timeout", "300", "hang forever"],
+        tmpDir,
+        repo.dir,
+        { PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}` }
+      );
+
+      assert.notStrictEqual(result.code, 0, `expected task to fail, got exit 0. stdout: ${result.stdout}`);
+      assert.ok(!result.killed, "expected the CLI's own --timeout to fire, not the execFileAsync backstop");
+      assert.match(`${result.stdout}\n${result.stderr}`, /timed out/i);
+      assert.ok(fs.existsSync(pidFile), "expected the fake harness to start before the timeout fired");
+
+      const pids = JSON.parse(fs.readFileSync(pidFile, "utf8"));
+      await waitForProcessExit(pids.parent);
+      await waitForProcessExit(pids.child);
+    } finally {
+      fs.rmSync(binDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      repo.cleanup();
+    }
+  });
+
+  it("fails the stored background job as timed out and leaves no harness process behind", async () => {
+    const tmpDir = makeTmpDir();
+    const repo = makeFixtureRepo();
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-cli-timeout-bg-bin-"));
+    const pidFile = path.join(tmpDir, "background-harness-pids.json");
+    const dataDir = path.join(tmpDir, "plugin-data");
+    fs.mkdirSync(dataDir);
+    writeHangingClaude(binDir, pidFile);
+    writeConfigFixture(tmpDir, {
+      hanging: { kind: "claude-gateway", baseUrl: "http://127.0.0.1:1", defaultModel: "test-model" },
+    });
+    const envOverrides = {
+      CLAUDE_PLUGIN_DATA: dataDir,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`
+    };
+
+    try {
+      const queued = await runCli(
+        ["task", "--profile", "hanging", "--harness", "claude", "--timeout", "300", "--background", "--json", "hang forever"],
+        tmpDir,
+        repo.dir,
+        envOverrides
+      );
+
+      assert.strictEqual(queued.code, 0, `expected background task to queue. stderr: ${queued.stderr}`);
+      const queuedPayload = JSON.parse(queued.stdout);
+      const job = await waitForJobFailure(queuedPayload.jobId, tmpDir, repo.dir, envOverrides);
+      assert.match(`${job.errorMessage}\n${job.summary ?? ""}`, /timed out/i);
+      assert.equal(job.status, "failed");
+      assert.equal(job.pid ?? null, null);
+      assert.ok(fs.existsSync(pidFile), "expected the fake harness to start before the timeout fired");
+
+      const pids = JSON.parse(fs.readFileSync(pidFile, "utf8"));
+      await waitForProcessExit(pids.parent);
+      await waitForProcessExit(pids.child);
+    } finally {
+      fs.rmSync(binDir, { recursive: true, force: true });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      repo.cleanup();
+    }
+  });
+});
 
 // ---------------------------------------------------------------------------
 // review --no-tools — single HTTP call (the only one this code path makes)

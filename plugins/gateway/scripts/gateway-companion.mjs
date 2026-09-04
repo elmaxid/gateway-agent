@@ -1334,7 +1334,7 @@ async function executeTaskRun(request) {
     // contract): a redacted one-line message on the agent-visible surfaces and a
     // 0600 log holding the COMPLETE raw material — never the raw codex JSON
     // stream or the backend catalog on an agent-visible stream.
-    return shapeTaskFailure({ request: { ...request, secrets }, harness, rawOutput, rawStderr, rawJsonl, exitStatus, write });
+    return shapeTaskFailure({ request: { ...request, secrets }, harness, model, profileName: profile.name ?? null, rawOutput, rawStderr, rawJsonl, exitStatus, write });
   }
 
   // Success: return the model output verbatim (unchanged behavior). Harness
@@ -1352,7 +1352,12 @@ async function executeTaskRun(request) {
     payload: {
       status: "completed",
       rawOutput,
-      stderr: failureMessage
+      stderr: failureMessage,
+      // B2: the id of the job this run created, so a caller can resume it
+      // directly instead of guessing "the most recent one" from the registry —
+      // a guess that breaks under concurrency. Additive: the human output is
+      // untouched, only the --json shape gains a field.
+      jobId: request.jobId ?? null
     },
     rendered,
     summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, "Task finished.")),
@@ -1360,6 +1365,12 @@ async function executeTaskRun(request) {
     jobClass: "task",
     write,
     harness,
+    // B1: the model that ACTUALLY ran this turn — the explicit override if one
+    // was given, otherwise the profile's configured default (resolved at the
+    // top of this function). Persisted by runTrackedJob so `status`/`result`
+    // can attribute a run to a model instead of re-deriving it from a profile
+    // default that may have changed since.
+    model,
     profileName: profile.name ?? null,
     continuationRef: extractContinuationRef(harness, rawJsonl),
     continuationCwd: request.cwd ?? null
@@ -1406,7 +1417,7 @@ export function chooseErrorCauseLine(rawStderr, rawOutput, fallback) {
 //  - exit status is preserved (non-zero).
 // The raw codex JSON stream (stdout) and backend catalog (stderr) are NEVER
 // echoed to an agent-visible surface.
-function shapeTaskFailure({ request, harness, rawOutput, rawStderr, rawJsonl, exitStatus, write }) {
+function shapeTaskFailure({ request, harness, model, profileName, rawOutput, rawStderr, rawJsonl, exitStatus, write }) {
   const secrets = request.secrets ?? [];
 
   // Once a harness normalizes its stdout to just the final message (zero,
@@ -1464,12 +1475,23 @@ function shapeTaskFailure({ request, harness, rawOutput, rawStderr, rawJsonl, ex
       status: "failed",
       rawOutput: "",
       stderr: structured.userMessage,
-      localLogPath: structured.localLogPath
+      localLogPath: structured.localLogPath,
+      // Same reason as the success path: a failed run still creates a job
+      // record, and reading it back is exactly what a caller does to find out
+      // WHY it failed. Without the id here it has to scan the registry for
+      // "the newest one" — the guess B2 exists to remove.
+      jobId: request.jobId ?? null
     },
     rendered,
     summary: structured.userMessage,
     jobTitle: request.jobTitle ?? "Gateway Task",
     jobClass: "task",
+    // A failed run is exactly when "which model ran this?" matters most — it is
+    // what tells you whether to retry with a different one. Without these the
+    // record is indistinguishable from a job predating model attribution.
+    model: model ?? null,
+    harness,
+    profileName: profileName ?? null,
     write
   };
 }

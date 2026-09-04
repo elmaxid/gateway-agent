@@ -55,6 +55,7 @@ All three take `--profile`, `--base`, `--scope auto\|branch\|working-tree`, `--j
 |---|---|---|
 | `Skill(gateway:spec-plan)` | Research → spec → plan: forcing intake, decomposition, deterministic source priority, optional multi-model review of the draft | Before any code exists — the question, the spec, or the plan is what's missing |
 | `Skill(gateway:implement-plan)` | Executes a written plan: split & route per task, implement, multi-model review fan-out, opus arbiter verifies findings, then fix | A plan file already exists and needs executing across backend/frontend |
+| `Skill(gateway:prewalk)` | Two-turn implementation handoff: a strong model explores, writes a checklist and lands the first edit on a codex thread, then a cheaper model resumes the full trajectory and finishes | One bounded implementation task with a stable plan whose opener and finisher benefit from different model strengths |
 | `Skill(gateway:pick-tool)` | This map | You are here |
 
 `spec-plan` and `implement-plan` are a sequence, not alternatives: `spec-plan` ends by naming the plan file and handing off (`next: implement-plan on <file>`); `implement-plan` starts from that file. Never use `implement-plan` to write the plan, never use `spec-plan` to change code.
@@ -99,6 +100,7 @@ Interactive model picker (browse every model an endpoint offers, pick several by
 - **`task` vs `dispatch`** — one task versus many in parallel. A single task through `dispatch` is overhead for nothing.
 - **`task-review` vs `dispatch --cross-review`** — same idea (implement, then review with another model) at one-task versus many-task scale.
 - **`/gateway:review` vs `Agent(gateway:gateway-reviewer)`** — same job, different shape: a command run whose output you read, versus a subagent that keeps the review out of your context.
+- **`prewalk` vs one-model delegation vs `implement-plan`** — `prewalk` opens one bounded implementation task with a strong model and finishes it with a cheaper model on the same resumed codex thread; use one-model delegation when the whole task fits one run, and `implement-plan` when a written plan needs task splitting and multi-model review.
 - **`implement-plan` vs `dispatch`** — `implement-plan` is the full discipline (route, implement, multi-model review, arbiter, fix). `dispatch` is the parallel execution mechanism `implement-plan` can use. Plan with real review needs → the skill; raw parallel throughput → the command.
 - **`spec-plan` vs `Agent(gateway:research-planner)`** — the skill adds intake, decomposition, source priority and an optional review phase around the agent. Small, already-specific question → the agent alone.
 - **`debate` vs `adversarial-review`** — debate argues a *decision*; adversarial-review critiques *code that already exists*.

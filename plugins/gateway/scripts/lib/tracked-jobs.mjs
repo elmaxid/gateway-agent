@@ -183,6 +183,11 @@ export async function runTrackedJob(job, runner, options = {}) {
       threadId: execution.threadId ?? null,
       turnId: execution.turnId ?? null,
       harness: execution.harness ?? null,
+      // B1: the model that actually ran. Only the task path supplies it today
+      // (on both its success and failure returns); every other job class
+      // records null, which the renderer already treats as "no model line"
+      // (same as a record predating this field).
+      model: execution.model ?? null,
       profileName: execution.profileName ?? null,
       continuationRef: execution.continuationRef ?? null,
       continuationCwd: execution.continuationCwd ?? null,
@@ -198,6 +203,7 @@ export async function runTrackedJob(job, runner, options = {}) {
       threadId: execution.threadId ?? null,
       turnId: execution.turnId ?? null,
       harness: execution.harness ?? null,
+      model: execution.model ?? null,
       profileName: execution.profileName ?? null,
       continuationRef: execution.continuationRef ?? null,
       continuationCwd: execution.continuationCwd ?? null,

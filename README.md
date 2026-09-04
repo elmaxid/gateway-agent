@@ -875,6 +875,7 @@ Los nombres son exactos — sin prefijos adicionales.
 │   │   ├── gateway-prompt-shaper/SKILL.md # Enriquecimiento de prompts por dominio para agentes gateway-coder/debugger/reviewer/researcher
 │   │   ├── spec-plan/SKILL.md           # Fase research→spec→plan: intake forzado, decompose, prioridad de fuente
 │   │   ├── implement-plan/SKILL.md      # Fase de ejecución: split&route por modelo/persona, review multi-modelo, árbitro
+│   │   ├── prewalk/SKILL.md             # Handoff en dos turnos: modelo fuerte abre y modelo barato retoma el mismo thread
 │   │   └── pick-tool/SKILL.md           # Router: mapa de comandos/agentes/skills/personas y cuál usar para qué
 │   └── scripts/
 │       ├── gateway-companion.mjs        # CLI principal (~1000 líneas)
@@ -923,18 +924,19 @@ Los nombres son exactos — sin prefijos adicionales.
     └── integration.test.mjs         # Live gateway — connectivity, review, task (claude+codex)
 ```
 
-## Skills: pick-tool + spec-plan + implement-plan
+## Skills: pick-tool + spec-plan + implement-plan + prewalk
 
-Tres skills que se instalan con el plugin (`plugins/gateway/skills/`, `plugins/gateway/agents/research-planner.md`) — disponibles en cualquier proyecto donde tengas el plugin instalado, no son específicos de este repo.
+Cuatro skills que se instalan con el plugin (`plugins/gateway/skills/`, `plugins/gateway/agents/research-planner.md`) — disponibles en cualquier proyecto donde tengas el plugin instalado, no son específicos de este repo.
 
 - **`pick-tool`** (skill) — router de todo lo que el plugin expone: tabla por categoría (review, delegación, orquestación multi-modelo, planning, jobs/setup) con qué hace cada comando/agente/skill/persona y cuándo elegirlo en vez de su alternativa más parecida (`review` vs `adversarial-review` vs `staged-review`, `task` vs `dispatch`, `spec-plan` vs `implement-plan`, …). Read-only: no corre modelos, solo decide el punto de entrada. Útil sobre todo recién instalado el plugin.
 - **`research-planner`** (agent) — investigación/spec/plan, modelo Opus fijo, read-only (nunca `Edit`). Nunca implementa, solo escribe prosa (specs, planes, findings).
 - **`spec-plan`** (skill) — fase research → spec → plan. Envuelve a `research-planner` con: intake forzado (pregunta específica, profundidad del entregable, override de modelo/agente si el prompt lo pide), descomposición en 3-5 sub-preguntas antes de buscar, prioridad de fuente determinística (graph/MCP de código si está disponible → context7 si está disponible → web), y revisión multi-modelo opcional del spec/plan (mismo patrón reviewer+árbitro que `implement-plan`, solo si se pide explícito).
 - **`implement-plan`** (skill) — fase de ejecución de un plan ya escrito. Divide el plan en tareas, rutea cada una a modelo+persona (backend: Claude nativo sonnet/opus, persona `octo:personas:*` si está disponible; frontend: el perfil de gateway configurado en esa instalación — nunca un nombre fijo, se descubre con `setup list`), corre un review multi-modelo (fan-out a los perfiles que estén configurados, tolera los que fallen, + 1 reviewer nativo), y un árbitro dedicado (opus) valida cada hallazgo contra el código real antes de aplicar cualquier fix.
+- **`prewalk`** (skill) — transferencia de trayectoria en dos turnos para una tarea acotada de implementación: un modelo fuerte explora, escribe un checklist y aplica el primer cambio en un thread de codex; después, un modelo más barato retoma el mismo thread con todo ese historial y completa el trabajo. No sirve para refactors de arquitectura, migraciones, debugging iterativo ni tareas pequeñas.
 
 Ni las personas `octo:personas:*` ni un MCP de graph/docs (`code-review-graph`, `context7`) son dependencias duras — si no están instaladas en tu puesto, ambos skills degradan a juicio simple sin persona/tier extra en vez de fallar.
 
-Orden de uso: `spec-plan` primero (investiga y escribe el plan), `implement-plan` lo ejecuta después. `pick-tool` es transversal: se usa cuando no sabés cuál de los tres (o cuál comando/agente) corresponde.
+Orden de uso: `spec-plan` primero (investiga y escribe el plan), `implement-plan` lo ejecuta después. `pick-tool` es transversal: se usa cuando no sabés cuál de los cuatro (o cuál comando/agente) corresponde.
 
 ### Cómo se usan
 

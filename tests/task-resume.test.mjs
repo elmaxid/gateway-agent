@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { upsertJob } from "../plugins/gateway/scripts/lib/state.mjs";
+import { listJobs, upsertJob, writeJobFile } from "../plugins/gateway/scripts/lib/state.mjs";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -39,6 +39,10 @@ function makeFixture() {
         // default happens to be (which is deliberately "stale" by default so
         // a silent leak toward it would be caught).
         stale: { kind: "claude-gateway", baseUrl: "http://127.0.0.1:2", defaultModel: "m" },
+        // A profile whose default model is DISTINCT from every other one here,
+        // so "recorded the profile's configured model" cannot pass by accident
+        // (task B1 tests below).
+        modelled: { kind: "claude-gateway", baseUrl: "http://127.0.0.1:3", defaultModel: "profile-default-model" },
       },
       defaultProfile: "stale",
       reviewProfile: null,
@@ -392,6 +396,309 @@ process.stdin.on("end", () => {
         }
       );
       assert.match(stdout, /RESUMED:/);
+    } finally {
+      fs.rmSync(fakeDir, { recursive: true, force: true });
+      cleanupFixture(fx);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task B1 (prewalk plan): the job record persists the model that ACTUALLY ran.
+// Before this, no job class recorded it, so attributing a finished run to a
+// model meant re-reading the profile's CURRENT default -- which changes, and
+// which is wrong the moment a run used --model or a resumed turn swapped it.
+// Same fake-codex pattern as the resume tests above: no network, no real model.
+// ---------------------------------------------------------------------------
+describe("task: persists the model that actually ran (B1)", () => {
+  // Answers both a fresh `exec` and an `exec resume`, with a fixed final
+  // message -- these tests assert on the persisted record, not on args.
+  function writeFakeCodexAnyMode(dir) {
+    const bin = path.join(dir, "codex");
+    const script = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes("--version")) { process.stdout.write("codex-cli 0.0.0-fake\\n"); process.exit(0); }
+let buf = "";
+process.stdin.on("data", (c) => { buf += c; });
+process.stdin.on("end", () => {
+  const lines = [
+    JSON.stringify({ type: "thread.started", thread_id: "thread-fake" }),
+    JSON.stringify({ type: "turn.started" }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "FAKE OUTPUT" } }),
+    JSON.stringify({ type: "turn.completed" }),
+  ].join("\\n") + "\\n";
+  process.stdout.write(lines, () => process.exit(0));
+});
+`;
+    fs.writeFileSync(bin, script);
+    fs.chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  async function runCompanion(fx, args) {
+    const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-fake-model-"));
+    writeFakeCodexAnyMode(fakeDir);
+    try {
+      return await execFileAsync(process.execPath, [COMPANION, ...args], {
+        timeout: 15000,
+        env: {
+          ...process.env,
+          GATEWAY_PLUGIN_CONFIG_DIR: fx.configDir,
+          CLAUDE_PLUGIN_DATA: fx.dataDir,
+          PATH: [fakeDir, NODE_BIN_DIR, process.env.PATH ?? ""].filter(Boolean).join(path.delimiter),
+        },
+      });
+    } finally {
+      fs.rmSync(fakeDir, { recursive: true, force: true });
+    }
+  }
+
+  function withDataDir(fx, fn) {
+    const prev = process.env.CLAUDE_PLUGIN_DATA;
+    process.env.CLAUDE_PLUGIN_DATA = fx.dataDir;
+    try {
+      return fn();
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+      else process.env.CLAUDE_PLUGIN_DATA = prev;
+    }
+  }
+
+  // The job the run under test created: anything that is not a seeded source job.
+  function runJobRecord(fx) {
+    return withDataDir(fx, () => listJobs(fx.workspaceRoot).find((j) => j.id !== "job-resume-src") ?? null);
+  }
+
+  function jobRecordById(fx, id) {
+    return withDataDir(fx, () => listJobs(fx.workspaceRoot).find((j) => j.id === id) ?? null);
+  }
+
+  // The background path: `task --background` spawns a detached `task-worker`
+  // that reads this stored request. Driving the worker directly exercises the
+  // same code without depending on process detachment.
+  function seedWorkerJob(fx, jobId, request) {
+    withDataDir(fx, () => {
+      const rec = {
+        id: jobId,
+        kind: "task",
+        jobClass: "task",
+        title: "Gateway Task",
+        workspaceRoot: fx.workspaceRoot,
+        status: "queued",
+        phase: "queued",
+        logFile: null,
+        write: request.write !== false,
+        request,
+      };
+      writeJobFile(fx.workspaceRoot, jobId, rec);
+      upsertJob(fx.workspaceRoot, rec);
+    });
+  }
+
+  it("foreground, no --model: records the profile's configured model, in state (human + JSON) and result", async () => {
+    const fx = makeFixture();
+    try {
+      await runCompanion(fx, ["task", "--cwd", fx.workspaceRoot, "--harness", "codex", "--profile", "modelled", "hello"]);
+
+      const job = runJobRecord(fx);
+      assert.ok(job, "the run should have created a job record");
+      assert.equal(job.model, "profile-default-model");
+
+      const { stdout: humanStatus } = await runCompanion(fx, ["status", job.id, "--cwd", fx.workspaceRoot]);
+      assert.match(humanStatus, /Model: profile-default-model/);
+
+      const { stdout: jsonStatus } = await runCompanion(fx, ["status", job.id, "--cwd", fx.workspaceRoot, "--json"]);
+      assert.equal(JSON.parse(jsonStatus).job.model, "profile-default-model");
+
+      const { stdout: jsonResult } = await runCompanion(fx, ["result", job.id, "--cwd", fx.workspaceRoot, "--json"]);
+      const parsedResult = JSON.parse(jsonResult);
+      assert.equal(parsedResult.job.model, "profile-default-model");
+      assert.equal(parsedResult.storedJob.model, "profile-default-model");
+    } finally {
+      cleanupFixture(fx);
+    }
+  });
+
+  it("foreground with an explicit --model: records the override, not the profile default", async () => {
+    const fx = makeFixture();
+    try {
+      await runCompanion(fx, [
+        "task", "--cwd", fx.workspaceRoot, "--harness", "codex", "--profile", "modelled",
+        "--model", "override-model", "hello",
+      ]);
+      const job = runJobRecord(fx);
+      assert.equal(job.model, "override-model");
+    } finally {
+      cleanupFixture(fx);
+    }
+  });
+
+  // The prewalk case: turn 2 resumes turn 1's session with a DIFFERENT model.
+  // Recording the source job's model here would make the swap invisible --
+  // which is the one thing this field exists to prove.
+  it("foreground --resume: records the model of THAT turn, not the source job's", async () => {
+    const fx = makeFixture();
+    seedJob(fx, { model: "turn1-model" });
+    try {
+      await runCompanion(fx, [
+        "task", "--cwd", fx.workspaceRoot, "--resume", "job-resume-src", "--harness", "codex",
+        "--model", "turn2-model", "keep going",
+      ]);
+      const job = runJobRecord(fx);
+      assert.equal(job.model, "turn2-model");
+      // The source job's own record is untouched by the resume.
+      assert.equal(jobRecordById(fx, "job-resume-src").model, "turn1-model");
+    } finally {
+      cleanupFixture(fx);
+    }
+  });
+
+  it("background worker, no model in the stored request: records the profile's configured model", async () => {
+    const fx = makeFixture();
+    seedWorkerJob(fx, "job-bg-default", {
+      cwd: fx.workspaceRoot, profile: "modelled", write: true, prompt: "hello", harness: "codex",
+    });
+    try {
+      await runCompanion(fx, ["task-worker", "--cwd", fx.workspaceRoot, "--job-id", "job-bg-default"]);
+      assert.equal(jobRecordById(fx, "job-bg-default").model, "profile-default-model");
+    } finally {
+      cleanupFixture(fx);
+    }
+  });
+
+  it("background worker with an explicit model in the stored request: records the override", async () => {
+    const fx = makeFixture();
+    seedWorkerJob(fx, "job-bg-override", {
+      cwd: fx.workspaceRoot, profile: "modelled", write: true, prompt: "hello", harness: "codex",
+      model: "bg-override-model",
+    });
+    try {
+      await runCompanion(fx, ["task-worker", "--cwd", fx.workspaceRoot, "--job-id", "job-bg-override"]);
+      assert.equal(jobRecordById(fx, "job-bg-override").model, "bg-override-model");
+    } finally {
+      cleanupFixture(fx);
+    }
+  });
+
+  it("background worker resuming a session: records the model of that turn", async () => {
+    const fx = makeFixture();
+    seedJob(fx, { model: "turn1-model" });
+    seedWorkerJob(fx, "job-bg-resume", {
+      cwd: fx.workspaceRoot, profile: "good", write: true, prompt: "keep going", harness: "codex",
+      resume: true, resumeRef: "thread-abc-123", model: "bg-turn2-model",
+    });
+    try {
+      await runCompanion(fx, ["task-worker", "--cwd", fx.workspaceRoot, "--job-id", "job-bg-resume"]);
+      assert.equal(jobRecordById(fx, "job-bg-resume").model, "bg-turn2-model");
+      assert.equal(jobRecordById(fx, "job-resume-src").model, "turn1-model");
+    } finally {
+      cleanupFixture(fx);
+    }
+  });
+
+  // The task's human output is the model's output verbatim, and flows pipe it
+  // elsewhere -- the model belongs in the job record, never in this stream.
+  it("a task's human output stays byte-identical: no model metadata added", async () => {
+    const fx = makeFixture();
+    try {
+      const { stdout } = await runCompanion(fx, [
+        "task", "--cwd", fx.workspaceRoot, "--harness", "codex", "--profile", "modelled",
+        "--model", "override-model", "hello",
+      ]);
+      assert.equal(stdout, "FAKE OUTPUT\n");
+    } finally {
+      cleanupFixture(fx);
+    }
+  });
+
+  // Task B2: the structured (--json) foreground result must carry the id of the
+  // job it just created, so a caller can resume it without hunting the registry.
+  it("foreground --json result includes the job id, which resolves in the registry", async () => {
+    const fx = makeFixture();
+    try {
+      const { stdout } = await runCompanion(fx, [
+        "task", "--cwd", fx.workspaceRoot, "--harness", "codex", "--profile", "modelled", "--json", "hello",
+      ]);
+      const parsed = JSON.parse(stdout);
+      assert.equal(typeof parsed.jobId, "string");
+      assert.ok(parsed.jobId.length > 0, "jobId should be non-empty");
+      // The returned id resolves unambiguously against the job registry.
+      assert.equal(jobRecordById(fx, parsed.jobId)?.id, parsed.jobId);
+    } finally {
+      cleanupFixture(fx);
+    }
+  });
+
+  // A job recorded before this field existed simply has no model. Reads must
+  // work and the model line must be absent -- never invented, never "unknown".
+  it("a job record predating this field reads fine and shows no model line", async () => {
+    const fx = makeFixture();
+    seedJob(fx, {});
+    try {
+      const { stdout: human } = await runCompanion(fx, ["status", "job-resume-src", "--cwd", fx.workspaceRoot]);
+      assert.match(human, /job-resume-src/);
+      assert.doesNotMatch(human, /Model:/);
+
+      const { stdout: json } = await runCompanion(fx, ["status", "job-resume-src", "--cwd", fx.workspaceRoot, "--json"]);
+      assert.equal(JSON.parse(json).job.model, undefined);
+    } finally {
+      cleanupFixture(fx);
+    }
+  });
+
+  // A FAILED run is exactly when "which model ran this?" matters most: it is
+  // what tells you whether retrying with a different model is worth it. If the
+  // failure path stops carrying the attribution, a failed job becomes
+  // indistinguishable from one predating the field (the case asserted above),
+  // and the only signal left is a log file nobody correlates.
+  it("a failed run still records the model, harness and profile that ran it", async () => {
+    const fx = makeFixture();
+    const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-fake-fail-"));
+    const bin = path.join(fakeDir, "codex");
+    fs.writeFileSync(bin, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes("--version")) { process.stdout.write("codex-cli 0.0.0-fake\\n"); process.exit(0); }
+process.stdin.on("data", () => {});
+process.stdin.on("end", () => {
+  const lines = [
+    JSON.stringify({ type: "thread.started", thread_id: "thread-fake-fail" }),
+    JSON.stringify({ type: "turn.started" }),
+    JSON.stringify({ type: "turn.failed", error: { message: "fake harness failure" } }),
+  ].join("\\n") + "\\n";
+  process.stdout.write(lines, () => process.exit(1));
+});
+`);
+    fs.chmodSync(bin, 0o755);
+    try {
+      // The CLI exits non-zero on a failed task, which execFile surfaces as a
+      // rejection — the failure IS the scenario under test, so capture the
+      // rejection and assert on what it carried plus the persisted record.
+      const failure = await execFileAsync(process.execPath, [
+        COMPANION, "task", "--cwd", fx.workspaceRoot, "--harness", "codex", "--profile", "modelled", "--json", "hello",
+      ], {
+        timeout: 15000,
+        env: {
+          ...process.env,
+          GATEWAY_PLUGIN_CONFIG_DIR: fx.configDir,
+          CLAUDE_PLUGIN_DATA: fx.dataDir,
+          PATH: [fakeDir, NODE_BIN_DIR, process.env.PATH ?? ""].filter(Boolean).join(path.delimiter),
+        },
+      }).catch((err) => err);
+
+      const job = runJobRecord(fx);
+      assert.ok(job, "a failed run must still leave a job record");
+      assert.equal(job.status, "failed");
+      assert.equal(job.model, "profile-default-model");
+      assert.equal(job.harness, "codex");
+      assert.equal(job.profileName, "modelled");
+
+      // The failure payload must carry the job id for the same reason the
+      // success one does: reading the record back is precisely what a caller
+      // does after a failure. Without it, finding the job means scanning the
+      // registry for the newest entry — the guess this field removes.
+      const payload = JSON.parse(failure.stdout);
+      assert.equal(payload.status, "failed");
+      assert.equal(payload.jobId, job.id);
     } finally {
       fs.rmSync(fakeDir, { recursive: true, force: true });
       cleanupFixture(fx);

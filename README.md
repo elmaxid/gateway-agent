@@ -431,7 +431,7 @@ Review del diff actual usando el LLM configurado.
   - `branch`: diff desde merge-base contra rama principal
 - `--no-tools` — desactiva el loop agentic; usa HTTP directo con diff pre-inyectado en el prompt (más rápido, menos contexto)
 - `--include-diff` — fuerza inclusión del diff completo en el contexto pre-inyectado. **Requiere `--no-tools`**: el modo agentic por defecto arma su propio contexto vía tools y nunca lee este flag, así que `review --include-diff` sin `--no-tools` es un error (exit 2), no un no-op silencioso.
-- `--timeout MS` — timeout HTTP por request en milisegundos (default: 60000). Útil con modelos lentos (ej. deepseek-v4-pro). En modo `--no-tools` es 1 request; en modo agentic default puede ser hasta `maxIterations` requests, cada una bounded por este valor (el deadline interno del loop escala como `max(120000, timeout × 2)`, worst-case wall-clock ≈ deadline + hasta 4×timeout). Si el modelo devuelve output que no tiene forma de review válida (no-JSON, o JSON sin verdict/summary/findings) dos veces seguidas en el mismo turno terminal, la review reintenta automáticamente una vez por punto de fallo; si persiste, falla explícito (`exitStatus` no-cero, render dice "FAILED") en vez de renderizar el garbage como si fuera un review real.
+- `--timeout MS` — timeout HTTP por request en milisegundos. Default: 60000, salvo cuando pasás `--include-diff`, que sube a 600000 — mandar el diff dentro del prompt es una sola llamada grande y un modelo de razonamiento tarda minutos en contestarla, así que con el default corto abortaba siempre. Un `--timeout` explícito gana sobre ambos, también para bajarlo. Si un request expira, el error dice el plazo que venció y sugiere este flag, en vez del `This operation was aborted` que no explicaba nada. Útil con modelos lentos (ej. deepseek-v4-pro). En modo `--no-tools` es 1 request; en modo agentic default puede ser hasta `maxIterations` requests, cada una bounded por este valor (el deadline interno del loop escala como `max(120000, timeout × 2)`, worst-case wall-clock ≈ deadline + hasta 4×timeout). Si el modelo devuelve output que no tiene forma de review válida (no-JSON, o JSON sin verdict/summary/findings) dos veces seguidas en el mismo turno terminal, la review reintenta automáticamente una vez por punto de fallo; si persiste, falla explícito (`exitStatus` no-cero, render dice "FAILED") en vez de renderizar el garbage como si fuera un review real.
 - `--json` — output estructurado JSON
 
 **Modos de review:**
@@ -476,7 +476,7 @@ Review de 2 fases: Fase 1 evalúa spec compliance (¿el código hace lo que dice
 - `--base REF` — ref base para el diff
 - `--scope auto|working-tree|branch` — qué diff revisar
 - `--include-diff` — incluye el diff completo en el contexto
-- `--timeout MS` — timeout HTTP por request en milisegundos (default: 60000). Hace 3 requests secuenciales (fase 1 + review + filtro adversarial), peor caso ≈3×`--timeout` con modelos lentos
+- `--timeout MS` — timeout HTTP por request en milisegundos (default: 60000; con `--include-diff`, 600000). Hace 3 requests secuenciales (fase 1 + review + filtro adversarial), peor caso ≈3×`--timeout` con modelos lentos
 - `--json` — output estructurado JSON con `{ phase1, phase2, meta }`
 - Texto libre después de los flags → descripción del intent (se inyecta como contexto de la Fase 1)
 
@@ -523,6 +523,9 @@ Delega una tarea al LLM via subprocess. Soporta 5 harnesses (claude, codex, zero
 - `--as PERSONA` — inyecta system prompt de una persona antes de la tarea (`reviewer`, `debugger`, `security`, `researcher`, `coder`). Si no se especifica, se intenta auto-match: el prompt se compara contra `activation_keywords` de cada persona y se selecciona la de mayor score (vía `matchPersona()`). Usar `--as` explícito para forzar una persona concreta.
 - `--write` — permite escritura de archivos (default)
 - `--no-write` — modo lectura, sin edits
+- `--prompt-file FILE` — lee el prompt de un archivo en vez de la línea de comandos
+- `--resume JOB_ID` — continúa la sesión de un job previo ya completado (codex/kimi). Hereda perfil y harness del job original; sólo se puede cambiar el `--model`
+- `--timeout MS` — corta la tarea si supera ese plazo: termina el árbol de procesos del harness y la marca como fallada por timeout, nunca como completada
 
 **Foreground:** Stream del output del subprocess en tiempo real.
 
@@ -914,7 +917,7 @@ Los nombres son exactos — sin prefijos adicionales.
     ├── agentic-review.test.mjs      # timeoutMs threading + retry-on-malformed-output + validación de forma en runToolLoop/forceFinish — unit (8 tests)
     ├── agentic-review-malformed-output.test.mjs # exitStatus/render de fallo end-to-end cuando el modelo devuelve garbage — unit (2 tests)
     ├── agentic-review-maxtime.test.mjs # maxTime scaling del loop agentic (max(120000, timeout×2)) — unit (1 test)
-    ├── cli-timeout.test.mjs         # --timeout end-to-end vía CLI real, mocks HTTP stateful — unit (6 tests)
+    ├── cli-timeout.test.mjs         # --timeout end-to-end vía CLI real, mocks HTTP stateful — unit (10 tests)
     ├── claude-subprocess.test.mjs   # Subprocess env + auth + capture completeness (close, no exit) — unit (10 tests)
     ├── codex-harness.test.mjs       # Codex env + auth + failure extraction + capture completeness — unit (15 tests)
     ├── config.test.mjs              # Profile CRUD — unit (13 tests)
@@ -973,7 +976,7 @@ Si en el paso 1 el pedido amerita revisión multi-modelo del spec en sí (decisi
 ```bash
 cd /path/to/agent-plugin-cc
 
-# Suite completa — los 40 archivos tests/*.test.mjs (704 tests).
+# Suite completa — los 40 archivos tests/*.test.mjs (720 tests).
 node --test tests/*.test.mjs
 
 # Nota: integration.test.mjs (9 tests) requiere un gateway activo y alcanzable;
